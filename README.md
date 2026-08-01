@@ -1,11 +1,12 @@
-# HandShaker Protocol
+# HandShaker_Rust
 
 HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件传输与设备管理工具。本仓库用于整理现有逆向资料，逐步编写通信协议文档，并为后续开发兼容原版 HandShaker 的跨平台 Rust 后端建立基础。
 
 ## 项目目标
 
 1. 基于现有逆向文件，解析并完整记录 HandShaker 通信协议。
-2. 实现现代化、可复用的通用跨平台 Rust 后端，使其能够与原版 HandShaker 互通，并为后续 GUI 开发提供基础。
+2. 优先完成 macOS 版 `HandShaker_CLI`，提供纯命令行使用入口，用于功能测试和 Agent 调用。
+3. 在 CLI 后端基础上，实现现代化、可复用的通用跨平台 Rust 后端，使其能够与原版 HandShaker 互通，并为后续 GUI 开发提供基础。
 
 ## 跨平台开发顺序
 
@@ -21,3 +22,7 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
 ## 当前状态
 
 项目目前处于初始化阶段，已完成 Git 仓库和文档目录的建立。暂未开始具体的协议解析，也未加入 Rust 后端或其他实现代码。
+
+## 后端规划
+
+后端将先以 macOS ARM64 环境下的 `HandShaker_CLI` 为首个可用形态，覆盖命令行操作、协议功能验证和 Agent 调用场景；随后再逐步扩展到 Linux 及其他平台，并为 GUI 提供稳定的通用后端接口。
