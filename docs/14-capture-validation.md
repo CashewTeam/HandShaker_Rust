@@ -125,3 +125,92 @@ python3 tools/capture/ssp_errors.py           # MD5 异常 + 取消行为
    文件流按已声明的 range.length 收帧。
 3. 上行发送：`[sid:4][flag:1][len:4]`；业务请求 flag=1、上传数据 flag=3、取消 flag=2、退出 flag=5。
 4. 解析 protobuf 时勿强依赖 field 1。
+
+---
+
+# 10 局域网（WiFi / Bonjour）验证（2026-08-02 追加）
+
+> 环境：Mac（macOS 27）与手机（192.168.2.47）连接同一家庭 WiFi（同网段）。
+> **注意**：macOS 15+ 的「本地网络（Local Network）」隐私权限会拦截非系统进程的局域网流量
+> （`ping` 可用但 TCP/UDP 报 `No route to host`）。验证命令需以 **`sudo`** 运行绕过。
+
+## 10.1 mDNS 发现（docs/02 全部确认）
+
+`tools/capture/ssp_mdns.py`（纯 stdlib 实现，unicast 查询手机 5353 + v4/v6 多播）实测返回：
+
+```json
+{
+  "instance": "handshaker_ssp_._handshaker_ssp._tcp.local",
+  "port": 45656,
+  "target": "Android-2.local",
+  "ips": ["192.168.2.47", "fe80::b60b:44ff:fea0:14b6",
+          "<global_ipv6>", "<global_ipv6>"],
+  "txt": {}
+}
+```
+
+确认要点：
+
+- 服务类型 `_handshaker_ssp._tcp.`、实例名 `handshaker_ssp_`、主机名 `Android-2.local`。
+- **SRV 端口与手机实际监听端口一致**（实测 45656；期间端口从 55954 变为 45656，mDNS 记录实时跟随）。
+- 手机 mdnsd（Android 7.1.1）对 **unicast 查询**（发往手机 IP:5353）会应答，也发 v4/v6 多播应答；
+  本网络 WiFi 上**多播应答不可靠**（AP/IGMP），unicast 是稳定路径。
+- 抓包确认（tcpdump 5353）：响应含 PTR（1 答）+ SRV/TXT/A/AAAA（6 附加）。
+- 解析注意：DNS 名称压缩指针（`0xC0`）指向**整个报文**偏移，不能按 RDATA 独立解析；
+  名字不带末尾点（匹配时勿加 `.`）。
+
+## 10.2 WiFi 握手与信任（docs/04 全部确认）
+
+### RESPONSE_01 实测字段
+
+| field | 值 | 含义 |
+|---|---|---|
+| 1 | 32 | HANDSHAKE_RESPONSE_01 |
+| 2 | `'201'` | apk version code |
+| 3 | `'1.2.0'` | apk version name |
+| 4 | 时间戳 | client_timestamp |
+| 5 | `'1'` | client_smart_sync_protocol_version |
+| 6 | `'2.1.0'` | client_min_host_version |
+| 7 | `'<android_id>'` | device_uuid = android_id |
+| 8 | `'<device_name>'` | device_name |
+| 9 | `'<usb_serial>'` | usb_serial = ro.serialno |
+| 10 | 1 | is_smartisan_device |
+| 11 | 333 | client_min_host_version_code |
+
+### 信任流程（三次实测）
+
+1. **首次连接**：request02（仅 host_uuid）→ `RESPONSE_02{trust_type=1(TRUST_WAITING), 无 result}` + 手机弹窗。
+2. **重置**：request02 带 `trust_type=6(TRUST_REMOVE)` → 手机清除该 hostUuid 的信任记录（同 request02
+   可同时完成清除+弹窗）。
+3. **信任确认**（用户点"信任"）→ `RESPONSE_02{trust_type=5(TRUST_ALWAYS), derived_key=256B(field5),
+   result=base64(RSA_enc("ok"))}` → 私钥解密得 `"ok"` → 连接成立。
+4. **重连（信任持久化）**：request02 携带上次收到的 derived_key → 手机 PBKDF2 重算比对通过 →
+   `RESPONSE_02{TRUST_ALWAYS, result=…ok}`，**无弹窗**。
+   - 手机在验证通过时会把 derivedKey **原样回显**在 field5（`g/j.java:95`）。
+   - 无正确 derived_key 且信任记录已存在 → 回 `'failed'`（安全边界实测成立）。
+
+### 其余
+
+- 连接类型确认：WiFi 通道连接分类为 `WIFI`（ADB 为 `USB`），握手走 request01/02 protobuf 路径。
+- WiFi 端口为 `ServerSocket(0)` 随机端口，**会周期性变化**（注册/注销循环），客户端必须以
+  mDNS SRV 记录为准。
+- 信任对话框按钮文案（zh）："不信任"/"信任一次"/"信任"（`view.a` 自定义 AlertDialog）。
+
+## 10.3 局域网传输（与 ADB 通道完全一致）
+
+经 WiFi 实测：GET_DEVICE_INFO（root=`/storage/emulated/0`、model=`odin`）、HEART_BEAT、
+GET_DIR_FILES（178 项）、下载（210B）、上传（50000B，**MD5 与本地一致**
+`04a2abbec73ae2f786397acf1909db64`）、QUIT。帧格式/签名/分块与 ADB 通道逐字节相同
+（手机侧写端 `Connection$c` 对所有通道统一）。
+
+## 10.4 复现
+
+```bash
+cd tools/capture
+sudo python3 ssp_mdns.py 6 --ip <phone-ip>            # 发现（macOS 需 sudo 绕过本地网络权限）
+sudo python3 ssp_wifi.py --ip <phone-ip> --port <port> --reset-trust   # 重置+信任
+sudo python3 ssp_wifi.py --ip <phone-ip> --port <port>                 # derived_key 重连
+sudo ./run_lan.sh <phone-ip>                           # 一键：发现+端口检测+完整验证
+```
+
+端口以 mDNS SRV 为准（`run_lan.sh` 自动从手机 /proc/net/tcp6 检测 uid 10062 的 LISTEN 端口）。

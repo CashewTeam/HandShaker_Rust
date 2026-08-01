@@ -24,9 +24,11 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
 
 - 已完成对 HandShaker 通信协议（SmartSync Protocol / SSP）的完整逆向解析，文档见 `docs/`
   （协议分层、Bonjour 发现、USB AOA/ADB/WiFi 传输、握手与信任、封帧格式、protobuf 模式、文件/媒体/同步、异常处理）。
-- 已在真实设备（Smartisan OD103 / Android 7.1.1）上完成**抓包验证**（`docs/14-capture-validation.md`），
-  确认了 ADB 端口、上下行封帧、分块边界、`parseIoBuffer`（AES-256-CBC）等关键细节；
-  验证工具见 `tools/capture/`。
+- 已在真实设备（Smartisan OD103 / Android 7.1.1）上完成**抓包验证**（`docs/14-capture-validation.md`）：
+  - ADB 通道：端口、上下行封帧、分块边界、`parseIoBuffer`（AES-256-CBC）、RSA 签名、下载/上传数据面。
+  - **局域网通道**：Bonjour/mDNS 发现（`_handshaker_ssp._tcp` 全记录 + SRV 端口实测）、WiFi 握手与
+    信任（TRUST_REMOVE / derived_key 重连免弹窗）、局域网传输（数据 MD5 一致）。
+  - 验证工具见 `tools/capture/`。
 - 暂未开始 Rust 后端实现。
 
 ## 后端规划

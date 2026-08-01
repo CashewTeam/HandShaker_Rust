@@ -75,3 +75,22 @@ if (!mVar.h.get() && serverSocketA != null) {
   `handshaker_ssp_<something>`，端口 = 监听端口。注意 TXT 记录可为空。
 - 客户端（模拟 Mac）：浏览 `_handshaker_ssp._tcp`，解析 A/AAAA，取端口，发起 TCP。
 - 跨子网不可见（mDNS 限制）；大网段部署需走二维码直连或 ADB。
+
+## 2.5 抓包实测记录（2026-08，见 [14](14-capture-validation.md) §10）
+
+- 手机 mdnsd 对 **unicast 查询**（发往手机 IP:5353）和 v4/v6 多播查询都会应答。
+- 实测应答记录（PTR 1 答 + SRV/TXT/A/AAAA 6 附加）：
+
+  | 类型 | 记录 |
+  |---|---|
+  | PTR | `handshaker_ssp_._handshaker_ssp._tcp.local.` |
+  | SRV | priority=0 weight=0 **port=45656** target=`Android-2.local` |
+  | TXT | 空 |
+  | A | `Android-2.local` → 192.168.2.47 |
+  | AAAA | fe80:: / 240e::…（3 条） |
+
+- **SRV 端口与手机实际监听端口一致**；端口会周期性变化（WiFi 服务器注册/注销循环），
+  客户端必须以 SRV 记录为准，不能缓存。
+- 本网络 WiFi 上多播应答偶发丢失（AP/IGMP），unicast 查询是稳定路径；发现工具见
+  `tools/capture/ssp_mdns.py`。
+- 解析注意：DNS 名称压缩指针指向整个报文偏移；解析出的名字不带末尾点。

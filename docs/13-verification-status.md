@@ -20,14 +20,16 @@
 | 协议名 / 序列化 | SmartSync Protocol（SSP），protobuf proto2，package `smartsync` | ✅ |
 | 命令类型枚举 | `SSPRequestType` 1..41，APK `.proto` + Mac 头 + 反编译三方一致 | ✅ |
 | 66 个消息字段编号 | 与 `SmartSyncProtocol.proto` 逐字段一致 | ✅ |
-| Bonjour 服务类型 | `_handshaker_ssp._tcp.`，服务名 `handshaker_ssp_`，随机端口 | ✅（两端字符串） |
+| Bonjour 服务类型 | `_handshaker_ssp._tcp.`，服务名 `handshaker_ssp_`，随机端口 | ✅ **抓包实测**（PTR/SRV/TXT/A/AAAA 全记录） |
+| Bonjour SRV 端口 | 与手机实际监听端口一致（实测 45656，期间 55954→45656 实时跟随） | ✅ **抓包实测** |
 | 上行帧头 | `[sid:int32BE][flag:u8][len:int32BE]`，len≤0x400000 | ✅ **抓包实测** |
 | 下行帧 | `[sid:int32BE][chunkLen:u16BE]`，分块 ≤32761B；普通响应数据首 8 字节为总长 | ✅ **抓包实测**（多帧：2/9/20 帧） |
 | 文件下载帧流 | 无 8B 前缀、无 protobuf，按 32761 分块 | ✅ **抓包实测**（279438B / 9 帧 / MD5 一致） |
 | flag 语义 | 0=握手 1=签名 2=取消 3=上传数据 4=信任取消 5=退出 | ✅（0/1/2/3/5 实测） |
 | 签名 | RSA-1024 SHA256withRSA，128B 签 protobuf 体，仅上行 | ✅ **抓包实测**（错误签名回 `"rsa verify failed"`） |
-| 握手 01/02 流程 | USB 裸密钥交换 + WiFi/ADB protobuf 握手；RESPONSE_02 可多次 | ✅ |
+| 握手 01/02 流程 | USB 裸密钥交换 + WiFi/ADB protobuf 握手；RESPONSE_02 可多次 | ✅ **WiFi 实测**（request01/02 + 信任弹窗 + result） |
 | derived_key | PBKDF2WithHmacSHA1(hostUuid, 256B salt, 1500, 2048bit) | ✅（Android 源码） |
+| 信任持久化 | 重连携带 derived_key → 无弹窗直接 TRUST_ALWAYS+ok；错误 key → `'failed'` | ✅ **WiFi 实测** |
 | enckey 格式 / parseIoBuffer | `MD5(DER) + AES-256-CBC(PKCS7)(base64(DER))`，密钥表见 [14](14-capture-validation.md) §4 | ✅ **完全解开 + 实测握手成功** |
 | 心跳 | 默认 30s 超时、1s 检查；写操作刷新 | ✅ |
 | ADB 端口 | 手机监听 = `ADB_PORT` extra（实测 10086）；Mac 转发目标 `tcp:10086`（另 `tcp:19999` 音频） | ✅ **实测** |
@@ -37,6 +39,7 @@
 | 上传 data_md5 校验 | **线上未强制执行**（错误 md5 仍 succeed=1） | ✅ **实测（新发现）** |
 | 取消（flag=2） | 不中断进行中的下载流（会发完剩余数据） | ✅ **实测（新发现）** |
 | protobuf field1 | 等于默认值时可能被省略（上传完成响应无 field1） | ✅ **实测（新发现）** |
+| WiFi 通道传输 | 帧格式/签名/分块与 ADB 完全一致；上传 MD5 一致 | ✅ **WiFi 实测** |
 | 文件监控 | FileObserver mask 0xFC8 → SSPFileEventType 1..8 | ✅ |
 | 媒体库查询/推送 | MediaStore + ContentObserver，1s 防抖，need_*_callback 开关；推送用手机 sid 生成器 | ✅ |
 | 缩略图 | JPEG 质量 86；视频 200x200；5s 超时 | ✅ |
@@ -47,16 +50,17 @@
 
 ## 13.3 建议的抓包验证项
 
-> 已于 2026-08-02 完成大部分验证（见 [14](14-capture-validation.md)）。剩余可选验证：
+> 已于 2026-08-02 完成大部分验证（见 [14](14-capture-validation.md)），含**局域网**部分。剩余可选验证：
 
 1. ~~一次完整 WiFi 握手字节级比对 enckey 变换~~ → **已完成**（enckey = AES-256-CBC，见 §4）。
 2. ~~一个 10MB 文件的下载/上传帧流~~ → **已完成**（下载 279KB/9 帧、照片库 648KB/20 帧）。
 3. ~~取消（flag=2）与 CANCEL_REQUEST(36) 的字节序列~~ → **已完成**（flag=2 不中断下载流）。
 4. ~~ADB 通道实际端口与 intent extra~~ → **已完成**（ADB_PORT=10086，`/proc/net/tcp` 确认）。
-5. ~~心跳实际间隔与超时~~ → 部分（未长时间观察；建议挂 2 分钟观察心跳频率）。
-6. `SSPHandShakeResponse02.result` 各取值实际出现场景（需 WiFi/ADB 通道 request01/02 流程触发）。
-7. WiFi/Bonjour 广播的实际发布包（`_handshaker_ssp._tcp` + 端口）抓包。
-8. 锁屏场景回 `"locked"` 的字节序列。
+5. ~~mDNS/Bonjour 发现~~ → **已完成**（PTR/SRV/TXT/A/AAAA 全记录，SRV 端口与监听一致）。
+6. ~~WiFi 握手 + 信任流程~~ → **已完成**（request01/02、TRUST_REMOVE、信任弹窗、derived_key 重连）。
+7. 心跳实际间隔与超时（建议挂 2 分钟观察心跳频率）。
+8. `SSPHandShakeResponse02.result` 的 `'locked'/'needauth'` 取值（需锁屏/并发场景触发）。
+9. 锁屏场景回 `"locked"` 的字节序列。
 
 ## 13.4 核心源码引用索引
 

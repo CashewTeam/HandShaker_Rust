@@ -121,6 +121,14 @@ Android 处理 `g/j.java:84-108`。请求字段：
         用户选择后发 TrustResponseEvent → 重新回 RESPONSE_02
 ```
 
+> ✅ **抓包实测（2026-08，WiFi 通道，见 [14](14-capture-validation.md) §10）**：
+> - 首次连接：request02（仅 host_uuid）→ `RESPONSE_02{TRUST_WAITING}` + 弹窗。
+> - `TRUST_REMOVE`（field4=6）可清除手机端信任记录（同一条 request02 即完成清除+触发弹窗）。
+> - 用户确认后：`RESPONSE_02{TRUST_ALWAYS, derived_key=256B(field5), result=base64(RSA_enc('ok'))}`。
+> - **重连**：request02 携带上次收到的 derived_key → 手机 PBKDF2 比对通过 → 直接
+>   `RESPONSE_02{TRUST_ALWAYS, ok}`，**无弹窗**；且手机在 field5 原样回显 derived_key
+>   （`g/j.java:95`）。无正确 derived_key 且信任记录存在 → 回 `'failed'`。
+
 ### derived_key 计算
 
 不是 HKDF，而是 **PBKDF2**（`h/z.java:9-11`）：
