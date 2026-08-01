@@ -34,6 +34,7 @@ HandShaker 的局域网设备发现使用 **Apple Bonjour（mDNS/DNS-SD）**，�
 | [11-errors-exceptions](11-errors-exceptions.md) | 错误码、异常场景、心跳/断连/锁屏/版本兼容检测 |
 | [12-macos-implementation](12-macos-implementation.md) | macOS 端实现要点（类映射、ADB 命令、音频 HTTP 服务） |
 | [13-verification-status](13-verification-status.md) | 已验证/待验证清单与源码引用索引 |
+| [14-capture-validation](14-capture-validation.md) | **真实抓包验证报告**（ADB 端口、封帧/分块、parseIoBuffer、签名、上下行数据面） |
 
 ## 术语
 
@@ -48,4 +49,10 @@ HandShaker 的局域网设备发现使用 **Apple Bonjour（mDNS/DNS-SD）**，�
 ## 阅读建议
 
 实现互通前请先读 `01`（架构）→ `05`（封帧）→ `04`（握手）→ `06`（消息模式）→ `07`（命令）。
-文件/媒体/同步属于上层语义，按需查阅。`13` 列明了需要真实抓包确认的少数细节。
+文件/媒体/同步属于上层语义，按需查阅。`13` 列明验证状态；`14` 是真实抓包验证报告；
+`tools/capture/` 提供可复现的验证工具。
+
+## 验证状态
+
+关键未确认项（ADB 端口、下行分块边界、`parseIoBuffer`）已于真实设备抓包验证完毕，详见
+[14-capture-validation](14-capture-validation.md)。

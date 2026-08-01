@@ -1,5 +1,9 @@
 # 13 验证状态与源码引用索引
 
+> **重大更新（2026-08-02）**：已在真实设备（Smartisan OD103 / Android 7.1.1）上完成抓包验证，
+> 关键未确认项全部落地。完整验证报告见 **[14-capture-validation](14-capture-validation.md)**。
+> 验证工具与复现步骤见 `tools/capture/`。
+
 本文档记录各结论的验证级别，以及核心源码引用，便于后续抓包核验与实现回归。
 
 ## 13.1 验证级别说明
@@ -17,20 +21,24 @@
 | 命令类型枚举 | `SSPRequestType` 1..41，APK `.proto` + Mac 头 + 反编译三方一致 | ✅ |
 | 66 个消息字段编号 | 与 `SmartSyncProtocol.proto` 逐字段一致 | ✅ |
 | Bonjour 服务类型 | `_handshaker_ssp._tcp.`，服务名 `handshaker_ssp_`，随机端口 | ✅（两端字符串） |
-| 上行帧头 | `[sid:int32BE][flag:u8][len:int32BE]`，len≤0x400000 | ✅（Android 读端源码） |
-| 下行帧 | `[sid:int32BE][chunkLen:u16BE]`，分块 ≤32761B；普通响应数据首 8 字节为总长 | ✅（Android 写端源码） |
-| flag 语义 | 0=握手 1=签名 2=取消 3=上传数据 4=信任取消 5=退出 | ✅ |
-| 签名 | RSA-1024 SHA256withRSA，128B 签 protobuf 体，仅上行 | ✅ |
+| 上行帧头 | `[sid:int32BE][flag:u8][len:int32BE]`，len≤0x400000 | ✅ **抓包实测** |
+| 下行帧 | `[sid:int32BE][chunkLen:u16BE]`，分块 ≤32761B；普通响应数据首 8 字节为总长 | ✅ **抓包实测**（多帧：2/9/20 帧） |
+| 文件下载帧流 | 无 8B 前缀、无 protobuf，按 32761 分块 | ✅ **抓包实测**（279438B / 9 帧 / MD5 一致） |
+| flag 语义 | 0=握手 1=签名 2=取消 3=上传数据 4=信任取消 5=退出 | ✅（0/1/2/3/5 实测） |
+| 签名 | RSA-1024 SHA256withRSA，128B 签 protobuf 体，仅上行 | ✅ **抓包实测**（错误签名回 `"rsa verify failed"`） |
 | 握手 01/02 流程 | USB 裸密钥交换 + WiFi/ADB protobuf 握手；RESPONSE_02 可多次 | ✅ |
 | derived_key | PBKDF2WithHmacSHA1(hostUuid, 256B salt, 1500, 2048bit) | ✅（Android 源码） |
-| enckey 格式 | `parseIoBuffer( base64(DER RSAPublicKey) )`，field8=MD5(公钥字节) | ⚠️ `parseIoBuffer` 为 native（`libsmartfolder.so`），需抓包确认其变换 |
+| enckey 格式 / parseIoBuffer | `MD5(DER) + AES-256-CBC(PKCS7)(base64(DER))`，密钥表见 [14](14-capture-validation.md) §4 | ✅ **完全解开 + 实测握手成功** |
 | 心跳 | 默认 30s 超时、1s 检查；写操作刷新 | ✅ |
-| ADB 命令 | `am startservice ...AdbForwardService --ei ADB_PORT <port>` + `adb forward tcp:<host> tcp:10086` | ⚠️ 命令串来自 Mac 二进制字符串，端口建议抓包确认 |
+| ADB 端口 | 手机监听 = `ADB_PORT` extra（实测 10086）；Mac 转发目标 `tcp:10086`（另 `tcp:19999` 音频） | ✅ **实测** |
 | USB AOA 过滤 | manufacturer=Smartisan model=HandShaker version=1 | ✅ |
-| 下载数据面 | header(13) → 裸二进制帧流；type 14 未使用 | ✅ |
-| 上传数据面 | header(15) → ready(16) → flag=3 块 → 完成(18)；type 17 未使用 | ✅ |
+| 下载数据面 | header(13) → 裸二进制帧流；type 14 未使用 | ✅ **实测** |
+| 上传数据面 | header(15) → ready(16) → flag=3 块 → 完成(18)；type 17 未使用 | ✅ **实测** |
+| 上传 data_md5 校验 | **线上未强制执行**（错误 md5 仍 succeed=1） | ✅ **实测（新发现）** |
+| 取消（flag=2） | 不中断进行中的下载流（会发完剩余数据） | ✅ **实测（新发现）** |
+| protobuf field1 | 等于默认值时可能被省略（上传完成响应无 field1） | ✅ **实测（新发现）** |
 | 文件监控 | FileObserver mask 0xFC8 → SSPFileEventType 1..8 | ✅ |
-| 媒体库查询/推送 | MediaStore + ContentObserver，1s 防抖，need_*_callback 开关 | ✅ |
+| 媒体库查询/推送 | MediaStore + ContentObserver，1s 防抖，need_*_callback 开关；推送用手机 sid 生成器 | ✅ |
 | 缩略图 | JPEG 质量 86；视频 200x200；5s 超时 | ✅ |
 | 照片同步 | 状态机 0/1/2；checksum=MD5(name_lower+len+base64(前100B)) | ✅ |
 | 锁屏 | USB 通道回裸串 `"locked"` | ✅ |
@@ -39,12 +47,16 @@
 
 ## 13.3 建议的抓包验证项
 
-1. 一次完整 WiFi 握手（request01/02 → response01/02）字节级比对 enckey 变换。
-2. 一个 10MB 文件的下载/上传帧流（确认分块大小与总长前缀边界跨越）。
-3. 取消（flag=2）与 CANCEL_REQUEST(36) 的字节序列。
-4. ADB 通道实际端口（10086 vs 其他）与 AdbForwardService intent extra。
-5. 心跳实际间隔与超时（30s 或协商值）。
-6. `SSPHandShakeResponse02.result` 各取值实际出现场景。
+> 已于 2026-08-02 完成大部分验证（见 [14](14-capture-validation.md)）。剩余可选验证：
+
+1. ~~一次完整 WiFi 握手字节级比对 enckey 变换~~ → **已完成**（enckey = AES-256-CBC，见 §4）。
+2. ~~一个 10MB 文件的下载/上传帧流~~ → **已完成**（下载 279KB/9 帧、照片库 648KB/20 帧）。
+3. ~~取消（flag=2）与 CANCEL_REQUEST(36) 的字节序列~~ → **已完成**（flag=2 不中断下载流）。
+4. ~~ADB 通道实际端口与 intent extra~~ → **已完成**（ADB_PORT=10086，`/proc/net/tcp` 确认）。
+5. ~~心跳实际间隔与超时~~ → 部分（未长时间观察；建议挂 2 分钟观察心跳频率）。
+6. `SSPHandShakeResponse02.result` 各取值实际出现场景（需 WiFi/ADB 通道 request01/02 流程触发）。
+7. WiFi/Bonjour 广播的实际发布包（`_handshaker_ssp._tcp` + 端口）抓包。
+8. 锁屏场景回 `"locked"` 的字节序列。
 
 ## 13.4 核心源码引用索引
 

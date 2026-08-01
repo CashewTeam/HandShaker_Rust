@@ -16,12 +16,18 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
 
 ## 目录结构
 
-- `docs/`：通信协议文档、研究记录和设计说明。
+- `docs/`：通信协议文档、研究记录和设计说明（含真实抓包验证报告）。
+- `tools/capture/`：SSP 协议抓包验证工具（Python，经 adb forward 与真机对话并逐字节日志）。
 - `Android_jadx/`、`android_smali/`、`macos/`：本地保留的逆向与反编译资料，不纳入 Git 记录，也不会由本仓库重新分发。
 
 ## 当前状态
 
-项目目前处于初始化阶段，已完成 Git 仓库和文档目录的建立。暂未开始具体的协议解析，也未加入 Rust 后端或其他实现代码。
+- 已完成对 HandShaker 通信协议（SmartSync Protocol / SSP）的完整逆向解析，文档见 `docs/`
+  （协议分层、Bonjour 发现、USB AOA/ADB/WiFi 传输、握手与信任、封帧格式、protobuf 模式、文件/媒体/同步、异常处理）。
+- 已在真实设备（Smartisan OD103 / Android 7.1.1）上完成**抓包验证**（`docs/14-capture-validation.md`），
+  确认了 ADB 端口、上下行封帧、分块边界、`parseIoBuffer`（AES-256-CBC）等关键细节；
+  验证工具见 `tools/capture/`。
+- 暂未开始 Rust 后端实现。
 
 ## 后端规划
 

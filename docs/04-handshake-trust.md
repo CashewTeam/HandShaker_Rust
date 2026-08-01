@@ -24,17 +24,20 @@
 USB 下握手消息体为自定义裸格式（非 protobuf），`decoder/a.java:43-55` 走
 `g/j.java:59-71`（Transfer USB 路径）：
 
-- **请求体**：`[16B MD5] [ parseIoBuffer-包装的 base64(DER 公钥) ]`
+- **请求体**：`[16B MD5] [ AES-256-CBC 加密的 base64(DER 公钥) ]`
   - 前 16 字节 = 公钥字节的 **MD5 指纹**。
-  - 剩余部分：`parseIoBuffer`（native，`decoder/C.java`，加载 `libsmartfolder.so`）剥掉包装 →
-    UTF-8 字符串 trim → Base64 解码 → **DER 编码的 RSA 公钥**（ASN.1 `SEQUENCE{ modulus, exponent }`，
+  - 剩余部分：`parseIoBuffer`（native，`decoder/C.java`）即 **AES-256-CBC 解密**，剥掉加密后得到
+    UTF-8 的 base64 字符串 → Base64 解码 → **DER 编码的 RSA 公钥**（ASN.1 `SEQUENCE{ modulus, exponent }`，
     解析见 `decoder/b.java` + `org/a/a/a/a.java`）。
   - 校验：`MD5(DER公钥字节) == 前16字节`。
 - **响应**：`base64( RSA/ECB/PKCS1Padding( "ok" ) )`（用对方公钥加密，`g/j.java:36-57`）。
   Mac 解密成功拿到明文 "ok" 才算握手成功（`SFGenericDevice checkResult:`）。
 
-> **`parseIoBuffer` 待验证**：它是一个 native 变换（`Java_..._parseIoBuffer`，`libsmartfolder.so`）。
-> 需抓包/逆向确认其对协议字节是否等价于恒等变换。Rust 实现需兼容。
+> ✅ **已抓包确认（2026-08）**：`parseIoBuffer` = **AES-256-CBC(PKCS7) 解密**，密钥表内嵌于二进制
+> （Mac `SmartFinderCore`@0x229f60 / Android `libsmartfolder.so`）。完整构造见
+> [14-capture-validation](14-capture-validation.md) §4：enckey 报文 =
+> `MD5(DER) + AES-256-CBC( PKCS7( base64( DER ) ), key=表[16:48], iv=表[0:16] )`。
+> 用该构造在真机上握手成功；不加密（identity）则失败。
 
 ## 4.3 WiFi / ADB 通道握手
 

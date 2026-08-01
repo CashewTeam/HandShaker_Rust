@@ -46,6 +46,9 @@
 | protobuf 解析失败 | `catch(com.a.a.o)` 静默丢弃 | `decoder/a.java:178-181` |
 | 未知 flag | 日志 "Unexpected flag" 丢弃 | `g/h.java:340-342` |
 
+> ✅ **抓包实测（2026-08）**：错误签名（flag=1）→ 手机回 `"rsa verify failed"`（带 8B 长度前缀），
+> 与上表一致。
+
 ## 11.3 断连 / 掉线检测
 
 ### 心跳超时（Android）
@@ -97,6 +100,8 @@
 - 上传：手机删除半成品文件，回 `CANCEL_REQUEST(36)`（`d/c.java:682-699`）。
 - 下载：服务器 `Connection$c.b()`（stopWriteFile）抛 `c.d`（IOException）中止文件流（`g/a.java:244-250`）。
 - 客户端可发 flag=2（payload=sid）主动取消任意请求。
+  > ⚠️ **抓包实测（2026-08）**：flag=2 只影响排队任务与上传会话，**不中断进行中的下载流**
+  > （手机会把剩余文件发完）。真正的下载中断需服务器 `stopWriteFile`。
 
 ## 11.8 信任/握手异常
 

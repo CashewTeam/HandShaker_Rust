@@ -71,6 +71,8 @@ Mac 通过 `GET_DEVICE_INFO_RESPONSE.root_path`（主存储）与 `external_stor
   然后以 `[sid][chunkLen]` 帧流直接发文件字节（见 [05](05-message-framing.md) §5.2.2）。
 - 不支持断点续传的“请求任意区间”之外的语义：range 只做一次性定位（`FileInputStream.skip(start)`）。
 - 取消：flag=2 或服务器 `CANCEL_REQUEST(36)`；服务器侧 `stopWriteFile` 中止文件流（`g/a.java:244-250`）。
+  > ⚠️ **抓包实测（2026-08）**：flag=2 取消**不会中断进行中的下载流**（150000B 读到 32761B 后取消，
+  > 剩余 117239B 仍全部发完）；取消只对排队任务/上传会话生效。下载流中止仅靠 `stopWriteFile`。
 - Mac 端实现：`SSPDownloadFileRequestOperation`（累积数据到 bufferPath，计算 MD5，进度回调）。
 
 ## 8.9 上传 GET_UPLOAD_FILE_REQUEST_HEADER(15)（Mac → 文件）
@@ -82,6 +84,10 @@ Mac 通过 `GET_DEVICE_INFO_RESPONSE.root_path`（主存储）与 `external_stor
   - 成功后会触发媒体库扫描（`MediaScannerService.scanFile`）。
   - 失败会删除半成品并回 `CANCEL_REQUEST`。
 - `data_md5` 非空则服务器校验，失败 → `FILE_IO_MD5_CHECK_ERROR(7)`。
+  > ⚠️ **抓包实测（2026-08）**：当前 APK 上传 `data_md5` **未强制执行**——错误 data_md5（32 个 '0'）
+  > 上传仍 `succeed=1`、无错误码。客户端应照常回传，但勿依赖手机校验。
+- 上传响应头 type 线上回显 **15**（请求类型），完成响应 `SSPUploadFileResponse` 线上省略 field 1
+  （默认值）；上传数据经 `adb` 实测与本地 MD5 完全一致。
 - Mac 端实现：`SSPUploadFileRequestOperation`（分块读文件、进度、`isReadyToUploadFileData`）。
 
 ## 8.10 目录监控 MONITOR_FOLDER_REQUEST(23)

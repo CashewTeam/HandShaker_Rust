@@ -45,6 +45,8 @@ if (extras != null) {
 说明：
 
 - 10086 / 19999 是手机侧期望的监听端口（ADB_PORT 传同样值）；19999 与音频 HTTP 服务相关。
+- ✅ **已抓包确认（2026-08）**：手机端 `am startservice ... --ei ADB_PORT 10086` 后
+  `/proc/net/tcp` 显示 `0x2766`（10086）LISTEN；`adb forward tcp:10086 tcp:10086` 后即可通信。
 - 所有请求/响应在 ADB 通道上走与 WiFi 完全相同的帧格式。
 - `SFADBManager` 持有多条队列：`adbOperationQueue`、`adbForwardOperationQueue`、
   `keepAliveOperationQueue`、`thumbnailOperationQueue`；并有 `SFADBForwardHandshakeOperation`、

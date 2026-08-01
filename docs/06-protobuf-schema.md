@@ -702,8 +702,11 @@ message SSPUpdateFileResponse {
 ## 6.4 互通注意
 
 1. 每个请求/响应 field 1 默认值即该消息类型；实现时以 field 1 作为判别器即可。
+   > ⚠️ **抓包实测（2026-08）**：field 1 在等于默认值时**可能被线上省略**（如 `SSPUploadFileResponse`
+   > 只有 field 2/3/4，无 field 1）。解析器应视 field 1 为提示、不得假定必然存在。
 2. varint 有符号/无符号不影响线格式（同为 varint64）。`SSPClipboard.mstimestamp`、device info 的
    `*_size` 用 int64 读也无妨。
 3. `SSPGetPhotoLibraryRequest/SSPGetVideoLibraryRequest/SSPGetAudioLibraryRequest` 仅主机→手机，
    APK 未内置其类；实现互通时仍需构造（内容只有 type 字段）。
 4. `SSPDownloadFileResponseBody` / `SSPUploadFileRequestBody` 已注释，线上不用。
+5. 上传响应头 type 线上回显 **15**（请求类型），与 proto 默认注释（16/18）不一致，以线上为准。

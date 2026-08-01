@@ -144,3 +144,12 @@ Phone: 收齐后 GET_UPLOAD_FILE_RESPONSE(18) {type, file, canceled, succeed, er
 3. 校验：上行 len ∈ [0, 0x400000]；下行 chunkLen ∈ [0, 32761]。
 4. 签名：RSA-1024 / SHA256withRSA，签 protobuf 体。
 5. 按 flag 分发 0-5。
+
+## 5.11 抓包实测补充（2026-08，见 [14](14-capture-validation.md)）
+
+- 下行实测分块：40613B 响应 → 2 帧 `[32761, 7860]`；279438B 文件 → 9 帧 `[32761×8, 17350]`；
+  648227B 照片库 → 20 帧。单帧数据 **恒 ≤32761**，首帧数据前 8 字节即大端总长（`0x9EA5=40613` 实测）。
+- **protobuf field 1（type）在等于默认值时会被省略**：`SSPUploadFileResponse` 线上只有 field 2/3/4，
+  没有 field 1。解析器不得假定 field 1 必然存在。
+- **flag=2 取消不中断进行中的下载流**：下载中途取消，手机仍发完剩余文件字节。
+- 上传响应头 type 线上回显为 **15**（请求类型），而非 proto 默认值。
