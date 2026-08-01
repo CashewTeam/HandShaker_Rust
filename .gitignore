@@ -1,0 +1,7 @@
+# Reverse-engineering artifacts retained locally as reference material.
+/Android_jadx/
+/android_smali/
+/macos/
+
+# macOS Finder metadata.
+.DS_Store
