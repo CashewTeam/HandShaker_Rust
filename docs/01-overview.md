@@ -8,8 +8,16 @@
 | 包/二进制 | `HandShaker.app`（主程序）+ `SmartFinderCore.framework`（协议核心） | `com.smartisanos.smartfolder.aoa` |
 | 主要类 | `SFDeviceClient`、`SSPManager`、`SFGenericDevice`、`SFADBManager`、`SFWifiDeviceManager`、`SFUSBDeviceManager` | `ConnectionManagerService`、`g.a`(Connection)、`g.h`(SspExecutorManager)、`decoder.a`(Decoder)、`g.j`(Transfer) |
 
-> 注意角色命名易混淆：Android 端是“服务端”但协议文档称之为 “client/APK 端”；
-> macOS 端是“客户端”但协议文档称之为 “host 端”。
+> **角色澄清（三个维度，结论一致：Mac=客户端，Android=服务端）**：
+>
+> | 维度 | Mac 端 | Android 端 |
+> |---|---|---|
+> | TCP 连接 | 主动发起连接（dial） | 监听连接（`ServerSocket` accept） |
+> | 请求/响应 | 发起请求（握手/列目录/下载/上传…），收响应与推送 | 执行请求，返回响应，并主动推送（媒体库变更、文件事件…） |
+> | 锤子协议术语 | **host 端**（主机=电脑） | **client/APK 端**（手机里的 APK 程序） |
+>
+> `host`/`client` 是 Smartisan 在协议（proto 注释、字段名如 `host_min_client_version`）中的自用叫法：
+> "host" 指电脑主机，"client" 指手机上的 APK——**与"谁主动、谁响应"无关，不表示角色反转**。
 
 ## 1.2 三种传输通道
 
