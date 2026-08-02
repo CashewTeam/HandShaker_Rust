@@ -17,6 +17,8 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
 ## 目录结构
 
 - `docs/`：通信协议文档、研究记录和设计说明（含真实抓包验证报告）。
+- `proto/smartsync.proto`：完整 SSP proto2 schema；构建时由 Prost 生成 Rust 类型，不提交生成文件。
+- `src/`：可复用 Rust library、ADB/SSP 实现与 `handshaker` CLI。
 - `tools/capture/`：SSP 协议抓包验证工具（Python，经 adb forward 与真机对话并逐字节日志）。
 - `Android_jadx/`、`android_smali/`、`macos/`：本地保留的逆向与反编译资料，不纳入 Git 记录，也不会由本仓库重新分发。
 
@@ -29,8 +31,31 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
   - **局域网通道**：Bonjour/mDNS 发现（`_handshaker_ssp._tcp` 全记录 + SRV 端口实测）、WiFi 握手与
     信任（TRUST_REMOVE / derived_key 重连免弹窗）、局域网传输（数据 MD5 一致）。
   - 验证工具见 `tools/capture/`。
-- 暂未开始 Rust 后端实现。
+- Rust CLI `0.1.0` 首版已进入可运行阶段：当前实现 ADB 接入、设备信息、文件管理、单文件上传下载、剪贴板和常驻 shell。
+- WiFi 信任握手、USB AOA、媒体库、目录监控和照片同步仍属于后续里程碑。
 
-## 后端规划
+## 构建与使用
 
-后端将先以 macOS ARM64 环境下的 `HandShaker_CLI` 为首个可用形态，覆盖命令行操作、协议功能验证和 Agent 调用场景；随后再逐步扩展到 Linux 及其他平台，并为 GUI 提供稳定的通用后端接口。
+构建时使用 vendored `protoc`，开发机无需额外安装 protobuf 编译器：
+
+```sh
+cargo build
+cargo test
+```
+
+查看命令：
+
+```sh
+cargo run -- --help
+cargo run -- device list
+cargo run -- device info
+cargo run -- fs ls
+cargo run -- clipboard get
+cargo run -- shell
+```
+
+默认输出中文；自动化调用可使用 `--output json`，传输事件流可使用 `--output jsonl`。危险操作和覆盖在非交互环境中需要显式添加 `--yes`。
+
+> `GET_DEVICE_INFO` 中向手机报告的主机兼容身份固定为原版 macOS HandShaker
+> `2.5.6 / 408`，用于通过手机端最低主机版本检查；它与本项目自身的 CLI/Cargo
+> 版本 `0.1.0` 相互独立。
