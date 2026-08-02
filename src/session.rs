@@ -283,10 +283,15 @@ impl Session {
             wire_log.clone(),
         );
         let events = event_channel();
+        // Business request sids start at 0x8000_1000, deliberately above the
+        // phone's push-sid generator (0x8000_0001 +, docs/14 §7.5). The two
+        // generators previously collided (both starting at 0x8000_0001),
+        // which routed phone pushes into pending requests — first observed
+        // on-device 2026-08-03 during M6 photo-sync acceptance.
         let inner = Arc::new(SessionInner {
             writer: writer_sender,
             pending: Mutex::new(HashMap::new()),
-            next_sid: AtomicU32::new(0x8000_0001),
+            next_sid: AtomicU32::new(0x8000_1000),
             keys,
             request_timeout,
             closed,
@@ -923,7 +928,7 @@ mod tests {
         Arc::new(SessionInner {
             writer,
             pending: Mutex::new(HashMap::new()),
-            next_sid: AtomicU32::new(0x8000_0001),
+            next_sid: AtomicU32::new(0x8000_1000),
             keys: Arc::new(SessionKeys::generate().unwrap()),
             request_timeout,
             closed: Arc::new(AtomicBool::new(false)),
@@ -990,7 +995,7 @@ mod tests {
         let inner = Arc::new(SessionInner {
             writer,
             pending: Mutex::new(HashMap::new()),
-            next_sid: AtomicU32::new(0x8000_0001),
+            next_sid: AtomicU32::new(0x8000_1000),
             keys: Arc::new(SessionKeys::generate().unwrap()),
             request_timeout: Duration::from_secs(1),
             closed: Arc::new(AtomicBool::new(false)),
@@ -1081,7 +1086,7 @@ mod tests {
         let inner = Arc::new(SessionInner {
             writer,
             pending: Mutex::new(HashMap::new()),
-            next_sid: AtomicU32::new(0x8000_0001),
+            next_sid: AtomicU32::new(0x8000_1000),
             keys: Arc::new(SessionKeys::generate().unwrap()),
             request_timeout: Duration::from_millis(20),
             closed: Arc::new(AtomicBool::new(false)),
@@ -1113,7 +1118,7 @@ mod tests {
         let inner = Arc::new(SessionInner {
             writer: writer_sender,
             pending: Mutex::new(HashMap::new()),
-            next_sid: AtomicU32::new(0x8000_0001),
+            next_sid: AtomicU32::new(0x8000_1000),
             keys: Arc::new(SessionKeys::generate().unwrap()),
             request_timeout: Duration::from_secs(5),
             closed,
@@ -1199,7 +1204,7 @@ mod tests {
             write_normal(&mut stream, handshake_sid, encoded.as_bytes()).await;
 
             let (request_sid, request_flag, payload) = read_upstream(&mut stream).await;
-            assert_eq!(request_sid, 0x8000_0002);
+            assert_eq!(request_sid, 0x8000_1001);
             assert_eq!(request_flag, 1);
             let (signature, protobuf) = payload.split_at(128);
             public

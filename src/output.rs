@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use handshaker_rust::{
-    DeviceInfo, Error, Result, TransferDirection, TransferProgress,
+    DeviceInfo, Error, Result,
     i18n::{self, Localizer, MessageKey, ZhCn},
 };
 
@@ -47,6 +47,11 @@ impl Outcome {
         });
         self
     }
+
+    pub fn with_warning(mut self, warning: String) -> Self {
+        self.warnings.push(warning);
+        self
+    }
 }
 
 pub(crate) fn render(outcome: &Outcome, format: OutputFormat) -> Result<()> {
@@ -85,41 +90,49 @@ pub(crate) fn render_error(error: &Error, command: &str, format: OutputFormat) {
     }
 }
 
-pub(crate) fn render_progress(
+pub(crate) fn render_batch_progress(
     command: &str,
     info: &DeviceInfo,
-    progress: &TransferProgress,
+    progress: &handshaker_rust::BatchTransferProgress,
     format: OutputFormat,
 ) {
     match format {
         OutputFormat::Human => {
-            let action = match progress.direction {
-                TransferDirection::Download => ZhCn.text(MessageKey::Download),
-                TransferDirection::Upload => ZhCn.text(MessageKey::Upload),
+            let percent = if progress.total == 0 {
+                100
+            } else {
+                (progress.done * 100 / progress.total) as u64
             };
-            let percent = progress_percent(progress);
             eprint!(
                 "\r{}",
                 ZhCn.format(
-                    MessageKey::Progress,
+                    MessageKey::BatchProgress,
                     &[
-                        action,
-                        &progress.transferred.to_string(),
+                        &progress.done.to_string(),
                         &progress.total.to_string(),
                         &percent.to_string(),
                     ],
                 )
             );
-            if progress.transferred >= progress.total {
+            if progress.done >= progress.total {
                 eprintln!();
             }
-            let _ = io::stderr().flush();
         }
         OutputFormat::Json => {}
         OutputFormat::Jsonl => {
-            let envelope = progress_envelope(command, info, progress);
+            let envelope = json!({
+                "schema_version": 1,
+                "ok": true,
+                "command": command,
+                "device": DeviceSummary {
+                    serial: info.serial.clone(),
+                    name: info.name.clone(),
+                },
+                "event": "progress",
+                "data": progress,
+                "warnings": [],
+            });
             println!("{envelope}");
-            let _ = io::stdout().flush();
         }
     }
 }
@@ -150,37 +163,10 @@ pub(crate) fn error_envelope(error: &Error, command: &str) -> Value {
     })
 }
 
-pub(crate) fn progress_envelope(
-    command: &str,
-    info: &DeviceInfo,
-    progress: &TransferProgress,
-) -> Value {
-    json!({
-        "schema_version": 1,
-        "ok": true,
-        "command": command,
-        "device": DeviceSummary {
-            serial: info.serial.clone(),
-            name: info.name.clone(),
-        },
-        "event": "progress",
-        "data": progress,
-        "warnings": [],
-    })
-}
-
-pub(crate) fn progress_percent(progress: &TransferProgress) -> u64 {
-    progress
-        .transferred
-        .saturating_mul(100)
-        .checked_div(progress.total)
-        .unwrap_or(100)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use handshaker_rust::{ErrorCode, TransferDirection};
+    use handshaker_rust::ErrorCode;
 
     #[test]
     fn success_envelope_has_stable_schema_v1_shape() {
@@ -205,23 +191,5 @@ mod tests {
         assert_eq!(value["error"]["code"], serde_json::json!(ErrorCode::Usage));
         assert!(value["error"]["message"].as_str().is_some());
         assert!(value["error"].get("details").is_some());
-    }
-
-    #[test]
-    fn progress_envelope_is_a_jsonl_event() {
-        let info = DeviceInfo {
-            serial: "FAKE123".to_string(),
-            root_path: "/sdcard".to_string(),
-            ..Default::default()
-        };
-        let progress = TransferProgress {
-            direction: TransferDirection::Upload,
-            transferred: 4,
-            total: 8,
-        };
-        let value = progress_envelope("fs.push", &info, &progress);
-        assert_eq!(value["event"], "progress");
-        assert_eq!(value["data"]["transferred"], 4);
-        assert_eq!(value["data"]["total"], 8);
     }
 }

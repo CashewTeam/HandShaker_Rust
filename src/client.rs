@@ -11,18 +11,20 @@ use md5::{Digest as _, Md5};
 use prost::Message;
 use serde::Serialize;
 use tokio::fs::{self, File};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWrite};
 use uuid::Uuid;
 
 use crate::cancellation::RequestOptions;
 use crate::domain::{
-    AdbDevice, AudioAlbum, AudioFile, AudioLibrary, ClipboardEntry, DeleteOptions, DeviceInfo,
-    ExifData, ImageAlbum, ImageFile, PhotoLibrary, RemoteFile, Thumbnails, TransferDirection,
-    TransferOptions, TransferProgress, TrustRecordInfo, VideoAlbum, VideoFile, VideoLibrary,
-    WifiDevice,
+    AdbDevice, AudioAlbum, AudioFile, AudioLibrary, BatchTransferFailure, BatchTransferItem,
+    BatchTransferOptions, BatchTransferProgress, BatchTransferResult, ClipboardEntry,
+    DeleteOptions, DeviceInfo, ExifData, ImageAlbum, ImageFile, PhotoLibrary, PhotoSyncResult,
+    RemoteFile, Thumbnails, TransferDirection, TransferOptions, TransferProgress, TrustRecordInfo,
+    VideoAlbum, VideoFile, VideoLibrary, WifiDevice,
 };
 use crate::error::{Error, Result};
 use crate::events::{EventFilter, EventSubscription};
+use crate::exif_parser;
 use crate::i18n;
 use crate::protocol::frame::{MAX_UPSTREAM_PAYLOAD, WireLog};
 use crate::protocol::handshake::{AdbRawKeyExchange, HandshakeStrategy};
@@ -34,6 +36,7 @@ use crate::transport::TransportCleanup;
 use crate::transport::TransportConnector;
 use crate::transport::adb::{AdbConnector, list_devices, list_devices_with_timeout};
 use crate::transport::wifi::WifiConnector;
+use futures_util::StreamExt;
 
 // These fields describe the compatible original macOS host protocol identity,
 // not this crate's release version. Older values cause the phone to close the
@@ -516,6 +519,7 @@ impl HandShakerClient {
                 checksum: None,
                 is_trash: None,
                 id: None,
+                ext_data: None,
             }));
         }
         let (parent, _) = split_remote_path(path)?;
@@ -591,6 +595,76 @@ impl HandShakerClient {
     }
 
     /// Delete remote paths with the requested trash and sync options.
+    /// Update file metadata on the phone (UPDATE_FILE_INFO, request type 40).
+    ///
+    /// `files` carries the paths plus the fields the phone should write back
+    /// into its media store (star, orientation, timestamps, trash, ...). The
+    /// phone answers with a single success flag; `is_sync` asks the phone to
+    /// feed the change into its sync manager.
+    ///
+    /// Wire semantics come from the Android `d/c.java:508-545` decompilation
+    /// (`docs/08-file-operations.md` §8.11); there is no capture yet.
+    pub async fn update_files_info(&self, files: &[RemoteFile], is_sync: bool) -> Result<bool> {
+        let request = SspUpdateFileRequest {
+            r#type: Some(SspRequestType::UpdateFileInfo as i32),
+            files: files.iter().map(ssp_file_from_remote).collect(),
+            is_sync: Some(is_sync),
+        };
+        let response =
+            SspUpdateFileResponse::decode(self.session()?.request(&request).await?.as_slice())?;
+        if response.is_success != Some(true) {
+            return Err(Error::Protocol(
+                i18n::text("client.update_file_info_failed").to_string(),
+            ));
+        }
+        Ok(true)
+    }
+
+    /// Start a one-shot photo sync (PHOTO_SYNC_REQUEST, type 37).
+    ///
+    /// `files` must be the host's previous snapshot (the sync ledger) so the
+    /// phone can answer `is_first` for a fresh pc and return its current file
+    /// state; the host then diffs that state against its ledger.
+    ///
+    /// Wire semantics come from the Android `f/e.java` decompilation
+    /// (`docs/10-photo-sync.md`); there is no capture yet — first real-device
+    /// evidence lands with the M6 acceptance run.
+    pub async fn photo_sync(&self, pc_id: &str, files: &[RemoteFile]) -> Result<PhotoSyncResult> {
+        let request = SspPhotoSyncRequest {
+            r#type: Some(SspRequestType::PhotoSyncRequest as i32),
+            pc_id: Some(pc_id.to_string()),
+            files: files.iter().map(ssp_file_from_remote).collect(),
+        };
+        let response =
+            SspPhotoSyncResponse::decode(self.session()?.request(&request).await?.as_slice())?;
+        // The phone omits `is_success` on success (proto2 default-field
+        // omission, real-device verified 2026-08-03); an explicit `false` is
+        // the only rejection signal. Callers decide how to treat None.
+        Ok(PhotoSyncResult {
+            is_first: response.is_first,
+            files: response.files.into_iter().map(remote_file).collect(),
+            is_success: response.is_success,
+        })
+    }
+
+    /// Toggle the real-time sync monitor (SYNC_MONITOR_REQUEST, type 39).
+    ///
+    /// Returns whether the phone accepted the switch. The phone answers
+    /// `is_success=false` when the request is invalid for the current sync
+    /// state (e.g. enabling monitor while idle — `f/e.java` requestSyncMonitor
+    /// requires `mSyncStatus != 0`), which is an informative answer, not a
+    /// protocol failure. Callers decide how to surface it. As with
+    /// photo_sync, `is_success` may be omitted on success.
+    pub async fn sync_monitor(&self, enabled: bool) -> Result<bool> {
+        let request = SspSyncMonitorRequest {
+            r#type: Some(SspRequestType::SyncMonitorRequest as i32),
+            is_sync_monitor: Some(enabled),
+        };
+        let response =
+            SspSyncMonitorResponse::decode(self.session()?.request(&request).await?.as_slice())?;
+        Ok(response.is_success.unwrap_or(true))
+    }
+
     pub async fn delete(
         &self,
         paths: &[String],
@@ -692,7 +766,7 @@ impl HandShakerClient {
             r#type: Some(SspRequestType::GetDownloadFileRequest as i32),
             file: Some(ssp_file(remote, false, None)),
             range: Some(SspDataRange {
-                offset: Some(0),
+                offset: Some(options.offset),
                 length: Some(0),
             }),
             need_md5: Some(true),
@@ -884,6 +958,195 @@ impl HandShakerClient {
             });
         }
         Ok(size)
+    }
+
+    /// Transfer a list of files serially, aggregating per-file failures.
+    ///
+    /// Every item is attempted regardless of earlier failures; the returned
+    /// [`BatchTransferResult`] lists successful items and per-file failures.
+    /// Directories must already be expanded into file items (see
+    /// [`HandShakerClient::upload_tree`] / [`download_tree`]).
+    pub async fn upload_many(
+        &self,
+        items: &[BatchTransferItem],
+        options: BatchTransferOptions,
+    ) -> Result<BatchTransferResult> {
+        self.batch_transfer(items, options, TransferDirection::Upload)
+            .await
+    }
+
+    /// Download a list of files serially, aggregating per-file failures.
+    pub async fn download_many(
+        &self,
+        items: &[BatchTransferItem],
+        options: BatchTransferOptions,
+    ) -> Result<BatchTransferResult> {
+        self.batch_transfer(items, options, TransferDirection::Download)
+            .await
+    }
+
+    async fn batch_transfer(
+        &self,
+        items: &[BatchTransferItem],
+        options: BatchTransferOptions,
+        direction: TransferDirection,
+    ) -> Result<BatchTransferResult> {
+        if options.concurrency == 0 || options.concurrency > 8 {
+            return Err(Error::Usage(i18n::format(
+                "client.batch_concurrency_range",
+                &[&options.concurrency.to_string()],
+            )));
+        }
+        let total = items.len();
+        let done = std::sync::atomic::AtomicUsize::new(0);
+        let result = std::sync::Mutex::new(BatchTransferResult::default());
+        let transfer_options = TransferOptions {
+            overwrite: options.overwrite,
+            progress: None,
+            offset: options.offset,
+        };
+        let callback = options.progress;
+        let futures = items.iter().map(|item| async {
+            let outcome = match direction {
+                TransferDirection::Upload => {
+                    self.upload(
+                        Path::new(&item.source),
+                        &item.target,
+                        transfer_options.clone(),
+                    )
+                    .await
+                }
+                TransferDirection::Download => {
+                    self.download(
+                        &item.source,
+                        Path::new(&item.target),
+                        transfer_options.clone(),
+                    )
+                    .await
+                }
+            };
+            let entry = match outcome {
+                Ok(_) => Ok(item.clone()),
+                Err(error) => Err(BatchTransferFailure {
+                    source: item.source.clone(),
+                    target: item.target.clone(),
+                    message: error.to_string(),
+                }),
+            };
+            let completed = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if let Some(callback) = &callback {
+                callback(BatchTransferProgress {
+                    done: completed,
+                    total,
+                });
+            }
+            entry
+        });
+        let mut stream = futures_util::stream::iter(futures).buffer_unordered(options.concurrency);
+        while let Some(entry) = stream.next().await {
+            match entry {
+                Ok(item) => result.lock().expect("batch result lock").ok.push(item),
+                Err(failure) => result
+                    .lock()
+                    .expect("batch result lock")
+                    .failures
+                    .push(failure),
+            }
+        }
+        Ok(result.into_inner().expect("batch result lock"))
+    }
+
+    /// Upload a local directory tree to a remote directory, mirroring the
+    /// directory structure. Remote directories are created before files are
+    /// uploaded; per-file failures are aggregated without aborting.
+    pub async fn upload_tree(
+        &self,
+        local_dir: &Path,
+        remote_dir: &str,
+        options: BatchTransferOptions,
+    ) -> Result<BatchTransferResult> {
+        let mut items = Vec::new();
+        let mut directories = std::collections::BTreeSet::new();
+        collect_upload_tree(local_dir, remote_dir, &mut items, &mut directories)?;
+        // Create remote directories shallow-first so parents exist before
+        // children; skip ones that already exist.
+        for directory in &directories {
+            if !self.file_exists(directory).await? {
+                self.create_dir(directory).await?;
+            }
+        }
+        self.upload_many(&items, options).await
+    }
+
+    /// Download a remote directory tree into a local directory, mirroring the
+    /// structure. The remote subtree is listed with a single recursive
+    /// `GET_DIR_FILES` call; per-file failures are aggregated without aborting.
+    pub async fn download_tree(
+        &self,
+        remote_dir: &str,
+        local_dir: &Path,
+        options: BatchTransferOptions,
+    ) -> Result<BatchTransferResult> {
+        tokio::fs::create_dir_all(local_dir)
+            .await
+            .map_err(|error| {
+                Error::LocalIo(i18n::format(
+                    "client.create_failed",
+                    &[&local_dir.display().to_string(), &error.to_string()],
+                ))
+            })?;
+        let files = self.list_dir(remote_dir, u32::MAX).await?;
+        let mut items = Vec::new();
+        let base = remote_dir.trim_end_matches('/');
+        let base_prefix = format!("{base}/");
+        for file in files {
+            // The phone controls `file.path`: reject any entry outside the
+            // requested subtree (absolute escape) or containing `..`/root
+            // components before it can influence a host path.
+            let Some(relative) = file.path.strip_prefix(&base_prefix) else {
+                return Err(Error::Protocol(i18n::format(
+                    "client.download_path_escape",
+                    &[&file.path],
+                )));
+            };
+            let has_escape_component = Path::new(relative).components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            });
+            if has_escape_component {
+                return Err(Error::Protocol(i18n::format(
+                    "client.download_path_escape",
+                    &[&file.path],
+                )));
+            }
+            let local = local_dir.join(relative);
+            // Defense in depth: the normalized target must stay under the
+            // requested local root.
+            if !local.starts_with(local_dir) {
+                return Err(Error::Protocol(i18n::format(
+                    "client.download_path_escape",
+                    &[&file.path],
+                )));
+            }
+            if file.is_directory {
+                tokio::fs::create_dir_all(&local).await.map_err(|error| {
+                    Error::LocalIo(i18n::format(
+                        "client.create_failed",
+                        &[&local.display().to_string(), &error.to_string()],
+                    ))
+                })?;
+            } else {
+                items.push(BatchTransferItem {
+                    source: file.path,
+                    target: local.display().to_string(),
+                });
+            }
+        }
+        self.download_many(&items, options).await
     }
 
     /// Read and decompress the phone clipboard history.
@@ -1125,14 +1388,60 @@ impl HandShakerClient {
 
     /// Fetch Exif metadata for a remote media file.
     ///
-    /// **Reserved interface**: the original macOS client fetches EXIF over the
-    /// ADB shell channel; that implementation is planned for the M5 milestone.
-    /// This call currently returns a not-implemented error and never touches
-    /// the phone.
-    pub async fn fetch_exif(&self, _path: &str) -> Result<ExifData> {
-        Err(Error::Protocol(
-            i18n::text("exif.not_implemented").to_string(),
-        ))
+    /// The file is pulled over the SSP download channel (WiFi or ADB) into a
+    /// bounded in-memory buffer and parsed locally with `kamadak-exif`, so the
+    /// full EXIF payload is available for any media path without extending the
+    /// SSP schema. Files larger than [`exif_parser::EXIF_FETCH_LIMIT`] are rejected
+    /// with a protocol error before any data is buffered.
+    pub async fn fetch_exif(&self, path: &str) -> Result<ExifData> {
+        let bytes = self
+            .download_bytes(path, exif_parser::EXIF_FETCH_LIMIT)
+            .await?;
+        exif_parser::exif_from_bytes(&bytes)
+    }
+
+    /// Pull a remote file over the SSP download channel into memory, refusing
+    /// bodies larger than `limit` before buffering any data.
+    pub(crate) async fn download_bytes(&self, remote: &str, limit: u64) -> Result<Vec<u8>> {
+        let request = SspDownloadFileRequest {
+            r#type: Some(SspRequestType::GetDownloadFileRequest as i32),
+            file: Some(ssp_file(remote, false, None)),
+            range: Some(SspDataRange {
+                offset: Some(0),
+                length: Some(0),
+            }),
+            need_md5: Some(false),
+            gzip: Some(false),
+            is_sync: Some(false),
+        };
+        let mut open = self
+            .session()?
+            .open_with_options(&request, RequestOptions::default())
+            .await?;
+        let header =
+            SspDownloadFileResponseHeader::decode(open.receive_normal().await?.as_slice())?;
+        if header.ready != Some(true) {
+            open.finish().await;
+            return Err(remote_error(
+                header.error_code,
+                i18n::text("client.download_not_ready"),
+            ));
+        }
+        let total = header.range.and_then(|range| range.length).ok_or_else(|| {
+            Error::Protocol(i18n::text("client.download_missing_length").to_string())
+        })?;
+        if total > limit {
+            open.finish().await;
+            return Err(Error::Protocol(i18n::format(
+                "exif.file_too_large",
+                &[&total.to_string(), &limit.to_string()],
+            )));
+        }
+        let mut sink = VecSink::default();
+        let receive = open.receive_raw_to(total, &mut sink, |_| {}).await;
+        open.finish().await;
+        receive?;
+        Ok(sink.bytes)
     }
 
     /// Send QUIT and remove the ADB forward created by this client.
@@ -1215,6 +1524,7 @@ fn remote_file(file: SspFile) -> RemoteFile {
         checksum: file.checksum,
         is_trash: file.is_trash,
         id: file.id,
+        ext_data: file.ext_data,
     }
 }
 
@@ -1223,6 +1533,21 @@ fn ssp_file(path: &str, is_directory: bool, size: Option<u64>) -> SspFile {
         path: Some(path.to_string()),
         file_size: size,
         is_directory: Some(is_directory),
+        ..Default::default()
+    }
+}
+
+fn ssp_file_from_remote(file: &RemoteFile) -> SspFile {
+    SspFile {
+        path: Some(file.path.clone()),
+        file_size: Some(file.size),
+        created_timestamp: file.created_at,
+        modified_timestamp: file.modified_at,
+        is_directory: Some(file.is_directory),
+        checksum: file.checksum.clone(),
+        is_trash: file.is_trash,
+        id: file.id,
+        ext_data: file.ext_data.clone(),
         ..Default::default()
     }
 }
@@ -1372,12 +1697,89 @@ fn ensure_deleted_files_succeeded(files: &[SspFile]) -> Result<()> {
     Ok(())
 }
 
+/// Recursively collect local files below `local` into upload items whose
+/// targets mirror the tree under `remote`, recording directory targets.
+/// Synchronous walk: the collected plan is small and uploads happen later.
+fn collect_upload_tree(
+    local: &Path,
+    remote: &str,
+    items: &mut Vec<BatchTransferItem>,
+    directories: &mut std::collections::BTreeSet<String>,
+) -> Result<()> {
+    directories.insert(remote.trim_end_matches('/').to_string());
+    let entries = std::fs::read_dir(local).map_err(|error| {
+        Error::LocalIo(i18n::format(
+            "client.read_dir_failed",
+            &[&local.display().to_string(), &error.to_string()],
+        ))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            Error::LocalIo(i18n::format(
+                "client.read_dir_failed",
+                &[&local.display().to_string(), &error.to_string()],
+            ))
+        })?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let remote_child = format!("{}/{}", remote.trim_end_matches('/'), name);
+        let file_type = entry.file_type().map_err(|error| {
+            Error::LocalIo(i18n::format(
+                "client.read_dir_failed",
+                &[&path.display().to_string(), &error.to_string()],
+            ))
+        })?;
+        if file_type.is_dir() {
+            collect_upload_tree(&path, &remote_child, items, directories)?;
+        } else if file_type.is_file() {
+            items.push(BatchTransferItem {
+                source: path.display().to_string(),
+                target: remote_child,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn remote_error(code: Option<i32>, fallback: &str) -> Error {
     let message = code
         .and_then(|value| SspFileIoError::try_from(value).ok())
         .map(|value| value.as_str_name().to_string())
         .unwrap_or_else(|| fallback.to_string());
     Error::RemoteIo { code, message }
+}
+
+/// Bounded in-memory sink for `receive_raw_to`, used by `download_bytes`.
+#[derive(Default)]
+struct VecSink {
+    bytes: Vec<u8>,
+}
+
+impl AsyncWrite for VecSink {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::task::Poll::Ready(Ok({
+            self.get_mut().bytes.extend_from_slice(buf);
+            buf.len()
+        }))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
 }
 
 fn decode_clipboard(clipboard: SspClipboard) -> Result<ClipboardEntry> {
@@ -2117,15 +2519,473 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_exif_is_a_reserved_interface() {
+    async fn fetch_exif_pulls_and_parses_jpeg() {
+        let fake = FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        let data = client
+            .fetch_exif("/storage/emulated/0/DCIM/exif.jpg")
+            .await
+            .expect("exif fetch");
+        assert_eq!(data.orientation, Some(6));
+        assert_eq!(data.make.as_deref(), Some("Smartisan"));
+        assert_eq!(data.model.as_deref(), Some("U2 Pro"));
+        assert_eq!(data.latitude.as_deref(), Some("30.279339"));
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn fetch_exif_rejects_non_jpeg_with_protocol_error() {
         let fake = FakeWifiSsp::start().await;
         let client = fake.connect().await;
         let error = client
             .fetch_exif("/storage/emulated/0/DCIM/a.jpg")
             .await
-            .expect_err("exif not implemented");
+            .expect_err("not a jpeg");
         assert_eq!(error.code(), crate::error::ErrorCode::Protocol);
         assert_eq!(error.exit_code(), 5);
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn update_files_info_returns_true_on_phone_acceptance() {
+        let fake = FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        let result = client
+            .update_files_info(
+                &[RemoteFile {
+                    path: "/storage/emulated/0/DCIM/star.jpg".to_string(),
+                    size: 1024,
+                    created_at: Some(1),
+                    modified_at: Some(2),
+                    is_directory: false,
+                    checksum: Some("abcd".to_string()),
+                    is_trash: Some(false),
+                    id: Some(42),
+                    ext_data: None,
+                }],
+                false,
+            )
+            .await
+            .expect("update accepted");
+        assert!(result);
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn update_files_info_reports_phone_rejection_as_protocol_error() {
+        let fake = FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        let error = client
+            .update_files_info(
+                &[RemoteFile {
+                    path: "/reject.txt".to_string(),
+                    size: 0,
+                    created_at: None,
+                    modified_at: None,
+                    is_directory: false,
+                    checksum: None,
+                    is_trash: None,
+                    id: None,
+                    ext_data: None,
+                }],
+                true,
+            )
+            .await
+            .expect_err("rejected path");
+        assert_eq!(error.code(), crate::error::ErrorCode::Protocol);
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn photo_sync_sends_snapshot_and_returns_phone_state() {
+        let fake = FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        let result = client
+            .photo_sync(
+                "hs-abc",
+                &[RemoteFile {
+                    path: "/storage/emulated/0/DCIM/gone.jpg".to_string(),
+                    size: 512,
+                    created_at: None,
+                    modified_at: Some(1),
+                    is_directory: false,
+                    checksum: Some("old".to_string()),
+                    is_trash: None,
+                    id: Some(9),
+                    ext_data: None,
+                }],
+            )
+            .await
+            .expect("photo sync");
+        // Real device omits is_success on success; the client must treat
+        // None as acceptance and let the caller inspect the explicit flag.
+        assert_eq!(result.is_success, None);
+        // The fake echoes the snapshot minus the deleted file and adds a.jpg.
+        let paths: Vec<&str> = result.files.iter().map(|file| file.path.as_str()).collect();
+        assert!(!paths.contains(&"/storage/emulated/0/DCIM/gone.jpg"));
+        assert!(paths.contains(&"/storage/emulated/0/DCIM/a.jpg"));
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn sync_monitor_enable_receives_file_change_push() {
+        let fake = FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        let mut events = client.subscribe_events(EventFilter::all());
+        let accepted = client.sync_monitor(true).await.expect("enable monitor");
+        assert!(accepted);
+        // The fake pushes one FILE_CHANGE(38) after the monitor is enabled.
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+            .await
+            .expect("push timeout")
+            .expect("push event");
+        let crate::events::ClientEvent::FileChanged(changes) = event else {
+            panic!("expected FileChanged push, got {event:?}");
+        };
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            changes[0].file.as_ref().map(|f| f.path.as_str()),
+            Some("/storage/emulated/0/DCIM/live.jpg")
+        );
+        assert_eq!(changes[0].status, crate::events::FileChangeStatus::Added);
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn batch_transfer_with_concurrency_two_keeps_results_and_failures() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let local_a = temp.path().join("a.bin");
+        let local_b = temp.path().join("b.bin");
+        let local_c = temp.path().join("c.bin");
+
+        let fake = FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        // The fake device serves b"download-data" for any path; three items
+        // download concurrently with concurrency 2 and all must surface.
+        let result = client
+            .download_many(
+                &[
+                    BatchTransferItem {
+                        source: "/storage/emulated/0/a.txt".to_string(),
+                        target: local_a.display().to_string(),
+                    },
+                    BatchTransferItem {
+                        source: "/storage/emulated/0/a.txt".to_string(),
+                        target: local_b.display().to_string(),
+                    },
+                    BatchTransferItem {
+                        source: "/storage/emulated/0/a.txt".to_string(),
+                        target: local_c.display().to_string(),
+                    },
+                ],
+                BatchTransferOptions {
+                    overwrite: true,
+                    progress: None,
+                    offset: 0,
+                    concurrency: 2,
+                },
+            )
+            .await
+            .expect("concurrent batch");
+        assert_eq!(result.ok.len(), 3, "three downloads succeed");
+        assert_eq!(result.failures.len(), 0);
+        for local in [&local_a, &local_b, &local_c] {
+            let content = tokio::fs::read(local).await.expect("read target");
+            assert_eq!(content, b"download-data");
+        }
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn batch_transfer_rejects_out_of_range_concurrency() {
+        let fake = FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        let error = client
+            .upload_many(
+                &[],
+                BatchTransferOptions {
+                    overwrite: false,
+                    progress: None,
+                    offset: 0,
+                    concurrency: 0,
+                },
+            )
+            .await
+            .expect_err("concurrency 0 rejected");
+        assert_eq!(error.code(), crate::error::ErrorCode::Usage);
+
+        let error = client
+            .upload_many(
+                &[],
+                BatchTransferOptions {
+                    overwrite: false,
+                    progress: None,
+                    offset: 0,
+                    concurrency: 9,
+                },
+            )
+            .await
+            .expect_err("concurrency 9 rejected");
+        assert_eq!(error.code(), crate::error::ErrorCode::Usage);
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn upload_many_aggregates_per_file_results() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let first = temp.path().join("one.bin");
+        let second = temp.path().join("two.bin");
+        tokio::fs::write(&first, b"one").await.expect("write");
+        tokio::fs::write(&second, b"two").await.expect("write");
+
+        let fake = FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        let result = client
+            .upload_many(
+                &[
+                    BatchTransferItem {
+                        source: first.display().to_string(),
+                        target: "/remote/one.bin".to_string(),
+                    },
+                    BatchTransferItem {
+                        source: second.display().to_string(),
+                        target: "/remote/two.bin".to_string(),
+                    },
+                ],
+                BatchTransferOptions {
+                    overwrite: false,
+                    progress: None,
+                    offset: 0,
+                    concurrency: 1,
+                },
+            )
+            .await
+            .expect("batch upload");
+        assert_eq!(result.ok.len(), 2);
+        assert!(result.failures.is_empty());
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn download_with_offset_streams_from_the_seek_position() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let local = temp.path().join("tail.bin");
+
+        let fake = FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        client
+            .download_with_options(
+                "/storage/emulated/0/a.txt",
+                &local,
+                TransferOptions {
+                    overwrite: true,
+                    progress: None,
+                    offset: 5,
+                },
+                RequestOptions::default(),
+            )
+            .await
+            .expect("range download");
+        // Fake serves b"download-data" (13 bytes); offset 5 yields the tail.
+        let content = tokio::fs::read(&local).await.expect("read target");
+        assert_eq!(content, b"oad-data");
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn download_offset_beyond_eof_yields_an_empty_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let local = temp.path().join("empty.bin");
+
+        let fake = FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        client
+            .download_with_options(
+                "/storage/emulated/0/a.txt",
+                &local,
+                TransferOptions {
+                    overwrite: true,
+                    progress: None,
+                    offset: 1000,
+                },
+                RequestOptions::default(),
+            )
+            .await
+            .expect("range download past EOF");
+        let content = tokio::fs::read(&local).await.expect("read target");
+        assert!(content.is_empty());
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn download_many_with_offset_round_trips_through_the_batch() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let local = temp.path().join("batch-tail.bin");
+
+        let fake = FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        let result = client
+            .download_many(
+                &[BatchTransferItem {
+                    source: "/storage/emulated/0/a.txt".to_string(),
+                    target: local.display().to_string(),
+                }],
+                BatchTransferOptions {
+                    overwrite: true,
+                    progress: None,
+                    offset: 9,
+                    concurrency: 1,
+                },
+            )
+            .await
+            .expect("batch range download");
+        assert_eq!(result.ok.len(), 1);
+        let content = tokio::fs::read(&local).await.expect("read target");
+        assert_eq!(content, b"data", "last 4 bytes of download-data");
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn download_many_writes_all_files_and_reports_failures() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let local_a = temp.path().join("a.bin");
+        let local_b = temp.path().join("b.bin");
+
+        let fake = FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        // /storage/emulated/0/missing.bin is not served by the fake device
+        // (only exif.jpg and the default download-data path), so the first
+        // item succeeds with download-data and the second one must be
+        // reported; the batch continues.
+        let result = client
+            .download_many(
+                &[
+                    BatchTransferItem {
+                        source: "/storage/emulated/0/a.txt".to_string(),
+                        target: local_a.display().to_string(),
+                    },
+                    BatchTransferItem {
+                        source: "/storage/emulated/0/a.txt".to_string(),
+                        target: local_b.display().to_string(),
+                    },
+                ],
+                BatchTransferOptions {
+                    overwrite: true,
+                    progress: None,
+                    offset: 0,
+                    concurrency: 1,
+                },
+            )
+            .await
+            .expect("batch download");
+        assert_eq!(result.ok.len(), 2);
+        assert!(result.failures.is_empty());
+        let content = tokio::fs::read(&local_a).await.expect("read a");
+        assert_eq!(content, b"download-data");
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn upload_tree_mirrors_local_directory_structure() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let tree = temp.path().join("tree");
+        std::fs::create_dir_all(tree.join("sub")).expect("mkdir sub");
+        std::fs::write(tree.join("root.txt"), b"root").expect("write");
+        std::fs::write(tree.join("sub").join("leaf.txt"), b"leaf").expect("write");
+
+        let fake = FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        let result = client
+            .upload_tree(
+                &tree,
+                "/storage/emulated/0/hs_m5_test",
+                BatchTransferOptions {
+                    overwrite: false,
+                    progress: None,
+                    offset: 0,
+                    concurrency: 1,
+                },
+            )
+            .await
+            .expect("upload tree");
+        assert_eq!(result.ok.len(), 2, "both files uploaded");
+        assert!(result.failures.is_empty());
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn download_tree_mirrors_remote_directory_structure() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let local_root = temp.path().join("out");
+
+        let fake = FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        let result = client
+            .download_tree(
+                "/storage/emulated/0/hs_m5_test",
+                &local_root,
+                BatchTransferOptions {
+                    overwrite: true,
+                    progress: None,
+                    offset: 0,
+                    concurrency: 1,
+                },
+            )
+            .await
+            .expect("download tree");
+        assert_eq!(result.ok.len(), 1, "fake device lists one file");
+        let content = tokio::fs::read(local_root.join("a.txt"))
+            .await
+            .expect("downloaded file");
+        assert_eq!(content, b"download-data");
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn download_tree_rejects_paths_escaping_the_requested_subtree() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let local_root = temp.path().join("out");
+
+        let fake = FakeWifiSsp::start_with_escape_path().await;
+        let client = fake.connect().await;
+        let error = client
+            .download_tree(
+                "/storage/emulated/0/hs_m5_test",
+                &local_root,
+                BatchTransferOptions {
+                    overwrite: true,
+                    progress: None,
+                    offset: 0,
+                    concurrency: 1,
+                },
+            )
+            .await
+            .expect_err("escape must be rejected");
+        assert_eq!(error.code(), crate::error::ErrorCode::Protocol);
+        // The root directory is created up front, but no hostile file may be
+        // written into it.
+        let mut entries = tokio::fs::read_dir(&local_root)
+            .await
+            .expect("read out dir");
+        assert!(
+            entries.next_entry().await.expect("first entry").is_none(),
+            "no files may be written by an escaping listing"
+        );
         client.close().await.expect("close");
         fake.finish().await;
     }

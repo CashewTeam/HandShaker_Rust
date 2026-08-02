@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Device information returned by the phone during connection.
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
@@ -102,6 +102,10 @@ pub struct RemoteFile {
     pub is_trash: Option<bool>,
     /// Media-store identifier, when available.
     pub id: Option<u64>,
+    /// Phone-side extension data (JSON with star/orientation/updateTime),
+    /// used by the photo-sync channel to distinguish content changes from
+    /// metadata-only changes. Opaque to the host.
+    pub ext_data: Option<String>,
 }
 
 /// One decompressed clipboard entry.
@@ -162,6 +166,11 @@ pub struct TransferOptions {
     pub overwrite: bool,
     /// Optional callback for progress events.
     pub progress: Option<TransferProgressCallback>,
+    /// Download starting offset in bytes (downloads only). The phone seeks to
+    /// this position once and streams from there — there is no resumption
+    /// state, matching the captured wire behavior (`range` is a one-shot
+    /// seek). Defaults to 0 (from the start of the file).
+    pub offset: u64,
 }
 
 impl std::fmt::Debug for TransferOptions {
@@ -169,9 +178,93 @@ impl std::fmt::Debug for TransferOptions {
         formatter
             .debug_struct("TransferOptions")
             .field("overwrite", &self.overwrite)
+            .field("offset", &self.offset)
             .field("has_progress_callback", &self.progress.is_some())
             .finish()
     }
+}
+
+/// One unit of a batch transfer: `source` is the local path for uploads and
+/// the remote path for downloads; `target` is the counterpart on the other
+/// side. Directories are expanded by the caller (`upload_tree`/`download_tree`)
+/// into a flat list of file items before the batch runs.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BatchTransferItem {
+    /// Source path (local for upload, remote for download).
+    pub source: String,
+    /// Target path (remote for upload, local for download).
+    pub target: String,
+}
+
+/// Progress across the files of a batch transfer (serial execution).
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct BatchTransferProgress {
+    /// Files finished so far (successful or failed).
+    pub done: usize,
+    /// Total files in the batch.
+    pub total: usize,
+}
+
+/// Callback invoked after each file of a batch transfer completes.
+pub type BatchTransferProgressCallback = Arc<dyn Fn(BatchTransferProgress) + Send + Sync>;
+
+/// Options for `HandShakerClient::upload_many`/`download_many`.
+#[derive(Clone)]
+pub struct BatchTransferOptions {
+    /// Permit replacing existing local or remote targets.
+    pub overwrite: bool,
+    /// Optional callback invoked after each file completes.
+    pub progress: Option<BatchTransferProgressCallback>,
+    /// Download starting offset in bytes (downloads only; one-shot seek, no
+    /// resumption state). Defaults to 0.
+    pub offset: u64,
+    /// Maximum files transferred in parallel (1..=8). Defaults to 1 (serial),
+    /// which keeps ordering deterministic and matches pre-0.4.1 behavior.
+    pub concurrency: usize,
+}
+
+impl Default for BatchTransferOptions {
+    fn default() -> Self {
+        Self {
+            overwrite: false,
+            progress: None,
+            offset: 0,
+            concurrency: 1,
+        }
+    }
+}
+
+impl std::fmt::Debug for BatchTransferOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BatchTransferOptions")
+            .field("overwrite", &self.overwrite)
+            .field("offset", &self.offset)
+            .field("concurrency", &self.concurrency)
+            .field("has_progress_callback", &self.progress.is_some())
+            .finish()
+    }
+}
+
+/// A failed file within a batch transfer. The batch continues past failures;
+/// the message carries the per-file error text.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BatchTransferFailure {
+    /// The item's source path.
+    pub source: String,
+    /// The item's target path.
+    pub target: String,
+    /// Human-readable error message for this file.
+    pub message: String,
+}
+
+/// Aggregated result of a batch transfer: successes and per-file failures.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
+pub struct BatchTransferResult {
+    /// Items that transferred successfully.
+    pub ok: Vec<BatchTransferItem>,
+    /// Items that failed, with per-file error messages.
+    pub failures: Vec<BatchTransferFailure>,
 }
 
 /// An image entry from the phone photo library.
@@ -333,7 +426,7 @@ pub struct AudioAlbum {
 }
 
 /// A snapshot of the phone photo library.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
 pub struct PhotoLibrary {
     /// All images in the library.
     pub images: Vec<ImageFile>,
@@ -344,7 +437,7 @@ pub struct PhotoLibrary {
 }
 
 /// A snapshot of the phone video library.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
 pub struct VideoLibrary {
     /// All videos in the library.
     pub videos: Vec<VideoFile>,
@@ -353,7 +446,7 @@ pub struct VideoLibrary {
 }
 
 /// A snapshot of the phone audio library.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
 pub struct AudioLibrary {
     /// All audio tracks in the library.
     pub tracks: Vec<AudioFile>,
@@ -374,17 +467,95 @@ pub struct Thumbnails {
 
 /// Exif metadata for a media file.
 ///
-/// Reserved for the EXIF fetch milestone (M5, planned to use the ADB shell
-/// channel like the original macOS client); `HandShakerClient::fetch_exif`
-/// currently returns a not-implemented error.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+/// Fetched on demand with `HandShakerClient::fetch_exif`: the file is pulled
+/// over the SSP download channel (WiFi or ADB) and parsed locally with
+/// `kamadak-exif`, so the full EXIF payload is available for any media path
+/// without extending the SSP schema.
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
 pub struct ExifData {
     /// Exif orientation value.
     pub orientation: Option<u32>,
-    /// Time the photo was taken.
+    /// Time the photo was taken (Unix seconds).
     pub date_taken: Option<u64>,
     /// Latitude string.
     pub latitude: Option<String>,
     /// Longitude string.
     pub longitude: Option<String>,
+    /// Camera make, e.g. "Smartisan".
+    pub make: Option<String>,
+    /// Camera model, e.g. "U2 Pro".
+    pub model: Option<String>,
+    /// Software that wrote the file, e.g. "Camera".
+    pub software: Option<String>,
+    /// Lens model.
+    pub lens_model: Option<String>,
+    /// Focal length in millimetres.
+    pub focal_length: Option<f64>,
+    /// Exposure time in seconds, e.g. 1/125 -> 0.008.
+    pub exposure_time: Option<f64>,
+    /// F-number, e.g. 1.8.
+    pub f_number: Option<f64>,
+    /// ISO speed rating.
+    pub iso: Option<u32>,
+}
+
+/// Photo-sync profile: which phone folder to sync and where to store it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncConfig {
+    /// Stable phone identifier used to key the ledger file.
+    pub device_uuid: String,
+    /// Phone-side root folder to sync (e.g. /storage/emulated/0/DCIM/Camera).
+    pub phone_root: String,
+    /// Local destination directory for downloaded photos.
+    pub local_root: String,
+    /// Stable host-side pc identifier sent with PHOTO_SYNC_REQUEST(37).
+    pub pc_id: String,
+}
+
+/// One recorded file in the sync ledger.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncFileRecord {
+    /// Phone-side file size.
+    pub size: u64,
+    /// Phone-reported checksum (MD5 over name+size+head), when available.
+    pub checksum: Option<String>,
+    /// Phone-side extension data (star/orientation/updateTime JSON), opaque.
+    pub ext_data: Option<String>,
+    /// Phone-side modification timestamp.
+    pub modified_at: Option<u64>,
+    /// Local file path the photo was downloaded to.
+    pub local_path: String,
+    /// SHA-256 of the downloaded local file at ledger commit time.
+    pub local_sha256: Option<String>,
+}
+
+/// Ledger snapshot keyed by absolute phone path.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncSnapshot {
+    /// Phone path -> recorded file.
+    pub files: BTreeMap<String, SyncFileRecord>,
+}
+
+/// Plan diff between the phone's current photo state and the local ledger.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct SyncDiff {
+    /// Files to download (new or content-modified).
+    pub added: Vec<String>,
+    /// Files whose phone metadata changed (ext_data/modified_at) only.
+    pub info_modified: Vec<String>,
+    /// Files deleted on the phone (to remove locally, unless conflicted).
+    pub deleted: Vec<String>,
+    /// Local files kept because they differ from the ledger (user-modified).
+    pub conflicts: Vec<String>,
+}
+
+/// Phone's answer to a PHOTO_SYNC_REQUEST(37).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PhotoSyncResult {
+    /// Whether this pc_id is new to the phone (first sync).
+    pub is_first: Option<bool>,
+    /// Current phone-side file state list.
+    pub files: Vec<RemoteFile>,
+    /// Whether the phone accepted the request.
+    pub is_success: Option<bool>,
 }

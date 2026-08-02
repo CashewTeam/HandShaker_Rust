@@ -13,3 +13,6 @@
 # Added by cargo
 
 /target
+
+# 原始 1.2.0 APK 反编译产物(从真机提取,仅研究用)
+/original_smali_1.2.0/

@@ -1,6 +1,6 @@
 # HandShaker_Rust 后端现状与完整开发计划
 
-> 状态基线：2026-08-02，Cargo package `handshaker_rust 0.3.0`。
+> 状态基线：2026-08-02，Cargo package `handshaker_rust 0.5.0`。
 >
 > 本文只把已经存在于 Rust 代码中的能力标记为“已实现”。协议文档、proto schema 或抓包已经确认，
 > 但尚未形成正式 Rust API/CLI 的能力，仍标记为“未实现”。
@@ -173,10 +173,10 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 |---:|---|---|
 | 1 | HEART_BEAT | ✅ Session 心跳和 `device ping` |
 | 2 | GET_DEVICE_INFO | ✅ 连接初始化和 `device info` |
-| 3 | GET_THUMBNAIL | ⬜ 未实现 |
-| 4 | GET_PHOTO_LIB | ⬜ 未实现 |
-| 5 | GET_VIDEO_LIB | ⬜ 未实现 |
-| 6 | GET_AUDIO_LIB | ⬜ 未实现 |
+| 3 | GET_THUMBNAIL | ✅ `get_thumbnails`（M4，批量 JPEG，错误条目不整批失败） |
+| 4 | GET_PHOTO_LIB | ✅ `get_photo_library`（M4，全量映射） |
+| 5 | GET_VIDEO_LIB | ✅ `get_video_library`（M4，全量映射） |
+| 6 | GET_AUDIO_LIB | ✅ `get_audio_library`（M4，全量映射） |
 | 7 | GET_DIR_FILES | ✅ 已实现 |
 | 8 | GET_FILE_COUNT | ✅ 已实现 |
 | 9 | GET_FILE_EXIST | ✅ 已实现 |
@@ -185,16 +185,16 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 | 12–14 | DOWNLOAD 请求、响应头、数据面 | ✅ 单文件全量下载；⬜ range/resume 未实现 |
 | 15–18 | UPLOAD 请求头、ready、数据面、完成 | ✅ 单文件上传 |
 | 19 | DELETE_FILE | ✅ 已实现 |
-| 20 | PHOTO_LIB_CHANGE | ✅ library 强类型事件；查询 API 未实现 |
-| 21 | AUDIO_LIB_CHANGE | ✅ library 强类型事件；查询 API 未实现 |
-| 22 | VIDEO_LIB_CHANGE | ✅ library 强类型事件；查询 API 未实现 |
-| 23–25 | MONITOR_FOLDER 请求、确认、回调 | ⬜ 未实现 |
+| 20 | PHOTO_LIB_CHANGE | ✅ library 强类型事件；CLI `watch` 已接入（M3/M4 真机验证） |
+| 21 | AUDIO_LIB_CHANGE | ✅ library 强类型事件；CLI `watch` 已接入（M3/M4 真机验证） |
+| 22 | VIDEO_LIB_CHANGE | ✅ library 强类型事件；CLI `watch` 已接入（M3/M4 真机验证） |
+| 23–25 | MONITOR_FOLDER 请求、确认、回调 | ✅ `monitor_folder` + CLI `watch --path`（M3 真机验证） |
 | 26 | GET_CLIPBOARD | ✅ 已实现 |
 | 27 | POST_CLIPBOARD | ✅ 已实现 |
 | 28 | CLEAR_CLIPBOARD | ✅ 已实现 |
 | 29 | DELETE_CLIPBOARD | ✅ 已实现 |
-| 30 | CLIPBOARD_CHANGE | ✅ library 强类型事件；CLI watch 未实现 |
-| 31–34 | WiFi REQUEST_01/02 握手与信任 | ⬜ 未实现 |
+| 30 | CLIPBOARD_CHANGE | ✅ library 强类型事件；CLI `watch` 已接入（M3 真机验证） |
+| 31–34 | WiFi REQUEST_01/02 握手与信任 | ✅ `WifiTrustHandshake` + `--wifi`（M2，真机验证） |
 | 35 | QUIT | ✅ 已实现 |
 | 36 | CANCEL | ✅ 公共本地/远端取消模型和 flag 2 路由 |
 | 37 | PHOTO_SYNC | ✅ library 事件解码；同步请求 API 未实现 |
@@ -384,65 +384,70 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 - ✅ 真机完整验收（2026-08，OD103）：首次连接授权、重连免弹窗、WiFi 业务（文件/传输 MD5 一致/剪贴板）、
   trust reset、failed 自动清理与信任重建全部通过；记录见 `docs/18 §4.3`。
 
-### M3：目录监控与设备/剪贴板主动推送
+### M3：目录监控与设备/剪贴板主动推送（已完成，2026-08，0.2.0）
 
-目标：完成首批依赖事件总线的实时功能。
+目标：完成首批依赖事件总线的实时功能。实现记录见 `docs/19-m3-directory-watch.md`。
 
-任务：
+完成情况：
 
-- 实现 `MONITOR_FOLDER_REQUEST`、确认头和文件事件回调。
-- 提供开始监控、停止监控、递归范围和事件订阅 API。
-- 将 `SSPFileEventType` 映射为稳定领域枚举。
-- 实现设备信息变更和剪贴板变更事件。
-- CLI 增加 `fs watch`、`clipboard watch`，JSONL 输出稳定事件 envelope。
-- 实现断线终止和可选的显式重新订阅；不做静默无限重试。
+- ✅ `MONITOR_FOLDER_REQUEST`（type 23）/ `SSPMonitorFolderResponseHeader`（type 24）：
+  `client.monitor_folder(path, register)` 注册/注销 API，手机拒绝时按 `error_message` 映射 `RemoteIo`。
+- ✅ 设备/剪贴板/媒体/目录主动推送经既有事件总线广播（`EventFilter` 订阅、`Lagged` 明确报错）。
+- ✅ CLI `watch` 命令：`--path` 可重复注册、human/jsonl 输出稳定事件 envelope（`schema_version=1`）、
+  Ctrl-C 注销后返回中断、断开（`Closed`）明确报错；`connect_with_all_callbacks` 全 callback 连接
+  （修复媒体变更推送收不到的问题）。
+- ✅ 安全加固：session 线级 64 MiB 响应上限（声明 total 早拒）、watch/媒体 human 输出
+  `sanitize_human`（C0/DEL/C1 剥离，防终端转义注入）。
+- ✅ 真机完整验收（2026-08，OD103）：目录事件（create→close_write→moved_from）、剪贴板事件、
+  媒体库变更推送（MediaScanner 广播后 `media_library_changed`）全部收到；记录见 `docs/19 §6`。
 
-验收：
+### M4：媒体库与缩略图（已完成，2026-08，0.3.0）
 
-- 创建、写入、移动、删除目录测试文件时能收到顺序正确的事件。
-- Ctrl-C 能停止监控、发送必要关闭请求并清理连接。
-- JSONL 事件可被脚本持续消费且不会混入 human 日志。
+目标：覆盖图片、视频、音频及其变更推送。实现记录见 `docs/20-m4-media-library.md`。
 
-### M4：媒体库与缩略图
+完成情况：
 
-目标：覆盖图片、视频、音频及其变更推送。
+- ✅ 公开领域类型：`ImageFile`/`ImageAlbum`/`VideoFile`/`VideoAlbum`/`AudioFile`/`AudioAlbum`
+  与容器 `PhotoLibrary`/`VideoLibrary`/`AudioLibrary`/`Thumbnails`（EXIF 方向/经纬度/date_taken/收藏）。
+- ✅ 三类查询 API：`get_photo/video/audio_library`（type 4/5/6，全量映射，audio duration ms→s）。
+- ✅ 缩略图：`get_thumbnails`（批量 JPEG，`get_thumbnail_error` 条目单独标记不整批失败）。
+- ✅ `fetch_exif` 预留接口（公开签名，返回 `Error::Protocol` 未实现错误；M5 走 ADB shell 落地）。
+- ✅ CLI `media photo|video|audio`：默认预览上限 50 条（`--limit`/`--all` 覆盖，JSON 恒输出
+  `total`/`truncated`，albums 同限截断）；`media thumbnail <id|path>... --output-dir <dir>` 写文件
+  （按回显 media_id/path 匹配、数字 id 溢出报 Usage、失败条目不中断、文件名仅本地生成防穿越）。
+- ✅ 安全：session 64 MiB 响应上限 + 媒体解码二次上限（`decode_media_response`）。
+- ✅ 真机完整验收（2026-08，OD103）：照片 3005 张 + 25 相册（含 Polarr 经纬度 30.279339/120.16548）、
+  预览截断 `"total":3005,"truncated":true`、视频/音频查询、缩略图 JPEG 可解码（magic `ffd8ff`）、
+  watch 实时收到媒体变更；记录见 `docs/20 §6`。
 
-任务：
+任务（原始规划，供对照）：
 
-- 新增 `ImageFile`、`ImageAlbum`、`VideoFile`、`VideoAlbum`、`AudioFile`、`AudioAlbum` 等领域类型。
-- 实现照片、视频和音频库查询 API。
-- 实现缩略图请求、错误字段和二进制输出策略。
-- 支持相册、媒体 ID、EXIF、方向、时间、经纬度和收藏状态。
-- 接入 PHOTO/AUDIO/VIDEO_LIB_CHANGE 推送。
-- 设计大型媒体库分页、流式输出和内存限制。
-- CLI 增加 `media photo|video|audio` 查询和 watch 命令。
+- ⬜ 媒体库变更增量合并（当前 watch 输出原始 added/deleted/updated 列表，M5 候选）。
+- ⬜ 媒体库分页（协议请求无分页参数，当前 CLI 层预览截断；需协议确认后实现服务端分页）。
+- ⬜ 大型媒体库的流式输出（当前 session 64 MiB 响应上限保护）。
 
-验收：
+### M5：批量、递归传输与文件元数据（已完成，2026-08，0.4.0）
 
-- 三类媒体查询与手机系统媒体库结果可抽样核对。
-- 缩略图数据可解码，错误条目不会导致整批失败。
-- 媒体变更能通过 JSONL 持续输出。
+目标：在保持单文件原语可靠的前提下提供实用批量文件管理。实现记录见 `docs/21-m5-exif-batch.md`。
 
-### M5：批量、递归传输与文件元数据
+完成情况：
 
-目标：在保持单文件原语可靠的前提下提供实用批量文件管理。
+- ✅ EXIF 拉取落地：`fetch_exif(path)`（SSP 下载通道 32 MiB 上限 + `kamadak-exif` 本地解析，
+  WiFi/ADB 通用；ExifData 扩展厂商/型号/镜头/焦距/曝光/光圈/ISO）。
+- ✅ 媒体库变更增量合并：`media_merge::apply_photo/video/audio`（key = media_id 优先、path 兜底；
+  added/updated upsert 保留快照独有字段；deleted 按 key 移除；kind 不匹配报协议错）；
+  顺带修复事件通道 audio duration 毫秒→秒。
+- ✅ 批量/递归传输：`upload_many/download_many`（串行、失败聚合）、`upload_tree/download_tree`
+  （镜像目录结构）；CLI `fs push/pull` 多目标 + `--recursive`（`--` 分隔目标），批量覆盖预检+
+  确认、批量进度与结果聚合输出。
+- ✅ 自动测试 120 个全部通过；真机验收见 `docs/21 §6.3`。
 
-任务：
+任务（原始规划，供对照）：
 
-- 在 library 层建立批量任务模型，不把遍历和并发控制塞进 CLI。
-- 实现递归目录扫描、目标映射、冲突预检和任务计划。
-- 实现受控并发、总进度、单项结果和部分失败报告。
-- 增加 dry-run 和明确的覆盖/删除确认。
-- 调研并验证 range 下载，验证通过后实现断点续传。
-- 若协议不支持上传恢复，明确保持全量重传，不制造伪恢复。
-- 实现 `UPDATE_FILE_INFO` 和可确认的文件元数据字段。
-- 增加 `fs pull/push --recursive` 或独立批量命令，并保持单文件语义兼容。
-
-验收：
-
-- 多层目录往返传输后路径、大小和 MD5 一致。
-- 单文件失败不会掩盖其他任务结果。
-- 中断后临时文件和任务状态可解释、可清理。
+- ⬜ dry-run（任务计划预览）。
+- ⬜ range 下载断点续传（协议需先调研验证）。
+- ⬜ `UPDATE_FILE_INFO`（40–41）与可确认的文件元数据字段。
+- ⬜ 受控并发（当前按用户决策串行）。
 
 ### M6：照片同步与实时同步
 
@@ -552,7 +557,7 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ## 9. 版本建议
 
-- 当前 `0.3.0`：ADB 基线 + 事件/取消 + WiFi 连接与信任 + 目录监控/主动推送 watch + 媒体库与缩略图。
+- 当前 `0.5.0`：ADB 基线 + 事件/取消 + WiFi 连接与信任 + 目录监控/主动推送 watch + 媒体库与缩略图 + EXIF/增量合并/批量传输 + 照片同步（PHOTO_SYNC/SYNC_MONITOR 发送侧与增量状态机）。
 - 媒体、同步或 USB 等较大里程碑：根据 public API 兼容性由维护者决定 Y 版本。
 - `1.0.0` 前提：至少 ADB + WiFi 稳定、公开 API 和 JSON schema 有兼容承诺、跨平台发布流程成熟。
 - 单次 Bug 修复和简单功能默认只递增 Z；纯文档不递增版本。
@@ -560,13 +565,11 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ## 10. 下一步建议
 
-M0（ADB 基线）、M1（事件/取消）、M2（WiFi 连接与信任）、M3（目录监控与主动推送 watch）、
-M4（媒体库与缩略图）均已完成。建议接着执行 **M5**：
+M0–M6 均已完成（M5 = EXIF 拉取 + 媒体库增量合并 + 批量/递归传输，0.4.0；M5 收尾 = dry-run/区间下载/UPDATE_FILE_INFO/受控并发，0.4.1；M6 = 照片同步与实时同步，0.5.0）。建议接着执行 **M7**（USB AOA 连接）或优先处理遗留项：
 
-1. 先补一次 M3 的受控真机补验（若需要）：真实终端验证 `watch` 的 Ctrl-C 注销与退出码 130；
-2. 实现 **EXIF 拉取**（`fetch_exif` 预留接口落地，走 ADB shell 通道，覆盖 ROM 差异的
-   ext_data 解析）与媒体库变更增量合并；
-3. 或优先做多文件/递归传输与批量进度（文件与传输扩展）。
+1. M6 遗留：`sync run` 串行下载可接入 `batch_transfer` 并发；37/38/39 发送侧真机验收（§6.2 待执行）；
+2. 安全遗留：剪贴板 gzip 解压输出上限（M3 记录）、`fs ls/device.info/clipboard.get` human 输出
+   控制字符净化（既有 LOW，与 watch/media 一致化）。
 
 依赖已就绪的强类型事件总线，同步阶段不需要再改 Session。
 

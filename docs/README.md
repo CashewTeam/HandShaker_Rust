@@ -41,6 +41,8 @@ HandShaker 的局域网设备发现使用 **Apple Bonjour（mDNS/DNS-SD）**，�
 | [18-m2-wifi-trust](18-m2-wifi-trust.md) | M2 WiFi 发现、连接与持久化信任（设计与实现记录） |
 | [19-m3-directory-watch](19-m3-directory-watch.md) | M3 目录监控与设备/剪贴板主动推送（设计与实现记录） |
 | [20-m4-media-library](20-m4-media-library.md) | M4 媒体库与缩略图（设计与实现记录） |
+| [21-m5-exif-batch](21-m5-exif-batch.md) | M5 EXIF 拉取、媒体库增量合并与批量/递归传输（设计与实现记录） |
+| [22-m6-photo-sync](22-m6-photo-sync.md) | M6 照片同步与实时同步（设计与实现记录） |
 
 ## 术语
 

@@ -27,9 +27,15 @@
 ## 10.3 PHOTO_SYNC_REQUEST(37) 处理（`decoder/a.java:159-161` → `f/e.java:135-175`）
 
 1. 状态必须为 0（空闲），否则拒绝。
-2. 枚举本机照片（selection：`_data LIKE '<root>%'` + 隐藏 bucket 排除 + `media_type=1`，按 date_added desc）。
+2. 枚举本机照片（selection：`_data LIKE '<外部存储根>%' AND bucket_id NOT IN (status=2 的
+   bucket) AND media_type = 1`，按 date_added desc，无 limit；锤子 ROM 走
+   `content://smartisanos_gallery/files`，projection 含 star/orientation/date_attribute_update
+   → `ext_data` JSON）。**真机交叉验证(2026-08-03,原始 1.2.0 smali)**:非相册目录新文件的
+   `bucket_id=-837405474` 属 status=2 排除项,不进 37 响应;相册目录(如 DCIM/Camera)新照片
+   正常进入。
 3. `is_first = !hasSeen(pc_id)`。
-4. 回 `SSPPhotoSyncResponse{is_first, files=本机全量, is_success=true}`。
+4. 回 `SSPPhotoSyncResponse{is_first, files=本机全量, is_success}`（成功时 `is_success`
+   可能省略——proto2 optional；真机实测省略与显式 true 均出现）。
 5. 成功后注册照片 ContentObserver，开启 PHOTO_SYNC 事件开关（`d()`，`f/e.java:238-242`）。
 
 ## 10.4 增量 diff 与 FILE_CHANGE(38)
@@ -65,6 +71,27 @@ Mac 端同步由 `SFSynchManager` + `SFSyncSession` + `SFSyncFile` + 一系列 P
 - 错误域 `com.smartisan.handshaker.filesync`，错误码 -1000（同步项缺失/一般）、-1040（实时同步
   更新失败）、-1110、-1140（传输失败）等。
 - 会话文件字典 `filesDict1AfterSync`（上次会话枚举结果）用于 diff（`HandShaker_Mac.m:16610-17214`）。
+
+### 10.6.1 协议接口（SmartFinderCore / SmartFinderNetwork,三端交叉验证 2026-08-03）
+
+`SFDeviceClient`（SmartFinderCore.h:2948-2963 与 HandShaker_Mac.m:180051）暴露照片同步接口:
+
+| Mac 接口 | 底层消息 | 说明 |
+|---|---|---|
+| `execPhotoSyncWithMacUUID:lastFiles:callback:` | `SSPPhotoSyncRequest{type=37, pcId, filesArray}` | `pcId` = `SFGenericDevice getMacUUID`(**host UUID 原文**,无前缀);`lastFiles` = 上次快照 |
+| `registerFileChangedMonitorWithCallback:` | FILE_CHANGE(38) | 增量变更监控注册 |
+| `notifyPhotoSyncOverWithSyncMonitorEnabled:callback:` | 同步结束 + 开启/关闭实时 | 对应 `SYNC_MONITOR_REQUEST(39)` 开关 |
+| `updateSyncMonitorSettingWithEnabled:callback:` | `SSPSyncMonitorRequest{type=39, isSyncMonitor}` | 实时同步设置 |
+| `updateFilesWithFiles:isSyncScene:callback:` | `SSPUpdateFileRequest{type=40, files, isSync}` | `isSyncScene` = is_sync |
+
+`SSPPhotoSyncRequest`/`SSPPhotoSyncResponse` 的 protobuf 定义在 SmartFinderCore.h:4794-4823:
+`{type, pcId(NSString), filesArray}` / `{type, isFirst, filesArray, isSuccess}`,全部为
+proto2 optional 字段(带 `hasXxx` 标志)——**手机成功时省略 `isSuccess`(hasIsSuccess=NO)**,
+客户端按"有值才判失败"处理,与 M6 实现一致。
+
+`is_first` 在 Mac 端由 `SFSyncUpdateFirstMarkProcess` 消费
+(`HandShaker_Mac.m:51849-51872`)→ `SFSynchManager updateFirstSyncWithItem:isFirst:`
+写入本地同步台账(首同步标记),不阻塞流程。
 
 ## 10.7 典型时序（含实时监控）
 

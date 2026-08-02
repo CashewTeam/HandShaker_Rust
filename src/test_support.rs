@@ -154,7 +154,25 @@ impl FakeWifiSsp {
             .expect("fake wifi SSP listener");
         let address = listener.local_addr().expect("fake wifi SSP address");
         let state_path = temp.path().join("config").join("state.json");
-        let server = tokio::spawn(run_server_wifi(listener, false));
+        let server = tokio::spawn(run_server_wifi(listener, false, false));
+        Self {
+            temp,
+            address,
+            state_path,
+            server,
+        }
+    }
+
+    /// Fake phone whose directory listing reports a path outside the
+    /// requested subtree (hostile device scenario).
+    pub(crate) async fn start_with_escape_path() -> Self {
+        let temp = tempfile::tempdir().expect("fake wifi SSP tempdir");
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("fake wifi SSP listener");
+        let address = listener.local_addr().expect("fake wifi SSP address");
+        let state_path = temp.path().join("config").join("state.json");
+        let server = tokio::spawn(run_server_wifi(listener, false, true));
         Self {
             temp,
             address,
@@ -171,7 +189,7 @@ impl FakeWifiSsp {
             .expect("fake wifi SSP listener");
         let address = listener.local_addr().expect("fake wifi SSP address");
         let state_path = temp.path().join("config").join("state.json");
-        let server = tokio::spawn(run_server_wifi(listener, true));
+        let server = tokio::spawn(run_server_wifi(listener, true, false));
         Self {
             temp,
             address,
@@ -214,7 +232,7 @@ impl FakeWifiSsp {
     }
 }
 
-async fn run_server_wifi(listener: TcpListener, monitor_reject: bool) {
+async fn run_server_wifi(listener: TcpListener, monitor_reject: bool, escape_listing: bool) {
     let (mut stream, _) = listener.accept().await.expect("fake wifi SSP accept");
 
     // REQUEST_01 -> RESPONSE_01
@@ -275,11 +293,31 @@ async fn run_server_wifi(listener: TcpListener, monitor_reject: bool) {
     }
 
     // Business phase: signed requests, same framing as ADB.
+    let mut upload: Option<(u32, u64, Vec<u8>)> = None;
     loop {
         let (sid, flag, body) = match read_upstream_result(&mut stream).await {
             Ok(value) => value,
             Err(_) => break,
         };
+        if flag == 3 {
+            let Some((upload_sid, expected, mut data)) = upload.take() else {
+                continue;
+            };
+            data.extend_from_slice(&body);
+            if data.len() < expected as usize {
+                upload = Some((upload_sid, expected, data));
+                continue;
+            }
+            let response = SspUploadFileResponse {
+                r#type: None,
+                file: None,
+                canceled: Some(false),
+                succeed: Some(true),
+                error_code: None,
+            };
+            write_normal(&mut stream, upload_sid, &response.encode_to_vec()).await;
+            continue;
+        }
         if flag != 1 {
             continue;
         }
@@ -329,11 +367,114 @@ async fn run_server_wifi(listener: TcpListener, monitor_reject: bool) {
                 };
                 write_normal(&mut stream, sid, &response.encode_to_vec()).await;
             }
+            SspRequestType::GetDownloadFileRequest => {
+                let request =
+                    SspDownloadFileRequest::decode(protobuf).expect("fake wifi download request");
+                let path = request.file.and_then(|file| file.path).unwrap_or_default();
+                let full = if path.contains("exif") {
+                    exif_jpeg_fixture()
+                } else {
+                    b"download-data".to_vec()
+                };
+                // Honor the one-shot seek: offset into the payload, length=0
+                // means the remainder.
+                let offset = request.range.and_then(|range| range.offset).unwrap_or(0) as usize;
+                let data = if offset >= full.len() {
+                    Vec::new()
+                } else {
+                    full[offset..].to_vec()
+                };
+                let response = SspDownloadFileResponseHeader {
+                    r#type: None,
+                    range: Some(SspDataRange {
+                        offset: Some(offset as u64),
+                        length: Some(data.len() as u64),
+                    }),
+                    data_md5: Some(format!("{:x}", Md5::digest(&data))),
+                    ready: Some(true),
+                    ..Default::default()
+                };
+                write_normal(&mut stream, sid, &response.encode_to_vec()).await;
+                write_raw(&mut stream, sid, &data).await;
+            }
+            SspRequestType::GetFileExistRequest => {
+                let response = SspFileExistResponse {
+                    r#type: None,
+                    exist: Some(false),
+                    ..Default::default()
+                };
+                write_normal(&mut stream, sid, &response.encode_to_vec()).await;
+            }
+            SspRequestType::GetCreateFolderRequest => {
+                let request = SspCreateFolderRequest::decode(protobuf).expect("mkdir request");
+                let path = request.file.and_then(|file| file.path);
+                let response = SspCreateFolderResponse {
+                    r#type: None,
+                    file: path.map(|path| SspFile {
+                        path: Some(path),
+                        is_directory: Some(true),
+                        ..Default::default()
+                    }),
+                    succeed: Some(true),
+                    error_code: None,
+                    error_message: None,
+                };
+                write_normal(&mut stream, sid, &response.encode_to_vec()).await;
+            }
+            SspRequestType::UpdateFileInfo => {
+                let request =
+                    SspUpdateFileRequest::decode(protobuf).expect("fake update file info");
+                let accepted = request
+                    .files
+                    .iter()
+                    .all(|file| file.path.as_deref() != Some("/reject.txt"));
+                let response = SspUpdateFileResponse {
+                    r#type: None,
+                    is_success: Some(accepted),
+                };
+                write_normal(&mut stream, sid, &response.encode_to_vec()).await;
+            }
+            SspRequestType::GetUploadFileRequestHeader => {
+                let request = SspUploadFileRequest::decode(protobuf).expect("upload request");
+                let size = request.file.and_then(|file| file.file_size).unwrap_or(0);
+                if size == 0 {
+                    let response = SspUploadFileResponse {
+                        r#type: None,
+                        succeed: Some(true),
+                        canceled: Some(false),
+                        ..Default::default()
+                    };
+                    write_normal(&mut stream, sid, &response.encode_to_vec()).await;
+                } else {
+                    let response = SspUploadFileResponseHeader {
+                        r#type: None,
+                        ready: Some(true),
+                        ..Default::default()
+                    };
+                    write_normal(&mut stream, sid, &response.encode_to_vec()).await;
+                    upload = Some((sid, size, Vec::new()));
+                }
+            }
             SspRequestType::GetDirFilesRequest => {
+                let request = SspGetDirFilesRequest::decode(protobuf).expect("fake wifi list");
+                let dir = request
+                    .dir
+                    .and_then(|dir| dir.path)
+                    .unwrap_or_else(|| "/storage/emulated/0".to_string());
+                let base = if dir == "." {
+                    "/storage/emulated/0"
+                } else {
+                    dir.trim_end_matches('/')
+                };
+                let listing_path = if escape_listing {
+                    format!("/storage/emulated/0/../../escape.txt")
+                } else {
+                    format!("{base}/a.txt")
+                };
                 let response = SspGetDirFilesResponse {
                     r#type: None,
                     file: vec![SspFile {
-                        path: Some("/storage/emulated/0/a.txt".to_string()),
+                        path: Some(listing_path),
                         file_size: Some(3),
                         ..Default::default()
                     }],
@@ -444,6 +585,64 @@ async fn run_server_wifi(listener: TcpListener, monitor_reject: bool) {
                 write_normal(&mut stream, sid, &response.encode_to_vec()).await;
             }
             SspRequestType::QuitRequest => break,
+            SspRequestType::PhotoSyncRequest => {
+                let request = SspPhotoSyncRequest::decode(protobuf).expect("fake wifi photo sync");
+                // Echo the snapshot back with one photo + one new photo so
+                // the client can exercise added/modified/unchanged paths.
+                let snapshot = request.files;
+                let mut files = vec![SspFile {
+                    path: Some("/storage/emulated/0/DCIM/a.jpg".to_string()),
+                    file_size: Some(1024),
+                    is_directory: Some(false),
+                    checksum: Some("checksum-a".to_string()),
+                    ..Default::default()
+                }];
+                for file in snapshot {
+                    if file.path.as_deref() == Some("/storage/emulated/0/DCIM/gone.jpg") {
+                        // Deleted on the phone: not returned.
+                        continue;
+                    }
+                    files.push(file);
+                }
+                let response = SspPhotoSyncResponse {
+                    r#type: None,
+                    is_first: Some(request.pc_id.is_none()),
+                    files,
+                    // Real device omits is_success on success (verified
+                    // 2026-08-03); the fake mirrors that omission.
+                    is_success: None,
+                };
+                write_normal(&mut stream, sid, &response.encode_to_vec()).await;
+            }
+            SspRequestType::SyncMonitorRequest => {
+                let request =
+                    SspSyncMonitorRequest::decode(protobuf).expect("fake wifi sync monitor");
+                let enabled = request.is_sync_monitor.unwrap_or(false);
+                let response = SspSyncMonitorResponse {
+                    r#type: None,
+                    is_success: Some(true),
+                };
+                write_normal(&mut stream, sid, &response.encode_to_vec()).await;
+                // When the monitor is enabled, push one FILE_CHANGE(38)
+                // event on a fresh phone-side sid to exercise the event
+                // pipeline (spawn_reader routes unmatched sids to decode_event).
+                if enabled {
+                    let change = SspFileChange {
+                        r#type: Some(SspRequestType::FileChange as i32),
+                        file_change_items: vec![SspFileChangeItem {
+                            file: Some(SspFile {
+                                path: Some("/storage/emulated/0/DCIM/live.jpg".to_string()),
+                                file_size: Some(2048),
+                                is_directory: Some(false),
+                                checksum: Some("checksum-live".to_string()),
+                                ..Default::default()
+                            }),
+                            status: Some(SspFileChangeStatus::Added as i32),
+                        }],
+                    };
+                    write_normal(&mut stream, 0x8000_0100, &change.encode_to_vec()).await;
+                }
+            }
             _ => continue,
         }
     }
@@ -852,4 +1051,129 @@ async fn write_raw(stream: &mut TcpStream, sid: u32, body: &[u8]) {
             return;
         }
     }
+}
+
+/// Minimal JPEG with a hand-built APP1 EXIF block: orientation 6, make
+/// "Smartisan", model "U2 Pro", DateTimeOriginal 2023:06:03 01:53:20, focal
+/// 4.28, FNumber 1.8, ISO 100 and GPS 30°16'45.62"N 120°9'55.73"W.
+pub(crate) fn exif_jpeg_fixture() -> Vec<u8> {
+    let make = b"Smartisan\0";
+    let model = b"U2 Pro\0";
+    let datetime = b"2023:06:03 01:53:20\0";
+    let fnum = rational_bytes(18, 10); // 1.8
+    let focal = rational_bytes(428, 100); // 4.28
+    let lat = rational_bytes3(&[(30, 1), (16, 1), (4562, 100)]);
+    let lng = rational_bytes3(&[(120, 1), (9, 1), (5573, 100)]);
+
+    let ifd0_len = 2 + 5 * 12 + 4;
+    let exif_len = 2 + 4 * 12 + 4;
+    let gps_len = 2 + 4 * 12 + 4;
+    let ifd0_off = 8u32;
+    let exif_off = ifd0_off + ifd0_len;
+    let gps_off = exif_off + exif_len;
+    let mut data_off = gps_off + gps_len;
+    let make_off = data_off;
+    data_off += make.len() as u32;
+    let model_off = data_off;
+    data_off += model.len() as u32;
+    let datetime_off = data_off;
+    data_off += datetime.len() as u32;
+    let fnum_off = data_off;
+    data_off += fnum.len() as u32;
+    let focal_off = data_off;
+    data_off += focal.len() as u32;
+    let lat_off = data_off;
+    data_off += lat.len() as u32;
+    let lng_off = data_off;
+
+    let mut tiff = Vec::new();
+    tiff.extend_from_slice(b"II*\0\x08\0\0\0"); // header, IFD0 at 8
+
+    // IFD0: Make, Model, Orientation (inline), EXIF pointer, GPS pointer.
+    tiff.extend_from_slice(&5_u16.to_le_bytes());
+    tiff.extend_from_slice(&entry(0x010F, 2, make.len() as u32, make_off));
+    tiff.extend_from_slice(&entry(0x0110, 2, model.len() as u32, model_off));
+    tiff.extend_from_slice(&entry_inline(0x0112, 3, 1, 6)); // Orientation 6
+    tiff.extend_from_slice(&entry(0x8769, 4, 1, exif_off));
+    tiff.extend_from_slice(&entry(0x8825, 4, 1, gps_off));
+    tiff.extend_from_slice(&0_u32.to_le_bytes()); // next IFD
+
+    // EXIF IFD: DateTimeOriginal, FNumber, FocalLength, ISO (inline).
+    tiff.extend_from_slice(&4_u16.to_le_bytes());
+    tiff.extend_from_slice(&entry(0x9003, 2, 20, datetime_off));
+    tiff.extend_from_slice(&entry(0x829D, 5, 1, fnum_off));
+    tiff.extend_from_slice(&entry(0x920A, 5, 1, focal_off));
+    tiff.extend_from_slice(&entry_inline(0x8827, 3, 1, 100)); // ISO 100
+    tiff.extend_from_slice(&0_u32.to_le_bytes());
+
+    // GPS IFD: latitude/longitude rationals + N/S/E/W refs (inline).
+    tiff.extend_from_slice(&4_u16.to_le_bytes());
+    tiff.extend_from_slice(&entry_inline(0x0001, 2, 1, ascii_inline(b"N")));
+    tiff.extend_from_slice(&entry(0x0002, 5, 3, lat_off));
+    tiff.extend_from_slice(&entry_inline(0x0003, 2, 1, ascii_inline(b"W")));
+    tiff.extend_from_slice(&entry(0x0004, 5, 3, lng_off));
+    tiff.extend_from_slice(&0_u32.to_le_bytes());
+
+    // Data area.
+    tiff.extend_from_slice(make);
+    tiff.extend_from_slice(model);
+    tiff.extend_from_slice(datetime);
+    tiff.extend_from_slice(&fnum);
+    tiff.extend_from_slice(&focal);
+    tiff.extend_from_slice(&lat);
+    tiff.extend_from_slice(&lng);
+
+    let mut app1 = Vec::new();
+    app1.extend_from_slice(b"Exif\0\0");
+    app1.extend_from_slice(&tiff);
+
+    let mut jpeg = Vec::new();
+    jpeg.extend_from_slice(&[0xFF, 0xD8]); // SOI
+    jpeg.extend_from_slice(&[0xFF, 0xE1]); // APP1
+    jpeg.extend_from_slice(&((app1.len() + 2) as u16).to_be_bytes());
+    jpeg.extend_from_slice(&app1);
+    jpeg.extend_from_slice(&[0xFF, 0xDA]); // SOS marker
+    jpeg
+}
+
+/// 12-byte IFD entry whose value is an external offset.
+fn entry(tag: u16, type_id: u16, count: u32, offset: u32) -> Vec<u8> {
+    let mut e = Vec::new();
+    e.extend_from_slice(&tag.to_le_bytes());
+    e.extend_from_slice(&type_id.to_le_bytes());
+    e.extend_from_slice(&count.to_le_bytes());
+    e.extend_from_slice(&offset.to_le_bytes());
+    e
+}
+
+/// 12-byte IFD entry with an inline value.
+fn entry_inline(tag: u16, type_id: u16, count: u32, value: u32) -> Vec<u8> {
+    let mut e = Vec::new();
+    e.extend_from_slice(&tag.to_le_bytes());
+    e.extend_from_slice(&type_id.to_le_bytes());
+    e.extend_from_slice(&count.to_le_bytes());
+    e.extend_from_slice(&value.to_le_bytes());
+    e
+}
+
+/// ASCII reference as a 4-byte inline block ("N\0\0\0").
+fn ascii_inline(value: &[u8]) -> u32 {
+    let mut block = [0u8; 4];
+    block[..value.len()].copy_from_slice(value);
+    u32::from_le_bytes(block)
+}
+
+fn rational_bytes(num: u32, den: u32) -> Vec<u8> {
+    let mut block = num.to_le_bytes().to_vec();
+    block.extend_from_slice(&den.to_le_bytes());
+    block
+}
+
+fn rational_bytes3(pairs: &[(u32, u32)]) -> Vec<u8> {
+    let mut block = Vec::new();
+    for (num, den) in pairs {
+        block.extend_from_slice(&num.to_le_bytes());
+        block.extend_from_slice(&den.to_le_bytes());
+    }
+    block
 }

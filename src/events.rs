@@ -322,6 +322,7 @@ mod tests {
                 checksum: None,
                 is_trash: None,
                 id: None,
+                ext_data: None,
             }),
             kind: FileEventKind::Create,
         }]);
@@ -343,6 +344,7 @@ mod tests {
                 checksum: None,
                 is_trash: None,
                 id: None,
+                ext_data: None,
             }),
             status: FileChangeStatus::Modified,
         }]);
@@ -384,7 +386,7 @@ pub struct MediaLibraryChange {
 }
 
 /// A normalized media entry from a change event.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
 pub struct MediaItem {
     /// Media-store identifier.
     pub media_id: Option<u64>,

@@ -11,19 +11,86 @@ use rustyline::error::ReadlineError;
 use serde::Serialize;
 
 use handshaker_rust::{
-    ClientEvent, ClientOptions, ConnectionTarget, DeleteOptions, DeviceInfo, Error, EventCallbacks,
-    EventFilter, EventStreamError, HandShakerClient, RemoteFile, Result, TransferOptions,
-    TransferProgress,
+    BatchTransferFailure, BatchTransferItem, BatchTransferOptions, BatchTransferProgress,
+    BatchTransferResult, ClientEvent, ClientOptions, ConnectionTarget, DeleteOptions, DeviceInfo,
+    Error, EventCallbacks, EventFilter, EventStreamError, HandShakerClient, RemoteFile, Result,
+    StateStore, SyncConfig, SyncDiff, SyncRunResult, SyncSnapshot, SyncStore, apply_file_change,
+    check_conflicts, default_config_dir, execute_plan,
     i18n::{self, Localizer, MessageKey, ZhCn},
+    plan_diff, sync_config,
 };
 
-use crate::output::{Outcome, progress_percent, render, render_progress};
+use crate::output::{Outcome, render, render_batch_progress};
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 pub(crate) enum OutputFormat {
     Human,
     Json,
     Jsonl,
+}
+
+#[derive(Debug, Serialize)]
+struct DryRunReport {
+    files: usize,
+    dirs: usize,
+    bytes: u64,
+    dry_run: bool,
+}
+
+/// Detect a missing `--` in `fs pull REMOTE LOCAL`: the second positional was
+/// absorbed into `remote` and names a path that exists under the CLI's local
+/// working directory (`local_cwd`, which the shell `lcd` command mutates).
+fn pull_target_misparsed(remote: &[String], local: Option<&PathBuf>, local_cwd: &Path) -> bool {
+    local.is_none() && remote.len() > 1 && local_cwd.join(&remote[1]).exists()
+}
+
+/// Local recursive scan used by `--dry-run` to estimate a push tree without
+/// touching the device.
+fn collect_local_tree<T: Localizer>(
+    local: &Path,
+    remote: &str,
+    items: &mut Vec<BatchTransferItem>,
+    directories: &mut std::collections::BTreeSet<String>,
+    bytes: &mut u64,
+    localizer: &T,
+) -> Result<()> {
+    let remote_base = remote.trim_end_matches('/');
+    let entries = std::fs::read_dir(local).map_err(|error| {
+        Error::LocalIo(localizer.format(
+            MessageKey::ReadDirFailed,
+            &[&local.display().to_string(), &error.to_string()],
+        ))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            Error::LocalIo(localizer.format(
+                MessageKey::ReadDirFailed,
+                &[&local.display().to_string(), &error.to_string()],
+            ))
+        })?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // Match the real upload walk: symlinks are skipped, so a dry-run must
+        // not count them either.
+        let file_type = entry.file_type().map_err(|error| {
+            Error::LocalIo(localizer.format(
+                MessageKey::ReadDirFailed,
+                &[&path.display().to_string(), &error.to_string()],
+            ))
+        })?;
+        if file_type.is_dir() {
+            let remote_dir = format!("{remote_base}/{name}");
+            directories.insert(remote_dir.clone());
+            collect_local_tree(&path, &remote_dir, items, directories, bytes, localizer)?;
+        } else if file_type.is_file() {
+            items.push(BatchTransferItem {
+                source: path.display().to_string(),
+                target: format!("{remote_base}/{name}"),
+            });
+            *bytes += entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Parser)]
@@ -84,6 +151,7 @@ fn localized_command() -> clap::Command {
     localize_subcommand(&mut command, "clipboard", "cli.command.clipboard");
     localize_subcommand(&mut command, "trust", "cli.command.trust");
     localize_subcommand(&mut command, "media", "cli.command.media");
+    localize_subcommand(&mut command, "sync", "cli.command.sync");
     localize_subcommand(&mut command, "shell", "cli.command.shell");
     localize_subcommand(&mut command, "watch", "cli.command.watch");
 
@@ -124,6 +192,12 @@ fn localized_command() -> clap::Command {
         localize_subcommand(media, "video", "cli.command.media_video");
         localize_subcommand(media, "audio", "cli.command.media_audio");
         localize_subcommand(media, "thumbnail", "cli.command.media_thumbnail");
+    }
+    if let Some(sync) = command.find_subcommand_mut("sync") {
+        localize_subcommand(sync, "plan", "cli.command.sync_plan");
+        localize_subcommand(sync, "run", "cli.command.sync_run");
+        localize_subcommand(sync, "watch", "cli.command.sync_watch");
+        localize_subcommand(sync, "status", "cli.command.sync_status");
     }
     command
 }
@@ -304,6 +378,8 @@ pub(crate) enum Command {
     Trust(TrustCommand),
     #[command(subcommand)]
     Media(MediaCommand),
+    #[command(subcommand)]
+    Sync(SyncCommand),
     Shell,
     /// Watch the connected device for events (directory monitor, clipboard,
     /// device info and other pushes). Registers monitors for each --path and
@@ -363,20 +439,28 @@ pub(crate) enum FsCommand {
         trash: bool,
     },
     Pull {
-        #[arg(index = 1)]
-        remote: String,
-        #[arg(index = 2)]
+        #[arg(value_name = "REMOTE", required = true, num_args = 1..)]
+        remote: Vec<String>,
+        #[arg(value_name = "LOCAL", last = true)]
         local: Option<PathBuf>,
+        #[arg(short = 'r', long)]
+        recursive: bool,
         #[arg(long)]
         overwrite: bool,
+        #[arg(long)]
+        dry_run: bool,
     },
     Push {
-        #[arg(index = 1)]
-        local: PathBuf,
-        #[arg(index = 2)]
+        #[arg(value_name = "LOCAL", required = true, num_args = 1..)]
+        local: Vec<PathBuf>,
+        #[arg(value_name = "REMOTE", last = true)]
         remote: String,
+        #[arg(short = 'r', long)]
+        recursive: bool,
         #[arg(long)]
         overwrite: bool,
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -425,6 +509,50 @@ pub(crate) enum MediaCommand {
     },
 }
 
+/// Photo sync (phone -> host). The ledger lives in
+/// `<config>/sync/<device_uuid>.json` and is committed atomically after each
+/// run; re-runs are idempotent.
+#[derive(Debug, Subcommand)]
+pub(crate) enum SyncCommand {
+    /// Preview the diff (downloads/deletes/conflicts) without touching files.
+    Plan {
+        /// Phone-side photo root to sync.
+        #[arg(long = "root", id = "sync_root")]
+        root: Option<String>,
+        /// Local destination directory.
+        #[arg(long = "output-dir", id = "sync_output_dir")]
+        output_dir: Option<PathBuf>,
+    },
+    /// Execute a full sync: download new/modified photos, remove deleted
+    /// ones, and commit the ledger atomically.
+    Run {
+        /// Phone-side photo root to sync.
+        #[arg(long = "root", id = "sync_root")]
+        root: Option<String>,
+        /// Local destination directory.
+        #[arg(long = "output-dir", id = "sync_output_dir")]
+        output_dir: Option<PathBuf>,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Full sync, then keep watching for FILE_CHANGE(38) pushes and apply
+    /// them incrementally until interrupted.
+    Watch {
+        /// Phone-side photo root to sync.
+        #[arg(long = "root", id = "sync_root")]
+        root: Option<String>,
+        /// Local destination directory.
+        #[arg(long = "output-dir", id = "sync_output_dir")]
+        output_dir: Option<PathBuf>,
+        /// Skip the confirmation prompt (initial sync can delete local files).
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Show the local sync ledger summary.
+    Status,
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct ClipboardSetArgs {
     #[arg(conflicts_with = "stdin")]
@@ -437,13 +565,6 @@ struct CommandContext {
     remote_cwd: String,
     local_cwd: PathBuf,
     in_shell: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct TransferResult {
-    source: String,
-    target: String,
-    bytes: u64,
 }
 
 pub(crate) fn command_name(command: &Command) -> &'static str {
@@ -472,6 +593,10 @@ pub(crate) fn command_name(command: &Command) -> &'static str {
         Command::Media(MediaCommand::Video(_)) => "media.video",
         Command::Media(MediaCommand::Audio(_)) => "media.audio",
         Command::Media(MediaCommand::Thumbnail { .. }) => "media.thumbnail",
+        Command::Sync(SyncCommand::Plan { .. }) => "sync.plan",
+        Command::Sync(SyncCommand::Run { .. }) => "sync.run",
+        Command::Sync(SyncCommand::Watch { .. }) => "sync.watch",
+        Command::Sync(SyncCommand::Status) => "sync.status",
         Command::Shell => "shell",
         Command::Watch { .. } => "watch",
     }
@@ -924,81 +1049,311 @@ async fn execute_connected(
         Command::Fs(FsCommand::Pull {
             remote,
             local,
+            recursive,
             overwrite,
+            dry_run,
         }) => {
-            let remote = resolve_remote(&context.remote_cwd, remote);
-            let local = resolve_local_pull(&context.local_cwd, local.as_deref(), &remote)?;
-            if local.exists() {
+            // 0.3.x compat: the two-argument form `fs pull REMOTE LOCAL` (no
+            // `--`) is absorbed by the multi-value `remote` positional. When
+            // the second argument names an existing local path, it is almost
+            // certainly a missing `--`; refuse loudly instead of fetching the
+            // local path from the device.
+            if pull_target_misparsed(&remote, local.as_ref(), &context.local_cwd) {
+                return Err(Error::Usage(
+                    localizer.format(MessageKey::PullNeedsSeparator, &[]),
+                ));
+            }
+            let single_file_mode = remote.len() == 1 && !*recursive;
+            let mut items = Vec::new();
+            let mut trees = Vec::new();
+            let mut existing_targets = 0_usize;
+            let mut total_bytes = 0_u64;
+            let mut seen_targets = std::collections::BTreeSet::new();
+            for remote_path in remote {
+                let remote_path = resolve_remote(&context.remote_cwd, &remote_path);
+                let info = client.stat(&remote_path).await?;
+                if info.as_ref().is_some_and(|file| file.is_directory) {
+                    if !*recursive {
+                        return Err(Error::Usage(
+                            localizer.format(MessageKey::RecursiveRequired, &[&remote_path]),
+                        ));
+                    }
+                    let local_dir = if let Some(local) = local {
+                        resolve_local(&context.local_cwd, local)
+                    } else {
+                        context.local_cwd.clone()
+                    };
+                    trees.push((remote_path, local_dir));
+                } else {
+                    let local_target = if single_file_mode {
+                        resolve_local_pull(&context.local_cwd, local.as_deref(), &remote_path)?
+                    } else {
+                        let base = if let Some(local) = local {
+                            resolve_local(&context.local_cwd, local)
+                        } else {
+                            context.local_cwd.clone()
+                        };
+                        base.join(remote_name(&remote_path).ok_or_else(|| {
+                            Error::Usage(
+                                localizer.format(MessageKey::RemoteNameMissing, &[&remote_path]),
+                            )
+                        })?)
+                    };
+                    if local_target.exists() {
+                        existing_targets += 1;
+                    }
+                    if !seen_targets.insert(local_target.display().to_string()) {
+                        return Err(Error::Usage(localizer.format(
+                            MessageKey::DuplicateTarget,
+                            &[&local_target.display().to_string()],
+                        )));
+                    }
+                    if let Some(file) = info.as_ref() {
+                        total_bytes += file.size;
+                    }
+                    items.push(BatchTransferItem {
+                        source: remote_path,
+                        target: local_target.display().to_string(),
+                    });
+                }
+            }
+            if *dry_run {
+                let mut files = items.len();
+                let mut dirs = trees.len();
+                let mut bytes = total_bytes;
+                for (remote_dir, _) in &trees {
+                    for entry in client.list_dir(remote_dir, u32::MAX).await? {
+                        if entry.is_directory {
+                            dirs += 1;
+                        } else {
+                            files += 1;
+                            bytes += entry.size;
+                        }
+                    }
+                }
+                let report = DryRunReport {
+                    files,
+                    dirs,
+                    bytes,
+                    dry_run: true,
+                };
+                return Ok(Outcome::new(
+                    "fs.pull",
+                    &report,
+                    localizer.format(
+                        MessageKey::DryRunReport,
+                        &[&files.to_string(), &dirs.to_string(), &bytes.to_string()],
+                    ),
+                )?);
+            }
+            if existing_targets > 0 {
                 if !overwrite {
                     return Err(Error::LocalIo(localizer.format(
                         MessageKey::LocalTargetExists,
-                        &[&local.display().to_string()],
+                        &[&items[0].target.clone()],
                     )));
                 }
                 confirm(
                     &localizer.format(
-                        MessageKey::OverwriteLocalAction,
-                        &[&local.display().to_string()],
+                        MessageKey::OverwriteLocalBatch,
+                        &[&existing_targets.to_string()],
                     ),
                     yes,
                     format,
                 )?;
             }
-            let bytes = client
-                .download(
-                    &remote,
-                    &local,
-                    transfer_options(*overwrite, "fs.pull", client.device_info(), format),
+            let mut result = BatchTransferResult::default();
+            for (remote_dir, local_dir) in trees {
+                let partial = client
+                    .download_tree(
+                        &remote_dir,
+                        &local_dir,
+                        batch_options(*overwrite, "fs.pull", client.device_info(), format),
+                    )
+                    .await?;
+                merge_batch(&mut result, partial);
+            }
+            let partial = client
+                .download_many(
+                    &items,
+                    batch_options(*overwrite, "fs.pull", client.device_info(), format),
                 )
                 .await?;
-            let result = TransferResult {
-                source: remote,
-                target: local.display().to_string(),
-                bytes,
-            };
-            Outcome::new(
+            merge_batch(&mut result, partial);
+            let outcome = Outcome::new(
                 "fs.pull",
                 &result,
-                localizer.format(MessageKey::DownloadDone, &[&result.bytes.to_string()]),
-            )?
+                localizer.format(
+                    MessageKey::BatchDone,
+                    &[
+                        &result.ok.len().to_string(),
+                        &result.failures.len().to_string(),
+                    ],
+                ),
+            )?;
+            if !result.failures.is_empty() {
+                outcome.with_warning(localizer.format(
+                    MessageKey::BatchFailures,
+                    &[&result.failures.len().to_string()],
+                ))
+            } else {
+                outcome
+            }
         }
         Command::Fs(FsCommand::Push {
             local,
             remote,
+            recursive,
             overwrite,
+            dry_run,
         }) => {
-            let local = resolve_local(&context.local_cwd, local);
-            let remote = resolve_remote(&context.remote_cwd, remote);
-            if client.file_exists(&remote).await? {
+            let remote = resolve_remote(&context.remote_cwd, &remote);
+            let single_file_mode = local.len() == 1 && !recursive && !remote.ends_with('/');
+            let mut items = Vec::new();
+            let mut trees = Vec::new();
+            let mut existing_targets = 0_usize;
+            let mut collected_failures = Vec::new();
+            let mut total_bytes = 0_u64;
+            let mut seen_targets = std::collections::BTreeSet::new();
+            for local_path in local {
+                let local_path = resolve_local(&context.local_cwd, &local_path);
+                let metadata = match tokio::fs::metadata(&local_path).await {
+                    Ok(metadata) => metadata,
+                    Err(error) => {
+                        collected_failures.push(BatchTransferFailure {
+                            source: local_path.display().to_string(),
+                            target: remote.clone(),
+                            message: error.to_string(),
+                        });
+                        continue;
+                    }
+                };
+                if metadata.is_dir() {
+                    if !recursive {
+                        return Err(Error::Usage(localizer.format(
+                            MessageKey::RecursiveRequired,
+                            &[&local_path.display().to_string()],
+                        )));
+                    }
+                    trees.push((local_path, remote.clone()));
+                } else {
+                    let target = if single_file_mode {
+                        remote.clone()
+                    } else {
+                        format!(
+                            "{}/{}",
+                            remote.trim_end_matches('/'),
+                            local_path
+                                .file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_default()
+                        )
+                    };
+                    if client.file_exists(&target).await? {
+                        existing_targets += 1;
+                    }
+                    if !seen_targets.insert(target.clone()) {
+                        return Err(Error::Usage(
+                            localizer.format(MessageKey::DuplicateTarget, &[&target]),
+                        ));
+                    }
+                    total_bytes += metadata.len();
+                    items.push(BatchTransferItem {
+                        source: local_path.display().to_string(),
+                        target,
+                    });
+                }
+            }
+            if *dry_run {
+                let mut files = items.len();
+                let mut dirs = trees.len();
+                let mut bytes = total_bytes;
+                for (local_dir, remote_dir) in &trees {
+                    let mut tree_items = Vec::new();
+                    let mut tree_dirs = std::collections::BTreeSet::new();
+                    let mut tree_bytes = 0_u64;
+                    collect_local_tree(
+                        local_dir,
+                        remote_dir,
+                        &mut tree_items,
+                        &mut tree_dirs,
+                        &mut tree_bytes,
+                        &localizer,
+                    )?;
+                    dirs += tree_dirs.len();
+                    files += tree_items.len();
+                    bytes += tree_bytes;
+                }
+                let report = DryRunReport {
+                    files,
+                    dirs,
+                    bytes,
+                    dry_run: true,
+                };
+                return Ok(Outcome::new(
+                    "fs.push",
+                    &report,
+                    localizer.format(
+                        MessageKey::DryRunReport,
+                        &[&files.to_string(), &dirs.to_string(), &bytes.to_string()],
+                    ),
+                )?);
+            }
+            if existing_targets > 0 {
                 if !overwrite {
                     return Err(Error::RemoteIo {
                         code: None,
-                        message: localizer.format(MessageKey::RemoteTargetExists, &[&remote]),
+                        message: localizer
+                            .format(MessageKey::RemoteTargetExists, &[&items[0].target.clone()]),
                     });
                 }
                 confirm(
-                    &localizer.format(MessageKey::OverwriteRemoteAction, &[&remote]),
+                    &localizer.format(
+                        MessageKey::OverwriteRemoteBatch,
+                        &[&existing_targets.to_string()],
+                    ),
                     yes,
                     format,
                 )?;
             }
-            let bytes = client
-                .upload(
-                    &local,
-                    &remote,
-                    transfer_options(*overwrite, "fs.push", client.device_info(), format),
+            let mut result = BatchTransferResult::default();
+            for (local_dir, remote_dir) in trees {
+                let partial = client
+                    .upload_tree(
+                        &local_dir,
+                        &remote_dir,
+                        batch_options(*overwrite, "fs.push", client.device_info(), format),
+                    )
+                    .await?;
+                merge_batch(&mut result, partial);
+            }
+            let partial = client
+                .upload_many(
+                    &items,
+                    batch_options(*overwrite, "fs.push", client.device_info(), format),
                 )
                 .await?;
-            let result = TransferResult {
-                source: local.display().to_string(),
-                target: remote,
-                bytes,
-            };
-            Outcome::new(
+            merge_batch(&mut result, partial);
+            result.failures.extend(collected_failures);
+            let outcome = Outcome::new(
                 "fs.push",
                 &result,
-                localizer.format(MessageKey::UploadDone, &[&result.bytes.to_string()]),
-            )?
+                localizer.format(
+                    MessageKey::BatchDone,
+                    &[
+                        &result.ok.len().to_string(),
+                        &result.failures.len().to_string(),
+                    ],
+                ),
+            )?;
+            if !result.failures.is_empty() {
+                outcome.with_warning(localizer.format(
+                    MessageKey::BatchFailures,
+                    &[&result.failures.len().to_string()],
+                ))
+            } else {
+                outcome
+            }
         }
         Command::Clipboard(ClipboardCommand::Get) => {
             let entries = client.clipboard_list().await?;
@@ -1062,8 +1417,14 @@ async fn execute_connected(
                 localizer.text(MessageKey::WatchNested).to_string(),
             ));
         }
+        Command::Sync(SyncCommand::Watch { .. }) if context.in_shell => {
+            return Err(Error::Usage(i18n::text("sync.watch_nested").to_string()));
+        }
         Command::Media(command) => {
             return media_command(client, &context, command).await;
+        }
+        Command::Sync(command) => {
+            return sync_command(client, &context, command, format).await;
         }
     };
     Ok(outcome.with_device(client.device_info()))
@@ -1072,6 +1433,333 @@ async fn execute_connected(
 /// Default preview cap for `media` listings: a functional preview of a large
 /// media library, overridable with `--limit` or `--all`.
 const DEFAULT_MEDIA_PREVIEW_LIMIT: usize = 50;
+
+/// Default phone-side photo root for sync when `--root` is omitted.
+const DEFAULT_SYNC_ROOT: &str = "/storage/emulated/0/DCIM/Camera";
+
+/// Photo sync commands: plan / run / watch / status (phone -> host, one-way).
+async fn sync_command(
+    client: &HandShakerClient,
+    context: &CommandContext,
+    command: &SyncCommand,
+    format: OutputFormat,
+) -> Result<Outcome> {
+    match command {
+        SyncCommand::Status => {
+            let device_uuid = sync_device_uuid(client)?;
+            let store = SyncStore::discover(&default_config_dir()?, &device_uuid);
+            let snapshot = store.load()?.unwrap_or_default();
+            let files = snapshot.files.len();
+            let bytes: u64 = snapshot.files.values().map(|record| record.size).sum();
+            let data = serde_json::json!({
+                "device_uuid": device_uuid,
+                "files": files,
+                "bytes": bytes,
+            });
+            let human = i18n::format(
+                "sync.status_line",
+                &[&files.to_string(), &bytes.to_string()],
+            );
+            return Ok(Outcome::new("sync.status", data, human)?);
+        }
+        SyncCommand::Plan { root, output_dir } => {
+            let output_dir = required_output_dir(output_dir, context)?;
+            let config = sync_config_for(client, root.as_deref(), &output_dir)?;
+            let store = SyncStore::discover(&default_config_dir()?, &config.device_uuid);
+            let snapshot = store.load()?.unwrap_or_default();
+            let (diff, conflicts) = plan_for(client, &config, &snapshot).await?;
+            let data = serde_json::json!({
+                "added": diff.added,
+                "info_modified": diff.info_modified,
+                "deleted": diff.deleted,
+                "conflicts": conflicts,
+                "total": diff.added.len() + diff.info_modified.len() + diff.deleted.len(),
+            });
+            let human = plan_human(&diff, &conflicts);
+            return Ok(Outcome::new("sync.plan", data, human)?);
+        }
+        SyncCommand::Run {
+            root,
+            output_dir,
+            yes: run_yes,
+        } => {
+            let output_dir = required_output_dir(output_dir, context)?;
+            let config = sync_config_for(client, root.as_deref(), &output_dir)?;
+            confirm(&i18n::text("sync.confirm_run"), *run_yes, format)?;
+            let store = SyncStore::discover(&default_config_dir()?, &config.device_uuid);
+            let snapshot = store.load()?.unwrap_or_default();
+            // Single PHOTO_SYNC_REQUEST(37): fetch state and diff in one pass
+            // (a second 37 would be rejected while the phone is SYNCING; an
+            // up-front SYNC_MONITOR(false) reset is NOT sent — on-device it
+            // left the phone answering 37 with a heartbeat, 2026-08-03).
+            let phone_files = photo_sync_files(client, &config, &snapshot).await?;
+            let diff = plan_diff(&phone_files, &snapshot);
+            let conflicts = check_conflicts(&diff, &snapshot);
+            let (result, updated) =
+                execute_plan(client, &config, &phone_files, &diff, &snapshot, &conflicts).await?;
+            store.save(&updated)?;
+            let _ = client.sync_monitor(false).await?;
+            let data = serde_json::json!({
+                "downloaded": result.downloaded,
+                "deleted": result.deleted,
+                "failures": result.failures,
+                "conflicts": result.conflicts,
+            });
+            let human = run_human(&result);
+            return Ok(Outcome::new("sync.run", data, human)?);
+        }
+        SyncCommand::Watch {
+            root,
+            output_dir,
+            yes: watch_yes,
+        } => {
+            let output_dir = required_output_dir(output_dir, context)?;
+            let config = sync_config_for(client, root.as_deref(), &output_dir)?;
+            confirm(&i18n::text("sync.confirm_run"), *watch_yes, format)?;
+            let store = SyncStore::discover(&default_config_dir()?, &config.device_uuid);
+            let snapshot = store.load()?.unwrap_or_default();
+            // Single PHOTO_SYNC_REQUEST(37) (a second one would be rejected
+            // while the phone is SYNCING; no up-front reset — see Run).
+            let phone_files = photo_sync_files(client, &config, &snapshot).await?;
+            let diff = plan_diff(&phone_files, &snapshot);
+            let conflicts = check_conflicts(&diff, &snapshot);
+            let (result, mut updated) =
+                execute_plan(client, &config, &phone_files, &diff, &snapshot, &conflicts).await?;
+            store.save(&updated)?;
+            if !result.failures.is_empty() {
+                eprintln!(
+                    "{}",
+                    i18n::format("sync.run_failures", &[&result.failures.len().to_string()])
+                );
+            }
+            // Enter real-time mode; a rejection here is a real error because
+            // we just synced (the phone must be in SYNCING state now).
+            if !client.sync_monitor(true).await? {
+                return Err(Error::Protocol(
+                    i18n::text("sync.monitor_rejected").to_string(),
+                ));
+            }
+            let mut events = client.subscribe_events(EventFilter::all());
+            loop {
+                tokio::select! {
+                    event = events.recv() => match event {
+                        Ok(ClientEvent::FileChanged(changes)) => {
+                            let mut failures = 0_usize;
+                            for change in &changes {
+                                match apply_file_change(client, &config, change, &mut updated).await {
+                                    Ok(part) => failures += part.failures.len(),
+                                    Err(_) => failures += 1,
+                                }
+                            }
+                            let _ = store.save(&updated);
+                            if format == OutputFormat::Jsonl {
+                                let envelope = sync_watch_envelope(client, changes.len(), failures);
+                                println!("{envelope}");
+                            } else {
+                                println!(
+                                    "{}",
+                                    i18n::format(
+                                        "sync.watch_applied",
+                                        &[
+                                            &changes.len().to_string(),
+                                            &failures.to_string(),
+                                        ]
+                                    )
+                                );
+                            }
+                            let _ = io::stdout().flush();
+                        }
+                        Ok(_) => {}
+                        Err(EventStreamError::Lagged { missed }) => {
+                            eprintln!(
+                                "{}",
+                                i18n::format("watch.lagged", &[&missed.to_string()])
+                            );
+                        }
+                        Err(EventStreamError::Closed) => {
+                            return Err(Error::Transport(
+                                i18n::text("watch.disconnected").to_string(),
+                            ));
+                        }
+                    },
+                    _ = tokio::signal::ctrl_c() => {
+                        let _ = client.sync_monitor(false).await;
+                        let _ = store.save(&updated);
+                        return Err(Error::Interrupted);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn sync_device_uuid(client: &HandShakerClient) -> Result<String> {
+    let device_uuid = client
+        .device_info()
+        .phone_id
+        .clone()
+        .ok_or_else(|| Error::Protocol(i18n::text("sync.device_uuid_missing").to_string()))?;
+    if !device_uuid
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_')
+    {
+        return Err(Error::Protocol(
+            i18n::text("sync.device_uuid_invalid").to_string(),
+        ));
+    }
+    Ok(device_uuid)
+}
+
+fn required_output_dir(output_dir: &Option<PathBuf>, context: &CommandContext) -> Result<PathBuf> {
+    let Some(output_dir) = output_dir else {
+        return Err(Error::Usage(
+            i18n::text("sync.output_dir_required").to_string(),
+        ));
+    };
+    Ok(resolve_local(&context.local_cwd, output_dir))
+}
+
+fn sync_config_for(
+    client: &HandShakerClient,
+    root: Option<&str>,
+    output_dir: &Path,
+) -> Result<SyncConfig> {
+    let device_uuid = sync_device_uuid(client)?;
+    let state = StateStore::discover()?.load_or_create()?;
+    Ok(sync_config(
+        &device_uuid,
+        root.unwrap_or(DEFAULT_SYNC_ROOT),
+        &output_dir.display().to_string(),
+        &state.host_uuid.to_string(),
+    ))
+}
+
+/// Build the ledger file list to send as the previous snapshot, then ask the
+/// phone for its current state and return the raw photo list.
+async fn photo_sync_files(
+    client: &HandShakerClient,
+    config: &SyncConfig,
+    snapshot: &SyncSnapshot,
+) -> Result<Vec<RemoteFile>> {
+    let ledger: Vec<RemoteFile> = snapshot
+        .files
+        .iter()
+        .map(|(path, record)| RemoteFile {
+            path: path.clone(),
+            size: record.size,
+            created_at: None,
+            modified_at: record.modified_at,
+            is_directory: false,
+            checksum: record.checksum.clone(),
+            is_trash: None,
+            id: None,
+            ext_data: record.ext_data.clone(),
+        })
+        .collect();
+    let result = client.photo_sync(&config.pc_id, &ledger).await?;
+    if result.is_success == Some(false) {
+        return Err(Error::Protocol(
+            i18n::text("sync.photo_sync_rejected").to_string(),
+        ));
+    }
+    // The phone answers with its whole photo library; keep only entries under
+    // the configured sync root. Component-boundary match (Path::strip_prefix
+    // is segment-wise, so a sibling like DCIM/Camera2 does not match
+    // phone_root DCIM/Camera); local_destination re-checks on every use.
+    Ok(result
+        .files
+        .into_iter()
+        .filter(|file| {
+            Path::new(&file.path)
+                .strip_prefix(Path::new(&config.phone_root))
+                .is_ok()
+        })
+        .collect())
+}
+
+async fn plan_for(
+    client: &HandShakerClient,
+    config: &SyncConfig,
+    snapshot: &SyncSnapshot,
+) -> Result<(SyncDiff, Vec<String>)> {
+    let phone_files = photo_sync_files(client, config, snapshot).await?;
+    let diff = plan_diff(&phone_files, snapshot);
+    let conflicts = check_conflicts(&diff, snapshot);
+    Ok((diff, conflicts))
+}
+
+fn plan_human(diff: &SyncDiff, conflicts: &[String]) -> String {
+    let mut lines = Vec::new();
+    lines.push(i18n::format(
+        "sync.plan_added",
+        &[&diff.added.len().to_string()],
+    ));
+    if !diff.info_modified.is_empty() {
+        lines.push(i18n::format(
+            "sync.plan_info",
+            &[&diff.info_modified.len().to_string()],
+        ));
+    }
+    if !diff.deleted.is_empty() {
+        lines.push(i18n::format(
+            "sync.plan_deleted",
+            &[&diff.deleted.len().to_string()],
+        ));
+    }
+    if !conflicts.is_empty() {
+        lines.push(i18n::format(
+            "sync.plan_conflicts",
+            &[&conflicts.len().to_string()],
+        ));
+    }
+    lines.join("\n")
+}
+
+fn run_human(result: &SyncRunResult) -> String {
+    let mut lines = Vec::new();
+    lines.push(i18n::format(
+        "sync.run_done",
+        &[
+            &result.downloaded.len().to_string(),
+            &result.deleted.len().to_string(),
+        ],
+    ));
+    if !result.failures.is_empty() {
+        lines.push(i18n::format(
+            "sync.run_failures",
+            &[&result.failures.len().to_string()],
+        ));
+    }
+    if !result.conflicts.is_empty() {
+        lines.push(i18n::format(
+            "sync.plan_conflicts",
+            &[&result.conflicts.len().to_string()],
+        ));
+    }
+    lines.join("\n")
+}
+
+fn sync_watch_envelope(
+    client: &HandShakerClient,
+    applied: usize,
+    failures: usize,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "ok": true,
+        "command": "sync.watch",
+        "device": {
+            "serial": client.device_info().serial,
+            "name": client.device_info().name,
+        },
+        "event": "sync.watch",
+        "data": {
+            "applied": applied,
+            "failures": failures,
+        },
+        "warnings": [],
+    })
+}
 
 /// Strip control characters from a device-controlled string before printing
 /// it in human output, so a hostile phone cannot inject terminal escapes.
@@ -1589,36 +2277,6 @@ fn confirm(action: &str, yes: bool, format: OutputFormat) -> Result<()> {
     }
 }
 
-fn transfer_options(
-    overwrite: bool,
-    command: &'static str,
-    device: &handshaker_rust::DeviceInfo,
-    format: OutputFormat,
-) -> TransferOptions {
-    if format == OutputFormat::Json {
-        return TransferOptions {
-            overwrite,
-            progress: None,
-        };
-    }
-    let device = device.clone();
-    let last_percent = Arc::new(Mutex::new(None));
-    TransferOptions {
-        overwrite,
-        progress: Some(Arc::new(move |progress: TransferProgress| {
-            let percent = progress_percent(&progress);
-            let Ok(mut last) = last_percent.lock() else {
-                return;
-            };
-            if *last == Some(percent) {
-                return;
-            }
-            *last = Some(percent);
-            render_progress(command, &device, &progress, format);
-        })),
-    }
-}
-
 fn resolve_remote(base: &str, input: &str) -> String {
     let mut parts: Vec<&str> = if input.starts_with('/') {
         Vec::new()
@@ -1649,12 +2307,60 @@ fn resolve_local_pull(base: &Path, local: Option<&Path>, remote: &str) -> Result
     if let Some(local) = local {
         return Ok(resolve_local(base, local));
     }
-    let name = remote
+    Ok(base.join(
+        remote_name(remote)
+            .ok_or_else(|| Error::Usage(ZhCn.format(MessageKey::RemoteNameMissing, &[remote])))?,
+    ))
+}
+
+/// Last path component of a remote path, if any.
+fn remote_name(remote: &str) -> Option<String> {
+    remote
         .rsplit('/')
         .next()
         .filter(|name| !name.is_empty())
-        .ok_or_else(|| Error::Usage(ZhCn.format(MessageKey::RemoteNameMissing, &[remote])))?;
-    Ok(base.join(name))
+        .map(str::to_owned)
+}
+
+/// Batch options mirroring the CLI's overwrite switch and (for human output)
+/// a per-file progress line.
+fn batch_options(
+    overwrite: bool,
+    command: &'static str,
+    device: &handshaker_rust::DeviceInfo,
+    format: OutputFormat,
+) -> BatchTransferOptions {
+    if format == OutputFormat::Json {
+        return BatchTransferOptions {
+            overwrite,
+            progress: None,
+            offset: 0,
+            concurrency: 1,
+        };
+    }
+    let device = device.clone();
+    let last_done = Arc::new(Mutex::new(None));
+    BatchTransferOptions {
+        overwrite,
+        offset: 0,
+        concurrency: 1,
+        progress: Some(Arc::new(move |progress: BatchTransferProgress| {
+            let Ok(mut last) = last_done.lock() else {
+                return;
+            };
+            if *last == Some(progress.done) {
+                return;
+            }
+            *last = Some(progress.done);
+            render_batch_progress(command, &device, &progress, format);
+        })),
+    }
+}
+
+/// Append a partial batch result into the aggregate.
+fn merge_batch(aggregate: &mut BatchTransferResult, partial: BatchTransferResult) {
+    aggregate.ok.extend(partial.ok);
+    aggregate.failures.extend(partial.failures);
 }
 
 fn normalize_local(path: PathBuf) -> PathBuf {
@@ -1755,6 +2461,95 @@ mod tests {
     use super::*;
 
     #[test]
+    fn collect_local_tree_counts_files_dirs_and_bytes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("src");
+        std::fs::create_dir_all(root.join("sub")).expect("create dirs");
+        std::fs::write(root.join("a.txt"), b"hello").expect("write a");
+        std::fs::write(root.join("sub").join("b.bin"), b"1234567890").expect("write b");
+
+        let mut items = Vec::new();
+        let mut dirs = std::collections::BTreeSet::new();
+        let mut bytes = 0_u64;
+        collect_local_tree(
+            &root,
+            "/remote/base",
+            &mut items,
+            &mut dirs,
+            &mut bytes,
+            &ZhCn,
+        )
+        .expect("scan");
+
+        assert_eq!(items.len(), 2, "one file per level");
+        assert_eq!(dirs.len(), 1, "sub directory recorded");
+        assert!(dirs.contains("/remote/base/sub"));
+        assert_eq!(bytes, 15, "5 + 10 bytes");
+        let targets: Vec<_> = items.iter().map(|item| item.target.clone()).collect();
+        assert!(targets.contains(&"/remote/base/a.txt".to_string()));
+        assert!(targets.contains(&"/remote/base/sub/b.bin".to_string()));
+    }
+
+    #[test]
+    fn pull_target_misparsed_detects_missing_separator() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let local_cwd = temp.path().join("lcd");
+        std::fs::create_dir_all(&local_cwd).expect("create lcd dir");
+        let existing = local_cwd.join("out.txt");
+        std::fs::write(&existing, b"x").expect("write");
+        // A file with the same name in the process cwd but not under local_cwd.
+        let cwd_only = temp.path().join("cwd-only.txt");
+        std::fs::write(&cwd_only, b"x").expect("write");
+
+        // Two positionals with an existing local second arg -> misparse.
+        assert!(pull_target_misparsed(
+            &[
+                "/storage/emulated/0/a.txt".to_string(),
+                "out.txt".to_string(),
+            ],
+            None,
+            &local_cwd,
+        ));
+        // Second arg does not exist under local_cwd -> cannot tell, keep old
+        // behavior (even if the process cwd has a same-named file).
+        assert!(!pull_target_misparsed(
+            &[
+                "/storage/emulated/0/a.txt".to_string(),
+                "cwd-only.txt".to_string(),
+            ],
+            None,
+            &local_cwd,
+        ));
+        // Explicit `--` LOCAL -> fine.
+        assert!(!pull_target_misparsed(
+            &["/storage/emulated/0/a.txt".to_string()],
+            Some(&existing),
+            &local_cwd,
+        ));
+        // Three remotes (multi-source to cwd) -> fine.
+        assert!(!pull_target_misparsed(
+            &["/a".to_string(), "/b".to_string(), "out.txt".to_string(),],
+            None,
+            &local_cwd,
+        ));
+    }
+
+    #[test]
+    fn dry_run_report_serializes_with_dry_run_flag() {
+        let report = DryRunReport {
+            files: 3,
+            dirs: 1,
+            bytes: 42,
+            dry_run: true,
+        };
+        let json = serde_json::to_value(&report).expect("serialize");
+        assert_eq!(json["files"], 3);
+        assert_eq!(json["dirs"], 1);
+        assert_eq!(json["bytes"], 42);
+        assert_eq!(json["dry_run"], true);
+    }
+
+    #[test]
     fn remote_paths_resolve_against_current_directory() {
         assert_eq!(
             resolve_remote("/storage/emulated/0", "Download/a"),
@@ -1807,8 +2602,8 @@ mod tests {
             vec!["fs", "mkdir", "/sdcard/a"],
             vec!["fs", "mv", "/sdcard/a", "/sdcard/b"],
             vec!["fs", "rm", "/sdcard/a", "--recursive"],
-            vec!["fs", "pull", "/sdcard/a", "/tmp/a"],
-            vec!["fs", "push", "/tmp/a", "/sdcard/a"],
+            vec!["fs", "pull", "/sdcard/a", "--", "/tmp/a"],
+            vec!["fs", "push", "/tmp/a", "--", "/sdcard/a"],
             vec!["clipboard", "get"],
             vec!["clipboard", "set", "text"],
             vec!["clipboard", "set", "--stdin"],
@@ -1856,8 +2651,9 @@ mod tests {
             "fs",
             "pull",
             "/remote/a",
-            "/tmp/a",
             "--overwrite",
+            "--",
+            "/tmp/a",
         ])
         .expect("parse");
         assert!(cli.yes);
@@ -1877,12 +2673,13 @@ mod tests {
             "fs",
             "push",
             "/tmp/local.txt",
+            "--",
             "/sdcard/remote.txt",
         ])
         .expect("parse push");
         match cli.command {
             Command::Fs(FsCommand::Push { local, remote, .. }) => {
-                assert_eq!(local, PathBuf::from("/tmp/local.txt"));
+                assert_eq!(local, vec![PathBuf::from("/tmp/local.txt")]);
                 assert_eq!(remote, "/sdcard/remote.txt");
             }
             _ => panic!("expected fs push"),

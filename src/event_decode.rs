@@ -258,7 +258,9 @@ fn audio_item(item: SspAudioFile) -> MediaItem {
         mime_type: item.mime_type,
         title: item.title,
         album_name: None,
-        duration: item.duration,
+        // The phone reports audio durations in milliseconds (proto comment);
+        // the library query path converts to seconds, so do the same here.
+        duration: item.duration.map(|millis| millis / 1000.0),
         artist: item.artist,
     }
 }
@@ -350,6 +352,7 @@ fn remote_file(file: SspFile) -> RemoteFile {
         checksum: file.checksum,
         is_trash: file.is_trash,
         id: file.id,
+        ext_data: file.ext_data,
     }
 }
 
@@ -373,6 +376,30 @@ mod tests {
         assert_eq!(info.serial, "serial");
         assert_eq!(info.name.as_deref(), Some("phone"));
         assert_eq!(info.root_path, "/sdcard");
+    }
+
+    #[test]
+    fn audio_change_duration_is_converted_from_millis_to_seconds() {
+        let change = SspAudioLibraryChange {
+            r#type: Some(SspRequestType::AudioLibChange as i32),
+            added_audio: vec![SspAudioFile {
+                media_id: Some(7),
+                path: Some("/storage/emulated/0/Music/a.mp3".to_string()),
+                title: Some("track".to_string()),
+                artist: Some("artist".to_string()),
+                duration: Some(210_000.0), // milliseconds on the wire
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let body = change.encode_to_vec();
+        let event = decode_event(9, &body, "serial");
+        let ClientEvent::MediaLibraryChanged(library) = event else {
+            panic!("media event")
+        };
+        assert_eq!(library.kind, MediaKind::Audio);
+        assert_eq!(library.added.len(), 1);
+        assert_eq!(library.added[0].duration, Some(210.0), "ms -> seconds");
     }
 
     #[test]

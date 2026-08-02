@@ -1,6 +1,6 @@
 [package]
 name = "handshaker_rust"
-version = "0.3.0"
+version = "0.5.0"
 edition = "2024"
 build = "build.rs"
 
@@ -16,6 +16,8 @@ cbc = { version = "0.1", features = ["alloc", "block-padding"] }
 clap = { version = "4", features = ["derive"] }
 directories = "6"
 flate2 = "1"
+kamadak-exif = "0.6"
+futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 md-5 = "0.10"
 mdns-sd = "0.20"
 prost = "0.14"

@@ -12,7 +12,7 @@ use crate::i18n;
 use base64::Engine as _;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct TrustRecord {
+pub struct TrustRecord {
     pub device_name: Option<String>,
     /// base64-encoded 256-byte derived key echoed by the phone on TRUST_ALWAYS.
     pub derived_key: String,
@@ -20,7 +20,7 @@ pub(crate) struct TrustRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct State {
+pub struct State {
     pub schema_version: u32,
     pub host_uuid: Uuid,
     #[serde(default)]
@@ -28,7 +28,7 @@ pub(crate) struct State {
 }
 
 #[derive(Clone)]
-pub(crate) struct StateStore {
+pub struct StateStore {
     path: PathBuf,
 }
 

@@ -93,6 +93,37 @@ fn wifi_flag_parses_and_conflicts_with_serial() {
 }
 
 #[test]
+fn dry_run_flag_parses_on_push_and_pull() {
+    let output = Command::new(env!("CARGO_BIN_EXE_handshaker"))
+        .env("HOME", "/tmp/hs-cli-test-home")
+        .args([
+            "fs",
+            "push",
+            "some-file.txt",
+            "--dry-run",
+            "--",
+            "/storage/emulated/0/Download",
+        ])
+        .output()
+        .expect("parse push dry-run");
+    // Parsing succeeds (exit 4 = device selection, not 2 = usage).
+    assert_ne!(output.status.code(), Some(2), "push --dry-run must parse");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_handshaker"))
+        .env("HOME", "/tmp/hs-cli-test-home")
+        .args([
+            "fs",
+            "pull",
+            "--dry-run",
+            "--recursive",
+            "/storage/emulated/0/DCIM",
+        ])
+        .output()
+        .expect("parse pull dry-run");
+    assert_ne!(output.status.code(), Some(2), "pull --dry-run must parse");
+}
+
+#[test]
 fn trust_remove_requires_confirmation_outside_tty() {
     let output = Command::new(env!("CARGO_BIN_EXE_handshaker"))
         .env("HOME", "/nonexistent-hs-home")
@@ -197,4 +228,43 @@ fn media_help_is_localized() {
     assert!(photo.status.success());
     let photo = String::from_utf8(photo.stdout).expect("UTF-8 help");
     assert!(photo.contains(handshaker_rust::i18n::text("cli.arg.media_limit")));
+}
+
+#[test]
+fn sync_commands_parse_and_require_output_dir() {
+    // `sync status` parses (device selection error, not usage).
+    let output = Command::new(env!("CARGO_BIN_EXE_handshaker"))
+        .env("HOME", "/tmp/hs-cli-test-home")
+        .args(["sync", "status"])
+        .output()
+        .expect("parse sync status");
+    assert_ne!(output.status.code(), Some(2), "sync status must parse");
+
+    // `sync run` without --output-dir is a usage error (exit 2).
+    let output = Command::new(env!("CARGO_BIN_EXE_handshaker"))
+        .env("HOME", "/tmp/hs-cli-test-home")
+        .args(["--output", "json", "sync", "run"])
+        .output()
+        .expect("run sync run without output dir");
+    assert_eq!(output.status.code(), Some(2));
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("JSON envelope");
+    assert_eq!(envelope["error"]["code"], "usage");
+
+    // `sync plan` parses with --output-dir (device selection, not usage).
+    let output = Command::new(env!("CARGO_BIN_EXE_handshaker"))
+        .env("HOME", "/tmp/hs-cli-test-home")
+        .args(["sync", "plan", "--output-dir", "/tmp/hs-sync-test"])
+        .output()
+        .expect("parse sync plan");
+    assert_ne!(output.status.code(), Some(2), "sync plan must parse");
+
+    // Localized help for the sync group.
+    let output = Command::new(env!("CARGO_BIN_EXE_handshaker"))
+        .env("HOME", "/tmp/hs-cli-test-home")
+        .args(["sync", "--help"])
+        .output()
+        .expect("sync help");
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).expect("UTF-8 help");
+    assert!(help.contains(handshaker_rust::i18n::text("cli.command.sync_plan")));
 }

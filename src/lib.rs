@@ -11,10 +11,14 @@ mod domain;
 mod error;
 mod event_decode;
 mod events;
+mod exif_parser;
 pub mod i18n;
+pub mod media_merge;
 mod protocol;
 mod session;
 mod state;
+mod sync;
+mod sync_store;
 #[cfg(test)]
 mod test_support;
 mod transport;
@@ -22,8 +26,10 @@ mod transport;
 pub use cancellation::{CancellationInfo, CancellationOrigin, CancellationToken, RequestOptions};
 pub use client::{ClientOptions, ConnectionTarget, EventCallbacks, HandShakerClient, PingResult};
 pub use domain::{
-    AdbDevice, AudioAlbum, AudioFile, AudioLibrary, ClipboardEntry, DeleteOptions, DeviceInfo,
-    ExifData, ImageAlbum, ImageFile, PhotoLibrary, RemoteFile, RemoteIoError, Thumbnails,
+    AdbDevice, AudioAlbum, AudioFile, AudioLibrary, BatchTransferFailure, BatchTransferItem,
+    BatchTransferOptions, BatchTransferProgress, BatchTransferResult, ClipboardEntry,
+    DeleteOptions, DeviceInfo, ExifData, ImageAlbum, ImageFile, PhotoLibrary, PhotoSyncResult,
+    RemoteFile, RemoteIoError, SyncConfig, SyncDiff, SyncFileRecord, SyncSnapshot, Thumbnails,
     TransferDirection, TransferOptions, TransferProgress, TransferProgressCallback,
     TrustRecordInfo, VideoAlbum, VideoFile, VideoLibrary, WifiDevice,
 };
@@ -33,3 +39,8 @@ pub use events::{
     FileChangeStatus, FileEvent, FileEventKind, MediaAlbum, MediaItem, MediaKind,
     MediaLibraryChange, PhotoSyncChange, SyncMonitorChange, UnknownEvent, UnknownEventReason,
 };
+pub use state::{State, StateStore};
+pub use sync::{
+    SyncRunResult, apply_file_change, check_conflicts, execute_plan, local_destination, plan_diff,
+};
+pub use sync_store::{SyncStore, default_config_dir, pc_id_from_host_uuid, sync_config};
