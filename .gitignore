@@ -5,3 +5,8 @@
 
 # macOS Finder metadata.
 .DS_Store
+
+
+# Added by cargo
+
+/target
