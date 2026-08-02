@@ -33,14 +33,16 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
   - **局域网通道**：Bonjour/mDNS 发现（`_handshaker_ssp._tcp` 全记录 + SRV 端口实测）、WiFi 握手与
     信任（TRUST_REMOVE / derived_key 重连免弹窗）、局域网传输（数据 MD5 一致）。
   - 验证工具见 `tools/capture/`。
-- Rust CLI `0.1.4` 已固化 ADB v0.1 基线，并增加 library 级强类型事件订阅和请求取消；CLI 当前实现 ADB 接入、设备信息、文件管理、单文件上传下载、剪贴板和常驻 shell。
-- WiFi 信任握手、USB AOA、媒体库、目录监控和照片同步仍属于后续里程碑。
+- Rust CLI `0.1.5` 已固化 ADB v0.1 基线，增加 library 级强类型事件订阅和请求取消，并实现 **WiFi（LAN）连接**：
+  `device discover` mDNS 发现、`--wifi IP:PORT` 直连、REQUEST_01/02 握手与持久化信任
+  （`TRUST_ALWAYS` 重连免弹窗、`trust list/remove/reset`）。
+- USB AOA、媒体库、目录监控和照片同步仍属于后续里程碑。
 
 ## 命令行教程
 
 ### 1. 使用前准备
 
-当前 CLI 只实现 ADB 通道。开始前需要：
+当前 CLI 已实现 ADB 与 WiFi 两条通道。使用前需要：
 
 1. 安装 Rust stable 工具链；
 2. 安装 Android SDK Platform-Tools，确保终端能直接运行 `adb`；
@@ -180,6 +182,34 @@ handshaker --serial DEVICE_SERIAL fs ls
 
 `device list` 只执行 `adb devices -l`。其他命令会自动启动手机端服务、建立动态 adb forward、完成
 握手，命令结束后发送 QUIT 并清理本次创建的 forward。
+
+### 4a. WiFi 设备发现与直连
+
+手机与电脑处于同一局域网并开启 HandShaker 服务时，可以通过 mDNS 发现设备：
+
+```sh
+handshaker device discover                # 默认浏览 6 秒
+handshaker device discover --browse-timeout 15s
+```
+
+`device discover` 只做发现，不建立连接。发现结果中的端口是手机动态端口，每次都要以最新
+mDNS 响应为准。用 `--wifi` 直接指定地址连接（与 `--serial` 互斥），后续命令与 ADB 通道完全一致：
+
+```sh
+handshaker --wifi 192.168.2.47:45656 device info
+handshaker --wifi 192.168.2.47:45656 fs ls
+handshaker --wifi '192.168.2.47:45656' shell
+```
+
+首次连接时手机会弹出信任对话框，请在手机上确认；确认后主机保存信任记录，重连无需再次确认：
+
+```sh
+handshaker trust list                     # 查看本地信任记录
+handshaker --yes trust remove DEVICE_UUID # 删除本地信任记录
+handshaker --yes --wifi IP:PORT trust reset DEVICE_UUID  # 清除手机端信任记录
+```
+
+信任记录按手机 device_uuid（android_id）保存，不包含明文密钥材料。
 
 ### 5. 设备命令
 
@@ -514,7 +544,7 @@ JSON 字段、命令名、事件名和错误 code 固定使用英文，不随显
 
 ### 14. Library 事件订阅与取消
 
-CLI v0.1.4 的事件总线和取消模型首先面向 Rust library 使用。订阅不会自动打开手机端 callback；需要主动事件时，
+CLI v0.1.5 的事件总线和取消模型首先面向 Rust library 使用。订阅不会自动打开手机端 callback；需要主动事件时，
 连接时显式启用对应的 `EventCallbacks`：
 
 ```rust,no_run
@@ -667,7 +697,6 @@ adb forward --list
 
 ### 18. 当前 CLI 尚未支持
 
-- WiFi/Bonjour 发现与信任连接；
 - USB AOA；
 - 多文件和递归目录传输；
 - range 下载和断点续传；
@@ -679,4 +708,4 @@ adb forward --list
 
 > `GET_DEVICE_INFO` 中向手机报告的主机兼容身份固定为原版 macOS HandShaker
 > `2.5.6 / 408`，用于通过手机端最低主机版本检查；它与本项目自身的 CLI/Cargo
-> 版本 `0.1.4` 相互独立。
+> 版本 `0.1.5` 相互独立。

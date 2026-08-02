@@ -10,6 +10,14 @@ use crate::i18n;
 use crate::protocol::crypto::SessionKeys;
 use crate::protocol::frame::{WireDirection, WireLog, read_downstream, write_upstream};
 
+/// Result of a completed transport handshake.
+#[derive(Debug)]
+pub(crate) struct HandshakeOutcome {
+    pub keys: SessionKeys,
+    /// WiFi/ADB two-round handshake metadata, when applicable.
+    pub wifi: Option<super::wifi_handshake::WifiHandshakeInfo>,
+}
+
 #[async_trait]
 pub(crate) trait HandshakeStrategy: Send + Sync {
     async fn establish(
@@ -17,7 +25,7 @@ pub(crate) trait HandshakeStrategy: Send + Sync {
         stream: &mut TcpStream,
         request_timeout: Duration,
         wire_log: Option<&Arc<WireLog>>,
-    ) -> Result<SessionKeys>;
+    ) -> Result<HandshakeOutcome>;
 }
 
 /// The ADB service uses the capture-verified USB-style raw public-key exchange.
@@ -30,7 +38,7 @@ impl HandshakeStrategy for AdbRawKeyExchange {
         stream: &mut TcpStream,
         request_timeout: Duration,
         wire_log: Option<&Arc<WireLog>>,
-    ) -> Result<SessionKeys> {
+    ) -> Result<HandshakeOutcome> {
         let keys = SessionKeys::generate()?;
         let sid = 0x8000_0001;
         let payload = keys.build_enckey();
@@ -74,15 +82,19 @@ impl HandshakeStrategy for AdbRawKeyExchange {
         timeout(request_timeout, future)
             .await
             .map_err(|_| Error::Timeout(i18n::text("handshake.adb").to_string()))??;
-        Ok(keys)
+        Ok(HandshakeOutcome { keys, wifi: None })
     }
 }
 
-async fn read_normal_direct(
+pub(crate) async fn read_normal_direct(
     stream: &mut TcpStream,
     expected_sid: u32,
     wire_log: Option<&Arc<WireLog>>,
 ) -> Result<Vec<u8>> {
+    // A rogue phone (or a spoofed mDNS entry) could declare an arbitrarily
+    // large length prefix; cap the accumulated handshake response so the
+    // wait loop cannot balloon client memory.
+    const MAX_HANDSHAKE_RESPONSE: usize = 16 * 1024 * 1024;
     let mut assembled = Vec::new();
     let mut total = None;
     loop {
@@ -115,6 +127,11 @@ async fn read_normal_direct(
             let total = usize::try_from(total).map_err(|_| {
                 Error::Protocol(i18n::text("session.response_length_too_large").to_string())
             })?;
+            if total > MAX_HANDSHAKE_RESPONSE {
+                return Err(Error::Protocol(
+                    i18n::text("session.response_length_too_large").to_string(),
+                ));
+            }
             let expected = total.checked_add(8).ok_or_else(|| {
                 Error::Protocol(i18n::text("session.response_length_overflow").to_string())
             })?;

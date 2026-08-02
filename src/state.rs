@@ -9,10 +9,12 @@ use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::i18n;
+use base64::Engine as _;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TrustRecord {
     pub device_name: Option<String>,
+    /// base64-encoded 256-byte derived key echoed by the phone on TRUST_ALWAYS.
     pub derived_key: String,
     pub updated_at: u64,
 }
@@ -25,6 +27,7 @@ pub(crate) struct State {
     pub trust: BTreeMap<String, TrustRecord>,
 }
 
+#[derive(Clone)]
 pub(crate) struct StateStore {
     path: PathBuf,
 }
@@ -75,6 +78,36 @@ impl StateStore {
         };
         self.save(&state)?;
         Ok(state)
+    }
+
+    /// Persist (or refresh) the trust record for a WiFi device after a
+    /// successful TRUST_ALWAYS handshake.
+    pub(crate) fn upsert_trust(
+        &self,
+        device_uuid: &str,
+        device_name: Option<&str>,
+        derived_key: &[u8],
+    ) -> Result<()> {
+        let mut state = self.load_or_create()?;
+        state.trust.insert(
+            device_uuid.to_string(),
+            TrustRecord {
+                device_name: device_name.map(str::to_string),
+                derived_key: base64::engine::general_purpose::STANDARD.encode(derived_key),
+                updated_at: unix_seconds(),
+            },
+        );
+        self.save(&state)
+    }
+
+    /// Remove the local trust record for a device; returns whether one existed.
+    pub(crate) fn remove_trust(&self, device_uuid: &str) -> Result<bool> {
+        let mut state = self.load_or_create()?;
+        let removed = state.trust.remove(device_uuid).is_some();
+        if removed {
+            self.save(&state)?;
+        }
+        Ok(removed)
     }
 
     fn save(&self, state: &State) -> Result<()> {
@@ -161,4 +194,67 @@ fn set_path_permissions(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn set_path_permissions(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+fn unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before epoch")
+        .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_store() -> (tempfile::TempDir, StateStore) {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let store = StateStore::at(temp.path().join("state.json"));
+        (temp, store)
+    }
+
+    #[test]
+    fn trust_record_round_trips_through_upsert() {
+        let (_temp, store) = temp_store();
+        store
+            .upsert_trust("device-1", Some("Phone"), &[0x42_u8; 256])
+            .expect("upsert");
+        let state = store.load_or_create().expect("load");
+        let record = state.trust.get("device-1").expect("trust record present");
+        assert_eq!(record.device_name.as_deref(), Some("Phone"));
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&record.derived_key)
+            .expect("base64 derived key");
+        assert_eq!(decoded, vec![0x42_u8; 256]);
+    }
+
+    #[test]
+    fn upsert_refreshes_existing_record() {
+        let (_temp, store) = temp_store();
+        store
+            .upsert_trust("device-1", Some("Old"), &[1_u8; 32])
+            .expect("first upsert");
+        store
+            .upsert_trust("device-1", Some("New"), &[2_u8; 32])
+            .expect("second upsert");
+        let state = store.load_or_create().expect("load");
+        let record = state.trust.get("device-1").expect("record");
+        assert_eq!(record.device_name.as_deref(), Some("New"));
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&record.derived_key)
+            .expect("base64 derived key");
+        assert_eq!(decoded, vec![2_u8; 32]);
+    }
+
+    #[test]
+    fn remove_trust_reports_whether_record_existed() {
+        let (_temp, store) = temp_store();
+        assert!(!store.remove_trust("missing").expect("remove missing"));
+        store
+            .upsert_trust("device-1", None, &[3_u8; 16])
+            .expect("upsert");
+        assert!(store.remove_trust("device-1").expect("remove"));
+        let state = store.load_or_create().expect("load");
+        assert!(state.trust.is_empty());
+    }
 }

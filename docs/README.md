@@ -38,6 +38,7 @@ HandShaker 的局域网设备发现使用 **Apple Bonjour（mDNS/DNS-SD）**，�
 | [15-adb-v0.1-baseline](15-adb-v0.1-baseline.md) | Rust CLI ADB v0.1 基线自动化与真机验收报告 |
 | [16-m1-events-cancellation](16-m1-events-cancellation.md) | M1 公共事件订阅、慢消费者契约与请求取消模型 |
 | [17-m1-device-validation](17-m1-device-validation.md) | M1 Smartisan U2 Pro 受控事件与清理验收报告 |
+| [18-m2-wifi-trust](18-m2-wifi-trust.md) | M2 WiFi 发现、连接与持久化信任（设计与实现记录） |
 
 ## 术语
 

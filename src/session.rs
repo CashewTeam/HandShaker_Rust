@@ -20,6 +20,7 @@ use crate::protocol::crypto::SessionKeys;
 use crate::protocol::frame::{WireDirection, WireLog, read_downstream, write_upstream};
 use crate::protocol::handshake::HandshakeStrategy;
 use crate::protocol::proto::{SspHeartBeatRequest, SspRequestType};
+use crate::protocol::wifi_handshake::WifiHandshakeInfo;
 
 type ChunkReceiver = mpsc::UnboundedReceiver<Result<Incoming>>;
 
@@ -254,6 +255,8 @@ pub(crate) struct Session {
     reader_task: JoinHandle<()>,
     writer_task: JoinHandle<()>,
     heartbeat_task: JoinHandle<()>,
+    /// WiFi two-round handshake metadata, when the connection used it.
+    pub(crate) handshake_info: Option<WifiHandshakeInfo>,
 }
 
 impl Session {
@@ -265,11 +268,11 @@ impl Session {
         handshake: &dyn HandshakeStrategy,
         serial: String,
     ) -> Result<Self> {
-        let keys = Arc::new(
-            handshake
-                .establish(&mut stream, request_timeout, wire_log.as_ref())
-                .await?,
-        );
+        let outcome = handshake
+            .establish(&mut stream, request_timeout, wire_log.as_ref())
+            .await?;
+        let keys = Arc::new(outcome.keys);
+        let handshake_info = outcome.wifi;
         let (reader, writer) = stream.into_split();
         let closed = Arc::new(AtomicBool::new(false));
         let (writer_sender, writer_receiver) = mpsc::channel(64);
@@ -298,6 +301,7 @@ impl Session {
             reader_task,
             writer_task,
             heartbeat_task,
+            handshake_info,
         })
     }
 

@@ -190,3 +190,7 @@ WiFi 通道不拦截锁屏。
   getSignatureForData: / checkResult:`；`SFDeviceTrustStore` / `SFDeviceTrustRecord`
   （持久化 trust 记录：device_uuid, device_name, derived_key, apk_version,
   client_smart_sync_protocol_version, client_min_host_version, last_connection, connection_count, trust_type）
+
+> ✅ 已实现（2026-08，M2）：Rust WiFi 握手见 `src/protocol/wifi_handshake.rs`
+> （`WifiTrustHandshake`：REQUEST_01/02 多轮、derived_key 复用、TRUST_REMOVE、120s 信任等待），
+> 信任持久化见 `src/state.rs`，实现记录见 `docs/18-m2-wifi-trust.md`。

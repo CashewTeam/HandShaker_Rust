@@ -1,6 +1,6 @@
 # HandShaker_Rust 后端现状与完整开发计划
 
-> 状态基线：2026-08-02，Cargo package `handshaker_rust 0.1.4`。
+> 状态基线：2026-08-02，Cargo package `handshaker_rust 0.1.5`。
 >
 > 本文只把已经存在于 Rust 代码中的能力标记为“已实现”。协议文档、proto schema 或抓包已经确认，
 > 但尚未形成正式 Rust API/CLI 的能力，仍标记为“未实现”。
@@ -204,14 +204,15 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ### 4.2 连接与信任
 
-- ⬜ Bonjour/mDNS 浏览 `_handshaker_ssp._tcp.`。
-- ⬜ SRV/TXT/A/AAAA 解析、设备去重、地址选择和发现超时。
-- ⬜ WiFi TCP connector。
-- ⬜ WiFi `HANDSHAKE_REQUEST_01/02`、信任弹窗状态和多次 RESPONSE_02。
-- ⬜ derived key 的 PBKDF2 生成、保存、读取和失效处理。
-- ⬜ `TRUST_ONCE`、`TRUST_ALWAYS`、`TRUST_REMOVE` 的完整生命周期。
-- ⬜ 查看、删除、重置信任记录的 library API 和 CLI。
-- ⬜ WiFi 主机地址变化、手机重启和错误 derived key 的恢复流程。
+- ✅ Bonjour/mDNS 浏览 `_handshaker_ssp._tcp.`（`mdns-sd`）。
+- ✅ SRV/TXT/A/AAAA 解析、设备去重、地址选择和发现超时（`device discover --browse-timeout`）。
+- ✅ WiFi TCP connector（`WifiConnector`）。
+- ✅ WiFi `HANDSHAKE_REQUEST_01/02`、信任弹窗等待和多次 RESPONSE_02。
+- 🟡 derived key 由手机生成、主机保存与回传已实现；主机侧 PBKDF2 派生/校验路径未使用
+  （未引入 `pbkdf2`/`sha1` 依赖，需要时按需添加）。
+- ✅ `TRUST_ALWAYS`、`TRUST_REMOVE` 生命周期；`TRUST_ONCE`/`TRUST_UNKNOW`/`TRUST_NO` 仅协议枚举。
+- ✅ 查看、删除、重置信任记录的 library API 和 CLI（`trust list/remove/reset`）。
+- 🔬 WiFi 主机地址变化、手机重启和错误 derived key 的恢复流程已明确（显式重建），真机验证待补。
 - ⬜ USB AOA 枚举、Accessory 切换、接口 claim、端点读写和断开监听。
 - ⬜ macOS/Linux 的 USB 后端实现与权限说明。
 - ⬜ 二维码或手工地址连接流程。
@@ -354,28 +355,24 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 - 队列溢出、取消和关闭行为有确定结果；不自动重连，重连策略留给后续功能。
 - 真机事件验证若无法在不扩大操作范围的情况下完成，必须在验收报告中明确记录。
 
-### M2：WiFi 发现、连接与持久化信任
+### M2：WiFi 发现、连接与持久化信任（已完成，2026-08，0.1.5）
 
-目标：实现与抓包结果一致的局域网完整连接路径。
+目标：实现与抓包结果一致的局域网完整连接路径。实现记录见 `docs/18-m2-wifi-trust.md`。
 
-任务：
+完成情况：
 
-- 实现 Bonjour/mDNS 浏览和 `_handshaker_ssp._tcp.` 记录解析。
-- 将发现结果建模为不依赖具体 mDNS 库的领域类型。
-- 实现 `ConnectionTarget::Wifi` 和 `WifiConnector`。
-- 实现独立的 `WifiTrustHandshake`，不得复用 ADB 裸握手流程。
-- 实现 REQUEST_01/02、多次 RESPONSE_02 和信任状态转换。
-- 实现 PBKDF2 derived key、host UUID、信任记录保存和 `0600` 权限。
-- 增加 `device discover`、`trust list`、`trust remove/reset` 等 CLI。
-- 明确信任删除、设备重装、错误 key 和超时后的恢复策略。
-- 添加本地假 WiFi 服务、抓包向量和真实局域网测试。
-
-验收：
-
-- 首次连接能完成手机端授权。
-- `TRUST_ALWAYS` 重连无需再次确认。
-- 错误或被删除的信任记录不会静默降级，能够明确重建信任。
-- WiFi 下设备、文件、传输和剪贴板复用同一业务 API。
+- ✅ Bonjour/mDNS 浏览 `_handshaker_ssp._tcp.`（`mdns-sd 0.20`，`src/discovery.rs`）。
+- ✅ 发现结果建模为 `WifiDevice` 公开领域类型（不依赖 mDNS 库类型）。
+- ✅ `ConnectionTarget::Wifi`、`WifiConnector`（TCP 直连 + 超时）。
+- ✅ 独立 `WifiTrustHandshake`（REQUEST_01/02 多轮、TRUST_REMOVE、120s 信任等待）。
+- ✅ derived_key 持久化（按 device_uuid，base64 存储，state.json `0600`），重连自动携带；
+  host UUID 沿用既有 StateStore。
+- ✅ `device discover`、`trust list`、`trust remove`、`trust reset` CLI；`--wifi IP:PORT` 与 `--serial` 互斥。
+- ✅ 恢复策略：错误 derived_key → `failed` 明确报错；信任删除通过 `trust reset/remove` 显式重建；
+  信任等待超时明确报错，不静默降级。
+- ✅ 本地假 WiFi 服务（`FakeWifiSsp`）、抓包向量（docs/14 §10.2）与真实局域网发现验证。
+- ✅ 真机完整验收（2026-08，OD103）：首次连接授权、重连免弹窗、WiFi 业务（文件/传输 MD5 一致/剪贴板）、
+  trust reset、failed 自动清理与信任重建全部通过；记录见 `docs/18 §4.3`。
 
 ### M3：目录监控与设备/剪贴板主动推送
 
@@ -554,13 +551,13 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ## 10. 下一步建议
 
-建议接着执行 **M2**：
+M0（ADB 基线）、M1（事件/取消）、M2（WiFi 连接与信任）均已完成。建议接着执行 **M3**：
 
-1. 保持 M1 ADB 事件/取消 API 稳定；
-2. 实现独立的 WiFi Bonjour、REQUEST_01/02 和持久化信任，不复用 ADB 裸握手。
+1. 先补一次 M2 的受控真机验收（首次授权、重连免弹窗、TRUST_REMOVE、WiFi 业务复用）；
+2. 实现目录监控与设备/剪贴板主动推送（`MONITOR_FOLDER`、`CLIPBOARD_CHANGE` 等），
+   依赖已就绪的强类型事件总线。
 
-这样可以避免在媒体、监控和同步阶段重复改 Session，也能确保 WiFi 与 ADB 只在 connector/handshake
-层分叉，后续全部业务 API 保持复用。
+这样可以继续在现有 Session/事件基础上叠加实时功能，媒体、同步阶段不需要再改 Session。
 
 ## 11. 相关文档
 
@@ -572,3 +569,4 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 - `proto/smartsync.proto`：完整 proto2 schema。
 - `docs/16-m1-events-cancellation.md`：M1 事件订阅与取消行为。
 - `docs/17-m1-device-validation.md`：M1 真机事件与清理验收。
+- `docs/18-m2-wifi-trust.md`：M2 WiFi 发现、连接与持久化信任。

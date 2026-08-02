@@ -30,6 +30,80 @@ fn help_text_comes_from_the_chinese_language_file() {
     assert!(!help.contains("[default:"));
 }
 
+#[test]
+fn discover_help_is_localized_and_parses() {
+    let help = Command::new(env!("CARGO_BIN_EXE_handshaker"))
+        .args(["device", "discover", "--help"])
+        .output()
+        .expect("run discover help");
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).expect("UTF-8 help");
+    assert!(help.contains(handshaker_rust::i18n::text("cli.command.discover")));
+    assert!(help.contains(handshaker_rust::i18n::text("cli.arg.browse_timeout")));
+    assert!(help.contains(handshaker_rust::i18n::text("cli.value.browse_timeout")));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_handshaker"))
+        .args([
+            "--output",
+            "json",
+            "device",
+            "discover",
+            "--browse-timeout",
+            "10ms",
+        ])
+        .output()
+        .expect("run discover");
+    assert!(output.status.success());
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("JSON envelope");
+    assert_eq!(envelope["schema_version"], 1);
+    assert_eq!(envelope["command"], "device.discover");
+    assert!(envelope["data"].is_array());
+}
+
+#[test]
+fn wifi_flag_parses_and_conflicts_with_serial() {
+    let output = Command::new(env!("CARGO_BIN_EXE_handshaker"))
+        .args(["--wifi", "not-an-address", "device", "info"])
+        .output()
+        .expect("run invalid wifi");
+    assert_eq!(output.status.code(), Some(2));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_handshaker"))
+        .args([
+            "--serial",
+            "ABC123",
+            "--wifi",
+            "192.168.2.47:45656",
+            "device",
+            "info",
+        ])
+        .output()
+        .expect("run conflicting flags");
+    assert_eq!(output.status.code(), Some(2));
+
+    // A valid IPv6 address parses.
+    let output = Command::new(env!("CARGO_BIN_EXE_handshaker"))
+        .env("HOME", "/tmp/hs-cli-test-home")
+        .args(["--wifi", "[::1]:45656", "--output", "json", "trust", "list"])
+        .output()
+        .expect("run valid wifi");
+    assert!(output.status.success());
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("JSON envelope");
+    assert_eq!(envelope["command"], "trust.list");
+}
+
+#[test]
+fn trust_remove_requires_confirmation_outside_tty() {
+    let output = Command::new(env!("CARGO_BIN_EXE_handshaker"))
+        .env("HOME", "/nonexistent-hs-home")
+        .args(["--output", "json", "trust", "remove", "device-1"])
+        .output()
+        .expect("run trust remove");
+    assert_eq!(output.status.code(), Some(8));
+    let envelope: Value = serde_json::from_slice(&output.stdout).expect("JSON envelope");
+    assert_eq!(envelope["error"]["code"], "confirmation_required");
+}
+
 #[cfg(unix)]
 #[test]
 fn device_list_reads_only_adb_devices_long() {

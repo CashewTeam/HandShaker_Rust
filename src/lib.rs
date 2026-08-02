@@ -6,6 +6,7 @@
 
 mod cancellation;
 mod client;
+mod discovery;
 mod domain;
 mod error;
 mod event_decode;
@@ -23,6 +24,7 @@ pub use client::{ClientOptions, ConnectionTarget, EventCallbacks, HandShakerClie
 pub use domain::{
     AdbDevice, ClipboardEntry, DeleteOptions, DeviceInfo, RemoteFile, RemoteIoError,
     TransferDirection, TransferOptions, TransferProgress, TransferProgressCallback,
+    TrustRecordInfo, WifiDevice,
 };
 pub use error::{Error, ErrorCode, Result};
 pub use events::{

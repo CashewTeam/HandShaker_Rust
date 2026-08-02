@@ -12,7 +12,7 @@ use tokio::time::{Instant, sleep, timeout_at};
 use crate::domain::AdbDevice;
 use crate::error::{Error, Result};
 use crate::i18n;
-use crate::transport::{ConnectedTransport, TransportConnector};
+use crate::transport::{ConnectedTransport, TransportCleanup, TransportConnector};
 
 const PHONE_PORT: u16 = 10086;
 const SERVICE_COMPONENT: &str = "com.smartisanos.smartfolder.aoa/.service.ConnectionManagerService";
@@ -111,8 +111,8 @@ impl TransportConnector for AdbConnector {
 
         Ok(ConnectedTransport {
             stream,
-            device,
-            cleanup,
+            label: device.serial.clone(),
+            cleanup: TransportCleanup::Adb(cleanup),
         })
     }
 }
@@ -346,6 +346,7 @@ fn unique_added_forward(before: &HashSet<u16>, after: &HashSet<u16>) -> Result<O
     Ok(Some(*port))
 }
 
+#[derive(Debug)]
 pub(crate) struct AdbForward {
     adb_path: PathBuf,
     serial: String,
@@ -509,8 +510,8 @@ mod tests {
 
         let accept = tokio::spawn(async move { listener.accept().await.expect("accept") });
         let connector = AdbConnector::new(adb, None, Duration::from_secs(5));
-        let mut connected = connector.connect().await.expect("connect");
-        assert_eq!(connected.device.serial, "ABC123");
+        let connected = connector.connect().await.expect("connect");
+        assert_eq!(connected.label, "ABC123");
         let _ = accept.await.expect("accept task");
         connected.cleanup.cleanup().await.expect("cleanup");
         drop(connected.stream);

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -50,6 +51,36 @@ pub struct AdbDevice {
     pub model: Option<String>,
     /// ADB device identifier.
     pub device: Option<String>,
+}
+
+/// One device discovered over mDNS (Bonjour), advertising `_handshaker_ssp._tcp`.
+///
+/// The WiFi server port is dynamic and changes over time, so it must always be
+/// read from a fresh mDNS response (SRV record), never cached.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WifiDevice {
+    /// Service instance name, e.g. `handshaker_ssp_`.
+    pub instance: String,
+    /// Host name from the SRV record, e.g. `Android-2.local`.
+    pub host: String,
+    /// Resolved addresses (IPv4 first when present, then IPv6).
+    pub addresses: Vec<String>,
+    /// TCP port from the SRV record.
+    pub port: u16,
+    /// TXT record key/value pairs (empty for the HandShaker service in
+    /// captured traffic; other services may carry properties).
+    pub txt: BTreeMap<String, String>,
+}
+
+/// One locally persisted WiFi trust record, without the derived key.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TrustRecordInfo {
+    /// Phone-side device identifier (android_id), the trust key.
+    pub device_uuid: String,
+    /// Device name stored at trust time.
+    pub device_name: Option<String>,
+    /// Unix timestamp of the last successful trust.
+    pub updated_at: u64,
 }
 
 /// File or directory metadata on the phone.

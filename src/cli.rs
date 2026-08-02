@@ -1,5 +1,6 @@
 use std::env;
 use std::io::{self, IsTerminal, Read, Write};
+use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -29,6 +30,9 @@ pub(crate) enum OutputFormat {
 pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub serial: Option<String>,
+
+    #[arg(long, global = true, conflicts_with = "serial", value_parser = parse_socket_addr)]
+    pub wifi: Option<SocketAddr>,
 
     #[arg(long, global = true, value_enum, default_value_t = OutputFormat::Human)]
     pub output: OutputFormat,
@@ -77,12 +81,14 @@ fn localized_command() -> clap::Command {
     localize_subcommand(&mut command, "device", "cli.command.device");
     localize_subcommand(&mut command, "fs", "cli.command.fs");
     localize_subcommand(&mut command, "clipboard", "cli.command.clipboard");
+    localize_subcommand(&mut command, "trust", "cli.command.trust");
     localize_subcommand(&mut command, "shell", "cli.command.shell");
 
     if let Some(device) = command.find_subcommand_mut("device") {
         localize_subcommand(device, "list", "cli.command.list");
         localize_subcommand(device, "info", "cli.command.info");
         localize_subcommand(device, "ping", "cli.command.ping");
+        localize_subcommand(device, "discover", "cli.command.discover");
     }
     if let Some(fs) = command.find_subcommand_mut("fs") {
         for (name, key) in [
@@ -104,6 +110,11 @@ fn localized_command() -> clap::Command {
         localize_subcommand(clipboard, "set", "cli.command.set");
         localize_subcommand(clipboard, "delete", "cli.command.delete");
         localize_subcommand(clipboard, "clear", "cli.command.clear");
+    }
+    if let Some(trust) = command.find_subcommand_mut("trust") {
+        localize_subcommand(trust, "list", "cli.command.trust_list");
+        localize_subcommand(trust, "remove", "cli.command.trust_remove");
+        localize_subcommand(trust, "reset", "cli.command.trust_reset");
     }
     command
 }
@@ -133,6 +144,12 @@ fn localize_arguments(mut command: clap::Command) -> clap::Command {
                 .value_name(i18n::text("cli.value.serial"))
         });
     }
+    if has_argument(&command, "wifi") {
+        command = command.mut_arg("wifi", |arg| {
+            arg.help(i18n::text("cli.wifi"))
+                .value_name(i18n::text("cli.value.wifi"))
+        });
+    }
     if has_argument(&command, "output") {
         command = command.mut_arg("output", |arg| {
             arg.help(i18n::text("cli.output"))
@@ -145,6 +162,13 @@ fn localize_arguments(mut command: clap::Command) -> clap::Command {
         command = command.mut_arg("timeout", |arg| {
             arg.help(i18n::text("cli.timeout"))
                 .value_name(i18n::text("cli.value.timeout"))
+                .hide_default_value(true)
+        });
+    }
+    if has_argument(&command, "discover_timeout") {
+        command = command.mut_arg("discover_timeout", |arg| {
+            arg.help(i18n::text("cli.arg.browse_timeout"))
+                .value_name(i18n::text("cli.value.browse_timeout"))
                 .hide_default_value(true)
         });
     }
@@ -219,6 +243,7 @@ fn localize_command_arguments(mut command: clap::Command, name: &str) -> clap::C
         ],
         "set" => &[("text", "cli.arg.text"), ("stdin", "cli.arg.stdin")],
         "delete" => &[("timestamp", "cli.arg.timestamp")],
+        "remove" | "reset" => &[("device_uuid", "cli.arg.device_uuid")],
         _ => &[],
     };
     for (id, key) in arguments {
@@ -227,7 +252,9 @@ fn localize_command_arguments(mut command: clap::Command, name: &str) -> clap::C
                 let arg = arg.help(i18n::text(key));
                 let arg = match *id {
                     "path" | "depth" | "exclusions" | "source" | "target" | "paths" | "remote"
-                    | "local" | "text" | "timestamp" => arg.value_name(i18n::text(key)),
+                    | "local" | "text" | "timestamp" | "device_uuid" => {
+                        arg.value_name(i18n::text(key))
+                    }
                     _ => arg,
                 };
                 if *id == "depth" {
@@ -249,6 +276,8 @@ pub(crate) enum Command {
     Fs(FsCommand),
     #[command(subcommand)]
     Clipboard(ClipboardCommand),
+    #[command(subcommand)]
+    Trust(TrustCommand),
     Shell,
 }
 
@@ -257,6 +286,11 @@ pub(crate) enum DeviceCommand {
     List,
     Info,
     Ping,
+    Discover {
+        /// mDNS browse window duration, e.g. "6s".
+        #[arg(long = "browse-timeout", id = "discover_timeout", default_value = "6s")]
+        timeout: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -320,6 +354,13 @@ pub(crate) enum ClipboardCommand {
     Clear,
 }
 
+#[derive(Debug, Subcommand)]
+pub(crate) enum TrustCommand {
+    List,
+    Remove { device_uuid: String },
+    Reset { device_uuid: String },
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct ClipboardSetArgs {
     #[arg(conflicts_with = "stdin")]
@@ -346,6 +387,7 @@ pub(crate) fn command_name(command: &Command) -> &'static str {
         Command::Device(DeviceCommand::List) => "device.list",
         Command::Device(DeviceCommand::Info) => "device.info",
         Command::Device(DeviceCommand::Ping) => "device.ping",
+        Command::Device(DeviceCommand::Discover { .. }) => "device.discover",
         Command::Fs(FsCommand::Ls { .. }) => "fs.ls",
         Command::Fs(FsCommand::Stat { .. }) => "fs.stat",
         Command::Fs(FsCommand::Count { .. }) => "fs.count",
@@ -359,6 +401,9 @@ pub(crate) fn command_name(command: &Command) -> &'static str {
         Command::Clipboard(ClipboardCommand::Set(_)) => "clipboard.set",
         Command::Clipboard(ClipboardCommand::Delete { .. }) => "clipboard.delete",
         Command::Clipboard(ClipboardCommand::Clear) => "clipboard.clear",
+        Command::Trust(TrustCommand::List) => "trust.list",
+        Command::Trust(TrustCommand::Remove { .. }) => "trust.remove",
+        Command::Trust(TrustCommand::Reset { .. }) => "trust.reset",
         Command::Shell => "shell",
     }
 }
@@ -370,6 +415,22 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
     }
     if matches!(cli.command, Command::Device(DeviceCommand::List)) {
         let outcome = device_list(cli.timeout).await?;
+        return render(&outcome, cli.output);
+    }
+    if matches!(cli.command, Command::Device(DeviceCommand::Discover { .. })) {
+        let outcome = device_discover(&cli).await?;
+        return render(&outcome, cli.output);
+    }
+    if matches!(cli.command, Command::Trust(TrustCommand::List)) {
+        let outcome = trust_list().await?;
+        return render(&outcome, cli.output);
+    }
+    if matches!(cli.command, Command::Trust(TrustCommand::Remove { .. })) {
+        let outcome = trust_remove(&cli).await?;
+        return render(&outcome, cli.output);
+    }
+    if matches!(cli.command, Command::Trust(TrustCommand::Reset { .. })) {
+        let outcome = trust_reset(&cli).await?;
         return render(&outcome, cli.output);
     }
     if matches!(cli.command, Command::Shell) {
@@ -401,10 +462,19 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
 }
 
 async fn connect(cli: &Cli) -> Result<HandShakerClient> {
-    HandShakerClient::connect(
-        ConnectionTarget::Adb {
+    if cli.wifi.is_some() {
+        // First connects and resets require acting on the phone; give a hint
+        // before the handshake blocks waiting for the trust dialog.
+        eprintln!("{}", ZhCn.text(MessageKey::WifiTrustHint));
+    }
+    let target = match cli.wifi {
+        Some(address) => ConnectionTarget::Wifi { address },
+        None => ConnectionTarget::Adb {
             serial: cli.serial.clone(),
         },
+    };
+    HandShakerClient::connect(
+        target,
         ClientOptions {
             timeout: cli.timeout,
             wire_log: cli.wire_log.clone(),
@@ -435,6 +505,110 @@ async fn device_list(timeout: Duration) -> Result<Outcome> {
     Outcome::new("device.list", devices, human)
 }
 
+async fn device_discover(cli: &Cli) -> Result<Outcome> {
+    let timeout = match &cli.command {
+        Command::Device(DeviceCommand::Discover { timeout }) => {
+            parse_duration(timeout).map_err(|message| Error::Usage(message))?
+        }
+        _ => unreachable!("device_discover only runs for Device::Discover"),
+    };
+    let devices = HandShakerClient::discover_wifi_devices(timeout).await?;
+    let localizer = ZhCn;
+    let human = if devices.is_empty() {
+        localizer.text(MessageKey::NoWifiDevices).to_string()
+    } else {
+        let mut lines = vec![localizer.text(MessageKey::WifiDeviceListHeader).to_string()];
+        lines.extend(devices.iter().map(|device| {
+            let address = device.addresses.first().map(String::as_str).unwrap_or("-");
+            format!(
+                "{}\t{}\t{}\t{}",
+                device.instance, address, device.port, device.host
+            )
+        }));
+        lines.join("\n")
+    };
+    Outcome::new("device.discover", devices, human)
+}
+
+fn human_trust_records(records: &[handshaker_rust::TrustRecordInfo]) -> String {
+    let localizer = ZhCn;
+    if records.is_empty() {
+        return localizer.text(MessageKey::TrustNone).to_string();
+    }
+    let mut lines = vec![localizer.text(MessageKey::TrustListHeader).to_string()];
+    lines.extend(records.iter().map(|record| {
+        format!(
+            "{}\t{}",
+            record.device_uuid,
+            record.device_name.as_deref().unwrap_or("-")
+        )
+    }));
+    lines.join("\n")
+}
+
+async fn trust_list() -> Result<Outcome> {
+    let records = HandShakerClient::list_trusted_devices().await?;
+    Outcome::new("trust.list", records.clone(), human_trust_records(&records))
+}
+
+async fn trust_remove(cli: &Cli) -> Result<Outcome> {
+    let device_uuid = match &cli.command {
+        Command::Trust(TrustCommand::Remove { device_uuid }) => device_uuid,
+        _ => unreachable!("trust_remove only runs for Trust::Remove"),
+    };
+    confirm(
+        &ZhCn.format(MessageKey::TrustRemoveAction, &[device_uuid]),
+        cli.yes,
+        cli.output,
+    )?;
+    let removed = HandShakerClient::remove_trusted_device(device_uuid).await?;
+    if !removed {
+        return Err(Error::Configuration(
+            ZhCn.format(MessageKey::TrustMissing, &[device_uuid]),
+        ));
+    }
+    Outcome::new(
+        "trust.remove",
+        serde_json::json!({ "device_uuid": device_uuid }),
+        ZhCn.format(MessageKey::TrustRemoved, &[device_uuid]),
+    )
+}
+
+async fn trust_reset(cli: &Cli) -> Result<Outcome> {
+    let device_uuid = match &cli.command {
+        Command::Trust(TrustCommand::Reset { device_uuid }) => device_uuid,
+        _ => unreachable!("trust_reset only runs for Trust::Reset"),
+    };
+    let address = cli
+        .wifi
+        .ok_or_else(|| Error::Usage(ZhCn.text(MessageKey::TrustResetNeedsWifi).to_string()))?;
+    confirm(
+        &ZhCn.format(MessageKey::TrustResetAction, &[device_uuid]),
+        cli.yes,
+        cli.output,
+    )?;
+    HandShakerClient::reset_wifi_trust(address, device_uuid, client_options(cli)).await?;
+    Outcome::new(
+        "trust.reset",
+        serde_json::json!({ "device_uuid": device_uuid, "address": address.to_string() }),
+        ZhCn.format(MessageKey::TrustResetDone, &[device_uuid]),
+    )
+}
+
+fn client_options(cli: &Cli) -> ClientOptions {
+    ClientOptions {
+        timeout: cli.timeout,
+        wire_log: cli.wire_log.clone(),
+        ..Default::default()
+    }
+}
+
+fn parse_socket_addr(value: &str) -> std::result::Result<SocketAddr, String> {
+    value
+        .parse::<SocketAddr>()
+        .map_err(|error| i18n::format("cli.arg.wifi_invalid", &[value, &error.to_string()]))
+}
+
 async fn execute_connected(
     command: &Command,
     client: &HandShakerClient,
@@ -446,6 +620,12 @@ async fn execute_connected(
     let outcome = match command {
         Command::Device(DeviceCommand::List) => {
             return device_list(Duration::from_secs(30)).await;
+        }
+        Command::Device(DeviceCommand::Discover { .. }) => {
+            unreachable!("device.discover is handled before connecting");
+        }
+        Command::Trust(_) => {
+            unreachable!("trust commands are handled before connecting");
         }
         Command::Device(DeviceCommand::Info) => Outcome::new(
             "device.info",

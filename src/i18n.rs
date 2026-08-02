@@ -9,6 +9,8 @@ pub const DEFAULT_LANGUAGE: &str = "zh-CN";
 pub enum MessageKey {
     WireLogWarning,
     NoDevices,
+    NoWifiDevices,
+    WifiDeviceListHeader,
     DeviceListHeader,
     FileListHeader,
     ClipboardHeader,
@@ -56,6 +58,15 @@ pub enum MessageKey {
     ClearClipboardAction,
     RemoteNameMissing,
     InvalidDuration,
+    WifiTrustHint,
+    TrustNone,
+    TrustListHeader,
+    TrustRemoveAction,
+    TrustMissing,
+    TrustRemoved,
+    TrustResetNeedsWifi,
+    TrustResetAction,
+    TrustResetDone,
 }
 
 impl MessageKey {
@@ -63,6 +74,8 @@ impl MessageKey {
         match self {
             Self::WireLogWarning => "wire_log.warning",
             Self::NoDevices => "device.none",
+            Self::NoWifiDevices => "device.wifi_none",
+            Self::WifiDeviceListHeader => "device.wifi_list_header",
             Self::DeviceListHeader => "device.list_header",
             Self::FileListHeader => "file.list_header",
             Self::ClipboardHeader => "clipboard.header",
@@ -110,6 +123,15 @@ impl MessageKey {
             Self::ClearClipboardAction => "clipboard.clear_action",
             Self::RemoteNameMissing => "file.remote_name_missing",
             Self::InvalidDuration => "duration.invalid",
+            Self::WifiTrustHint => "wifi.trust_hint",
+            Self::TrustNone => "trust.none",
+            Self::TrustListHeader => "trust.list_header",
+            Self::TrustRemoveAction => "trust.remove_action",
+            Self::TrustMissing => "trust.missing",
+            Self::TrustRemoved => "trust.removed",
+            Self::TrustResetNeedsWifi => "trust.reset_needs_wifi",
+            Self::TrustResetAction => "trust.reset_action",
+            Self::TrustResetDone => "trust.reset_done",
         }
     }
 }

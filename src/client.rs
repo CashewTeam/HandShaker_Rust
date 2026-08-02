@@ -1,4 +1,5 @@
 use std::io::{Read, Write};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -16,18 +17,21 @@ use uuid::Uuid;
 use crate::cancellation::RequestOptions;
 use crate::domain::{
     AdbDevice, ClipboardEntry, DeleteOptions, DeviceInfo, RemoteFile, TransferDirection,
-    TransferOptions, TransferProgress,
+    TransferOptions, TransferProgress, TrustRecordInfo, WifiDevice,
 };
 use crate::error::{Error, Result};
 use crate::events::{EventFilter, EventSubscription};
 use crate::i18n;
 use crate::protocol::frame::{MAX_UPSTREAM_PAYLOAD, WireLog};
-use crate::protocol::handshake::AdbRawKeyExchange;
+use crate::protocol::handshake::{AdbRawKeyExchange, HandshakeStrategy};
 use crate::protocol::proto::*;
+use crate::protocol::wifi_handshake::WifiTrustHandshake;
 use crate::session::Session;
 use crate::state::StateStore;
+use crate::transport::TransportCleanup;
 use crate::transport::TransportConnector;
-use crate::transport::adb::{AdbConnector, AdbForward, list_devices, list_devices_with_timeout};
+use crate::transport::adb::{AdbConnector, list_devices, list_devices_with_timeout};
+use crate::transport::wifi::WifiConnector;
 
 // These fields describe the compatible original macOS host protocol identity,
 // not this crate's release version. Older values cause the phone to close the
@@ -41,6 +45,8 @@ const COMPATIBLE_HOST_APP_VERSION_CODE: u32 = 408;
 pub enum ConnectionTarget {
     /// Connect through the verified ADB service and forward.
     Adb { serial: Option<String> },
+    /// Connect directly over WiFi to the phone's dynamic SSP port.
+    Wifi { address: SocketAddr },
 }
 
 /// Options controlling a HandShaker connection.
@@ -112,7 +118,7 @@ pub struct PingResult {
 /// ```
 pub struct HandShakerClient {
     session: Option<Session>,
-    cleanup: Option<AdbForward>,
+    cleanup: Option<TransportCleanup>,
     device: DeviceInfo,
 }
 
@@ -128,6 +134,98 @@ impl HandShakerClient {
         timeout: Duration,
     ) -> Result<Vec<AdbDevice>> {
         list_devices_with_timeout(adb_path.as_ref(), timeout).await
+    }
+
+    /// Discover HandShaker WiFi devices over mDNS without starting any service.
+    ///
+    /// Browsing runs for up to `browse_timeout`; the advertised WiFi port is
+    /// dynamic and is read fresh from the mDNS SRV record.
+    pub async fn discover_wifi_devices(browse_timeout: Duration) -> Result<Vec<WifiDevice>> {
+        crate::discovery::discover_wifi_devices(browse_timeout).await
+    }
+
+    /// List locally persisted WiFi trust records (derived keys are never exposed).
+    pub async fn list_trusted_devices() -> Result<Vec<TrustRecordInfo>> {
+        let state = StateStore::discover()?.load_or_create()?;
+        Ok(state
+            .trust
+            .iter()
+            .map(|(device_uuid, record)| TrustRecordInfo {
+                device_uuid: device_uuid.clone(),
+                device_name: record.device_name.clone(),
+                updated_at: record.updated_at,
+            })
+            .collect())
+    }
+
+    /// Remove the local trust record for a device; returns whether one existed.
+    pub async fn remove_trusted_device(device_uuid: &str) -> Result<bool> {
+        StateStore::discover()?.remove_trust(device_uuid)
+    }
+
+    /// Connect over WiFi, send TRUST_REMOVE to clear the phone-side record,
+    /// and close. No device-info exchange is performed.
+    ///
+    /// The connected phone must report `expected_device_uuid`; a mismatch
+    /// aborts the reset instead of silently targeting a different device.
+    pub async fn reset_wifi_trust(
+        address: SocketAddr,
+        expected_device_uuid: &str,
+        options: ClientOptions,
+    ) -> Result<()> {
+        Self::reset_wifi_trust_with_store(
+            address,
+            expected_device_uuid,
+            options,
+            StateStore::discover()?,
+        )
+        .await
+    }
+
+    async fn reset_wifi_trust_with_store(
+        address: SocketAddr,
+        expected_device_uuid: &str,
+        options: ClientOptions,
+        state_store: StateStore,
+    ) -> Result<()> {
+        let state = state_store.load_or_create()?;
+        let wire_log = options
+            .wire_log
+            .as_deref()
+            .map(WireLog::open)
+            .transpose()?
+            .map(Arc::new);
+        let connected = WifiConnector::new(address, options.timeout)
+            .connect()
+            .await?;
+        let handshake = WifiTrustHandshake::new_with_trust_remove(state.host_uuid.to_string());
+        let session = Session::establish(
+            connected.stream,
+            options.timeout,
+            options.heartbeat_interval,
+            wire_log,
+            &handshake,
+            address.to_string(),
+        )
+        .await?;
+        let result = match &session.handshake_info {
+            Some(info) if info.device_uuid == expected_device_uuid => Ok(()),
+            Some(info) => Err(Error::Handshake(i18n::format(
+                "trust.reset_device_mismatch",
+                &[&info.device_uuid, expected_device_uuid],
+            ))),
+            None => Err(Error::Handshake(
+                i18n::text("trust.reset_no_device").to_string(),
+            )),
+        };
+        // Close the session first so a close failure cannot mask the
+        // uuid mismatch reported above.
+        let close = session.close().await;
+        match (result, close) {
+            (Err(error), _) => Err(error),
+            (Ok(()), Err(close_error)) => Err(close_error),
+            (Ok(()), Ok(())) => Ok(()),
+        }
     }
 
     /// Connect, complete the ADB raw-key handshake, and fetch device info.
@@ -150,29 +248,53 @@ impl HandShakerClient {
         state: StateStore,
         callbacks: EventCallbacks,
     ) -> Result<Self> {
-        let _state = state.load_or_create()?;
+        let state_store = state;
+        let state = state_store.load_or_create()?;
         let wire_log = options
             .wire_log
             .as_deref()
             .map(WireLog::open)
             .transpose()?
             .map(Arc::new);
-        let (serial, connected) = match target {
+        let (serial, connected) = match &target {
             ConnectionTarget::Adb { serial } => {
-                let connector = AdbConnector::new(options.adb_path, serial, options.timeout);
+                let connector =
+                    AdbConnector::new(options.adb_path.clone(), serial.clone(), options.timeout);
                 let connected = connector.connect().await?;
-                (connected.device.serial.clone(), connected)
+                (connected.label.clone(), connected)
             }
+            ConnectionTarget::Wifi { address } => {
+                let connector = WifiConnector::new(*address, options.timeout);
+                let connected = connector.connect().await?;
+                (connected.label.clone(), connected)
+            }
+        };
+        let handshake: Box<dyn HandshakeStrategy> = match &target {
+            ConnectionTarget::Adb { .. } => Box::new(AdbRawKeyExchange),
+            ConnectionTarget::Wifi { .. } => Box::new(
+                WifiTrustHandshake::new(state.host_uuid.to_string(), state.trust.clone())
+                    .with_trust_store(state_store.clone()),
+            ),
         };
         let session = Session::establish(
             connected.stream,
             options.timeout,
             options.heartbeat_interval,
             wire_log,
-            &AdbRawKeyExchange,
+            handshake.as_ref(),
             serial.clone(),
         )
         .await?;
+        // Persist the trust record after a successful WiFi TRUST_ALWAYS.
+        if let Some(info) = &session.handshake_info {
+            if let Some(derived_key) = &info.derived_key {
+                state_store.upsert_trust(
+                    &info.device_uuid,
+                    info.device_name.as_deref(),
+                    derived_key,
+                )?;
+            }
+        }
         let mut client = Self {
             session: Some(session),
             cleanup: Some(connected.cleanup),
@@ -195,6 +317,26 @@ impl HandShakerClient {
             },
         };
         client.device = client.fetch_device_info(callbacks).await?;
+        // Backfill identity from the WiFi handshake when device info lacked it.
+        if let Some(info) = &client
+            .session
+            .as_ref()
+            .and_then(|s| s.handshake_info.as_ref())
+        {
+            let device = &mut client.device;
+            if device.phone_id.is_none() {
+                device.phone_id = Some(info.device_uuid.clone());
+            }
+            if device.name.is_none() {
+                device.name = info.device_name.clone();
+            }
+            if device.apk_version.is_none() {
+                device.apk_version = info.apk_version.clone();
+            }
+            if device.apk_version_name.is_none() {
+                device.apk_version_name = info.apk_version_name.clone();
+            }
+        }
         Ok(client)
     }
 
@@ -812,7 +954,7 @@ impl HandShakerClient {
         } else {
             Ok(())
         };
-        let cleanup_result = if let Some(mut cleanup) = self.cleanup.take() {
+        let cleanup_result = if let Some(cleanup) = self.cleanup.take() {
             cleanup.cleanup().await
         } else {
             Ok(())
@@ -1189,6 +1331,87 @@ mod tests {
         let calls = fake.adb_calls();
         assert!(calls.contains("forward --remove tcp:"));
         assert!(!calls.contains("force-stop"));
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn wifi_connect_persists_trust_and_reuses_business_api() {
+        use crate::test_support::{FakeWifiSsp, WIFI_DEVICE_UUID};
+        use base64::Engine as _;
+
+        let fake = FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+
+        // The echoed derived key must be persisted keyed by device_uuid.
+        let state: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(fake.state_path()).expect("state file"))
+                .expect("state json");
+        let derived = &state["trust"][WIFI_DEVICE_UUID]["derived_key"];
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(derived.as_str().expect("derived key string"))
+            .expect("derived key base64");
+        assert_eq!(decoded, vec![0x42_u8; 256]);
+
+        // Business API is reused unchanged over the WiFi channel.
+        assert_eq!(
+            client.device_info().name.as_deref(),
+            Some("Wifi Test Phone")
+        );
+        assert_eq!(client.device_info().model.as_deref(), Some("OD103"));
+        assert_eq!(client.root_path(), "/storage/emulated/0");
+        assert_eq!(
+            client.ping().await.expect("ping").client_timestamp,
+            Some(42)
+        );
+        let files = client.list_dir(".", 1).await.expect("list");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "/storage/emulated/0/a.txt");
+
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn wifi_trust_reset_verifies_device_uuid() {
+        use crate::state::StateStore;
+        use crate::test_support::{FakeWifiSsp, WIFI_DEVICE_UUID};
+
+        fn options() -> ClientOptions {
+            ClientOptions {
+                timeout: Duration::from_secs(5),
+                heartbeat_interval: Duration::from_secs(60),
+                adb_path: PathBuf::from("adb"),
+                wire_log: None,
+            }
+        }
+
+        // Matching uuid: the phone-side record is cleared and QUIT is sent.
+        let fake = FakeWifiSsp::start().await;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = StateStore::at(temp.path().join("state.json"));
+        HandShakerClient::reset_wifi_trust_with_store(
+            fake.address(),
+            WIFI_DEVICE_UUID,
+            options(),
+            store,
+        )
+        .await
+        .expect("trust reset");
+        fake.finish().await;
+
+        // Mismatched uuid: the reset must be rejected, not silently succeed.
+        let fake = FakeWifiSsp::start().await;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = StateStore::at(temp.path().join("state.json"));
+        let error = HandShakerClient::reset_wifi_trust_with_store(
+            fake.address(),
+            "wrong-device",
+            options(),
+            store,
+        )
+        .await
+        .expect_err("uuid mismatch must fail");
+        assert!(matches!(error, Error::Handshake(_)), "{error:?}");
         fake.finish().await;
     }
 

@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::io::Write;
+use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -134,6 +135,218 @@ impl FakeSsp {
             .expect("fake SSP server task");
     }
 }
+
+/// Fake phone speaking the WiFi two-round handshake, for client integration
+/// tests over a direct TCP connection (no adb).
+pub(crate) struct FakeWifiSsp {
+    #[allow(dead_code)] // keeps the temporary config directory alive for cleanup
+    temp: TempDir,
+    address: SocketAddr,
+    state_path: PathBuf,
+    server: JoinHandle<()>,
+}
+
+impl FakeWifiSsp {
+    pub(crate) async fn start() -> Self {
+        let temp = tempfile::tempdir().expect("fake wifi SSP tempdir");
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("fake wifi SSP listener");
+        let address = listener.local_addr().expect("fake wifi SSP address");
+        let state_path = temp.path().join("config").join("state.json");
+        let server = tokio::spawn(run_server_wifi(listener));
+        Self {
+            temp,
+            address,
+            state_path,
+            server,
+        }
+    }
+
+    pub(crate) async fn connect(&self) -> HandShakerClient {
+        HandShakerClient::connect_for_test_with_callbacks(
+            ConnectionTarget::Wifi {
+                address: self.address,
+            },
+            ClientOptions {
+                timeout: Duration::from_secs(5),
+                heartbeat_interval: Duration::from_secs(60),
+                adb_path: PathBuf::from("adb"),
+                wire_log: None,
+            },
+            self.state_path.clone(),
+            EventCallbacks::default(),
+        )
+        .await
+        .expect("fake wifi SSP client connection")
+    }
+
+    pub(crate) fn state_path(&self) -> &Path {
+        &self.state_path
+    }
+
+    pub(crate) fn address(&self) -> SocketAddr {
+        self.address
+    }
+
+    pub(crate) async fn finish(self) {
+        timeout(Duration::from_secs(3), self.server)
+            .await
+            .expect("fake wifi SSP server should finish")
+            .expect("fake wifi SSP server task");
+    }
+}
+
+async fn run_server_wifi(listener: TcpListener) {
+    let (mut stream, _) = listener.accept().await.expect("fake wifi SSP accept");
+
+    // REQUEST_01 -> RESPONSE_01
+    let (sid, flag, payload) = read_upstream(&mut stream).await;
+    assert_eq!(sid, 0x8000_0001);
+    assert_eq!(flag, 0);
+    let request01 = SspHandShakeRequest01::decode(payload.as_slice()).expect("fake request01");
+    let public = decode_host_key_from_request01(&request01);
+    let response01 = SspHandShakeResponse01 {
+        r#type: Some(SspRequestType::HandshakeResponse01 as i32),
+        apk_version: Some("201".to_string()),
+        apk_version_name: Some("1.2.0".to_string()),
+        client_smart_sync_protocol_version: Some("1".to_string()),
+        client_min_host_version: Some("2.1.0".to_string()),
+        device_uuid: Some(WIFI_DEVICE_UUID.to_string()),
+        device_name: Some("Wifi Test Phone".to_string()),
+        usb_serial: Some("WIFI-SN".to_string()),
+        is_smartisan_device: Some(true),
+        client_min_host_version_code: Some(333),
+        ..Default::default()
+    };
+    write_normal(&mut stream, sid, &response01.encode_to_vec()).await;
+
+    // REQUEST_02 -> RESPONSE_02 (first connect: TRUST_ALWAYS with derived key;
+    // trust reset: TRUST_WAITING after the phone clears its record).
+    let (sid2, flag2, payload2) = read_upstream(&mut stream).await;
+    assert_eq!(flag2, 0);
+    let request02 = SspHandShakeRequest02::decode(payload2.as_slice()).expect("fake request02");
+    if request02.trust_type == Some(SspHandShakeTrustType::TrustRemove as i32) {
+        let response02 = SspHandShakeResponse02 {
+            r#type: Some(SspRequestType::HandshakeResponse02 as i32),
+            trust_type: Some(SspHandShakeTrustType::TrustWaiting as i32),
+            device_uuid: Some(WIFI_DEVICE_UUID.to_string()),
+            device_name: Some("Wifi Test Phone".to_string()),
+            derived_key: None,
+            result: None,
+        };
+        write_normal(&mut stream, sid2, &response02.encode_to_vec()).await;
+    } else {
+        assert!(
+            request02.derived_key.is_none(),
+            "first connect must not present a derived key"
+        );
+        let derived_key = vec![0x42_u8; 256];
+        let encrypted = public
+            .encrypt(&mut OsRng, Pkcs1v15Encrypt, b"ok")
+            .expect("fake wifi handshake encryption");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(encrypted);
+        let response02 = SspHandShakeResponse02 {
+            r#type: Some(SspRequestType::HandshakeResponse02 as i32),
+            trust_type: Some(SspHandShakeTrustType::TrustAlways as i32),
+            device_uuid: Some(WIFI_DEVICE_UUID.to_string()),
+            device_name: Some("Wifi Test Phone".to_string()),
+            derived_key: Some(derived_key),
+            result: Some(encoded),
+        };
+        write_normal(&mut stream, sid2, &response02.encode_to_vec()).await;
+    }
+
+    // Business phase: signed requests, same framing as ADB.
+    loop {
+        let (sid, flag, body) = match read_upstream_result(&mut stream).await {
+            Ok(value) => value,
+            Err(_) => break,
+        };
+        if flag != 1 {
+            continue;
+        }
+        if body.len() < 128 {
+            break;
+        }
+        let (signature, protobuf) = body.split_at(128);
+        public
+            .verify(
+                rsa::Pkcs1v15Sign::new::<sha2::Sha256>(),
+                &sha2::Sha256::digest(protobuf),
+                signature,
+            )
+            .expect("fake wifi SSP signature");
+        let request = SspRequest::decode(protobuf).expect("fake wifi SSP request type");
+        let Some(request_type) = request
+            .r#type
+            .and_then(|value| SspRequestType::try_from(value).ok())
+        else {
+            continue;
+        };
+        match request_type {
+            SspRequestType::GetDeviceInfoRequest => {
+                let response = SspGetDeviceInfoResponse {
+                    r#type: None,
+                    apk_version: Some("1.2.0".to_string()),
+                    apk_version_name: Some("1.2.0-r6".to_string()),
+                    phone_model: Some("OD103".to_string()),
+                    phone_name: Some("Wifi Test Phone".to_string()),
+                    root_path: Some("/storage/emulated/0".to_string()),
+                    product_brand: Some("Smartisan".to_string()),
+                    phone_id: Some(WIFI_DEVICE_UUID.to_string()),
+                    disk_size: Some(1000),
+                    used_disk_size: Some(100),
+                    battery_percentage: Some(66),
+                    phone_locked: Some(false),
+                    ..Default::default()
+                };
+                write_normal(&mut stream, sid, &response.encode_to_vec()).await;
+            }
+            SspRequestType::HeartBeatRequest => {
+                let request = SspHeartBeatRequest::decode(protobuf).expect("fake wifi heartbeat");
+                let response = SspHeartBeatResponse {
+                    r#type: None,
+                    host_timestamp: request.host_timestamp,
+                    client_timestamp: Some(42),
+                };
+                write_normal(&mut stream, sid, &response.encode_to_vec()).await;
+            }
+            SspRequestType::GetDirFilesRequest => {
+                let response = SspGetDirFilesResponse {
+                    r#type: None,
+                    file: vec![SspFile {
+                        path: Some("/storage/emulated/0/a.txt".to_string()),
+                        file_size: Some(3),
+                        ..Default::default()
+                    }],
+                    timecost: Some(1),
+                    ..Default::default()
+                };
+                write_normal(&mut stream, sid, &response.encode_to_vec()).await;
+            }
+            SspRequestType::QuitRequest => break,
+            _ => continue,
+        }
+    }
+}
+
+fn decode_host_key_from_request01(request: &SspHandShakeRequest01) -> RsaPublicKey {
+    let encrypted = request.enckey.as_deref().expect("fake request01 enckey");
+    let clear = Aes256CbcDecryptor::new((&KEY_TABLE[16..48]).into(), (&KEY_TABLE[..16]).into())
+        .decrypt_padded_vec_mut::<Pkcs7>(encrypted)
+        .expect("fake wifi AES public key");
+    let public_der = base64::engine::general_purpose::STANDARD
+        .decode(clear)
+        .expect("fake wifi base64 public key");
+    assert_eq!(
+        request.md5.as_deref().expect("fake request01 md5"),
+        &Md5::digest(&public_der)[..]
+    );
+    RsaPublicKey::from_pkcs1_der(&public_der).expect("fake wifi RSA public key")
+}
+
+pub(crate) const WIFI_DEVICE_UUID: &str = "wifi-device-1";
 
 fn write_fake_adb(
     path: &Path,
@@ -504,12 +717,21 @@ async fn write_normal(stream: &mut TcpStream, sid: u32, body: &[u8]) {
 }
 
 async fn write_raw(stream: &mut TcpStream, sid: u32, body: &[u8]) {
+    // A download can be cancelled by the client closing the connection; a
+    // broken pipe mid-write is then the legitimate end of transmission.
     for chunk in body.chunks(3) {
-        stream.write_all(&sid.to_be_bytes()).await.expect("sid");
-        stream
+        if stream.write_all(&sid.to_be_bytes()).await.is_err() {
+            return;
+        }
+        if stream
             .write_all(&(chunk.len() as u16).to_be_bytes())
             .await
-            .expect("chunk length");
-        stream.write_all(chunk).await.expect("chunk");
+            .is_err()
+        {
+            return;
+        }
+        if stream.write_all(chunk).await.is_err() {
+            return;
+        }
     }
 }
