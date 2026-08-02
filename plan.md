@@ -1,6 +1,6 @@
 # HandShaker_Rust 后端现状与完整开发计划
 
-> 状态基线：2026-08-02，Cargo package `handshaker_rust 0.1.1`。
+> 状态基线：2026-08-02，Cargo package `handshaker_rust 0.1.2`。
 >
 > 本文只把已经存在于 Rust 代码中的能力标记为“已实现”。协议文档、proto schema 或抓包已经确认，
 > 但尚未形成正式 Rust API/CLI 的能力，仍标记为“未实现”。

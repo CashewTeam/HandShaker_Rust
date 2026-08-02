@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::{ArgAction, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
 use serde::Serialize;
 
 use handshaker_rust::{
@@ -689,6 +691,12 @@ async fn execute_connected(
 async fn run_shell(cli: &Cli) -> Result<()> {
     let client = connect(cli).await?;
     let localizer = ZhCn;
+    let mut editor = DefaultEditor::new().map_err(|error| {
+        Error::LocalIo(i18n::format(
+            "shell.readline_init_failed",
+            &[&error.to_string()],
+        ))
+    })?;
     println!("{}", localizer.text(MessageKey::ShellWelcome));
     let mut context = CommandContext {
         remote_cwd: client.root_path().to_string(),
@@ -697,29 +705,34 @@ async fn run_shell(cli: &Cli) -> Result<()> {
     };
     let mut command_error = None;
     loop {
-        print!(
-            "handshaker({}) {}> ",
-            client.device_info().serial,
-            context.remote_cwd
+        let prompt = i18n::format(
+            "shell.prompt",
+            &[&client.device_info().serial, &context.remote_cwd],
         );
-        io::stdout().flush()?;
-        let mut line = String::new();
-        let read = match io::stdin().read_line(&mut line) {
-            Ok(read) => read,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+        let line = match editor.readline(&prompt) {
+            Ok(line) => line,
+            Err(ReadlineError::Interrupted) => {
                 println!();
                 continue;
             }
-            Err(error) => return Err(error.into()),
+            Err(ReadlineError::Eof) => {
+                println!();
+                break;
+            }
+            Err(error) => {
+                return Err(Error::LocalIo(i18n::format(
+                    "shell.readline_failed",
+                    &[&error.to_string()],
+                )));
+            }
         };
-        if read == 0 {
-            println!();
-            break;
-        }
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
+        editor.add_history_entry(line).map_err(|error| {
+            Error::LocalIo(i18n::format("shell.history_failed", &[&error.to_string()]))
+        })?;
         let words = match shell_words::split(line) {
             Ok(words) => words,
             Err(error) => {
@@ -777,8 +790,7 @@ async fn run_shell(cli: &Cli) -> Result<()> {
             _ => {}
         }
 
-        let mut argv = vec!["handshaker".to_string()];
-        argv.extend(words);
+        let argv = shell_command_argv(words);
         let parsed = match Cli::try_parse_localized_from(argv) {
             Ok(parsed) => parsed,
             Err(error)
@@ -854,6 +866,15 @@ async fn run_shell(cli: &Cli) -> Result<()> {
         return Err(error);
     }
     close
+}
+
+fn shell_command_argv(words: Vec<String>) -> Vec<String> {
+    let mut argv = vec!["handshaker".to_string()];
+    if words.first().map(String::as_str) == Some("ls") {
+        argv.push("fs".to_string());
+    }
+    argv.extend(words);
+    argv
 }
 
 fn confirm(action: &str, yes: bool, format: OutputFormat) -> Result<()> {
@@ -1089,6 +1110,17 @@ mod tests {
         let error = Cli::try_parse_localized_from(["handshaker", "fs", "ls", "--help"])
             .expect_err("help should stop parsing");
         assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp, "{error}");
+    }
+
+    #[test]
+    fn shell_ls_alias_expands_to_fs_ls() {
+        let argv = shell_command_argv(vec!["ls".into(), "--depth".into(), "2".into()]);
+        assert_eq!(argv, vec!["handshaker", "fs", "ls", "--depth", "2"]);
+        let parsed = Cli::try_parse_localized_from(argv).expect("parse shell ls alias");
+        assert!(matches!(
+            parsed.command,
+            Command::Fs(FsCommand::Ls { depth: 2, .. })
+        ));
     }
 
     #[test]
