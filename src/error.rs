@@ -2,8 +2,10 @@ use serde::Serialize;
 
 use crate::i18n;
 
+/// Result type returned by the HandShaker library.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Stable error categories used by the library and CLI.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
@@ -22,6 +24,7 @@ pub enum ErrorCode {
 }
 
 #[derive(Debug)]
+/// Error returned by connection, protocol, remote I/O, or local I/O paths.
 pub enum Error {
     Usage(String),
     Configuration(String),
@@ -64,6 +67,7 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 impl Error {
+    /// Return the stable category for this error.
     pub fn code(&self) -> ErrorCode {
         match self {
             Self::Usage(_) => ErrorCode::Usage,
@@ -81,6 +85,7 @@ impl Error {
         }
     }
 
+    /// Return the stable CLI process exit code for this error.
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::Usage(_) => 2,

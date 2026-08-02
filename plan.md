@@ -1,6 +1,6 @@
 # HandShaker_Rust 后端现状与完整开发计划
 
-> 状态基线：2026-08-02，Cargo package `handshaker_rust 0.1.2`。
+> 状态基线：2026-08-02，Cargo package `handshaker_rust 0.1.3`。
 >
 > 本文只把已经存在于 Rust 代码中的能力标记为“已实现”。协议文档、proto schema 或抓包已经确认，
 > 但尚未形成正式 Rust API/CLI 的能力，仍标记为“未实现”。
@@ -26,6 +26,15 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 | 🟡 部分实现 | 已有底层结构或内部逻辑，但尚未形成完整、稳定的业务能力 |
 | ⬜ 未实现 | 协议可能已经逆向或抓包确认，但正式 Rust 后端尚未实现 |
 | 🔬 待验证 | 实现前还需要补充真机或字节级验证 |
+
+## M0 基线固化状态
+
+- ✅ 假 ADB/假 SSP 服务已覆盖公开客户端成功路径和关键失败路径。
+- ✅ CLI 命令树、JSON/JSONL envelope、危险操作确认和 shell 裸 `ls` 有回归测试。
+- ✅ public library API 已补充 rustdoc 和可编译最小示例。
+- ✅ macOS ARM64 基础 CI 已加入。
+- ✅ Smartisan U2 Pro/OD103 真机验收已完成，报告见 `docs/15-adb-v0.1-baseline.md`。
+- 🟡 当前仍仅支持 ADB 单文件传输；WiFi、USB AOA、媒体、监控、同步继续属于后续里程碑。
 
 ## 3. 当前已经实现的后端能力
 
@@ -298,6 +307,8 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ### M0：固化当前 ADB v0.1 基线
 
+> 状态：✅ 已完成（2026-08-02）；真机报告见 `docs/15-adb-v0.1-baseline.md`。
+
 目标：把现有功能从“可运行首版”提升为可持续扩展的稳定基线。
 
 任务：
@@ -536,11 +547,10 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ## 10. 下一步建议
 
-建议紧接着执行 **M0 -> M1 -> M2**：
+建议接着执行 **M1 -> M2**：
 
-1. 先固化现有 ADB API 的假 SSP 集成测试与真机验收记录；
-2. 再把内部 unmatched event queue 升级为公共强类型事件总线，并完成取消模型；
-3. 最后实现 WiFi Bonjour、REQUEST_01/02 和持久化信任。
+1. 将内部 unmatched event queue 升级为公共强类型事件总线，并完成取消模型；
+2. 再实现 WiFi Bonjour、REQUEST_01/02 和持久化信任。
 
 这样可以避免在媒体、监控和同步阶段重复改 Session，也能确保 WiFi 与 ADB 只在 connector/handshake
 层分叉，后续全部业务 API 保持复用。

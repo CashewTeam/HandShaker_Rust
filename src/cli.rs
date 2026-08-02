@@ -70,19 +70,8 @@ impl Cli {
 fn localized_command() -> clap::Command {
     let mut command = Cli::command()
         .about(i18n::text("cli.about"))
-        .help_template(i18n::text("cli.help_template"))
-        .mut_arg("serial", |arg| arg.help(i18n::text("cli.serial")))
-        .mut_arg("output", |arg| {
-            arg.help(i18n::text("cli.output"))
-                .hide_default_value(true)
-                .hide_possible_values(true)
-        })
-        .mut_arg("timeout", |arg| {
-            arg.help(i18n::text("cli.timeout")).hide_default_value(true)
-        })
-        .mut_arg("yes", |arg| arg.help(i18n::text("cli.yes")))
-        .mut_arg("verbose", |arg| arg.help(i18n::text("cli.verbose")))
-        .mut_arg("wire_log", |arg| arg.help(i18n::text("cli.wire_log")));
+        .help_template(i18n::text("cli.help_template"));
+    command = localize_arguments(command);
     command = add_localized_help(command, true);
 
     localize_subcommand(&mut command, "device", "cli.command.device");
@@ -139,18 +128,24 @@ fn localize_subcommand(command: &mut clap::Command, name: &str, key: &str) {
 
 fn localize_arguments(mut command: clap::Command) -> clap::Command {
     if has_argument(&command, "serial") {
-        command = command.mut_arg("serial", |arg| arg.help(i18n::text("cli.serial")));
+        command = command.mut_arg("serial", |arg| {
+            arg.help(i18n::text("cli.serial"))
+                .value_name(i18n::text("cli.value.serial"))
+        });
     }
     if has_argument(&command, "output") {
         command = command.mut_arg("output", |arg| {
             arg.help(i18n::text("cli.output"))
+                .value_name(i18n::text("cli.value.output"))
                 .hide_default_value(true)
                 .hide_possible_values(true)
         });
     }
     if has_argument(&command, "timeout") {
         command = command.mut_arg("timeout", |arg| {
-            arg.help(i18n::text("cli.timeout")).hide_default_value(true)
+            arg.help(i18n::text("cli.timeout"))
+                .value_name(i18n::text("cli.value.timeout"))
+                .hide_default_value(true)
         });
     }
     if has_argument(&command, "yes") {
@@ -160,7 +155,10 @@ fn localize_arguments(mut command: clap::Command) -> clap::Command {
         command = command.mut_arg("verbose", |arg| arg.help(i18n::text("cli.verbose")));
     }
     if has_argument(&command, "wire_log") {
-        command = command.mut_arg("wire_log", |arg| arg.help(i18n::text("cli.wire_log")));
+        command = command.mut_arg("wire_log", |arg| {
+            arg.help(i18n::text("cli.wire_log"))
+                .value_name(i18n::text("cli.value.wire_log"))
+        });
     }
     command
 }
@@ -209,9 +207,14 @@ fn localize_command_arguments(mut command: clap::Command, name: &str) -> clap::C
             ("recursive", "cli.arg.recursive"),
             ("trash", "cli.arg.trash"),
         ],
-        "pull" | "push" => &[
+        "pull" => &[
             ("remote", "cli.arg.remote"),
             ("local", "cli.arg.local"),
+            ("overwrite", "cli.arg.overwrite"),
+        ],
+        "push" => &[
+            ("local", "cli.arg.local"),
+            ("remote", "cli.arg.remote"),
             ("overwrite", "cli.arg.overwrite"),
         ],
         "set" => &[("text", "cli.arg.text"), ("stdin", "cli.arg.stdin")],
@@ -222,6 +225,11 @@ fn localize_command_arguments(mut command: clap::Command, name: &str) -> clap::C
         if has_argument(&command, id) {
             command = command.mut_arg(*id, |arg| {
                 let arg = arg.help(i18n::text(key));
+                let arg = match *id {
+                    "path" | "depth" | "exclusions" | "source" | "target" | "paths" | "remote"
+                    | "local" | "text" | "timestamp" => arg.value_name(i18n::text(key)),
+                    _ => arg,
+                };
                 if *id == "depth" {
                     arg.hide_default_value(true)
                 } else {
@@ -287,13 +295,17 @@ pub(crate) enum FsCommand {
         trash: bool,
     },
     Pull {
+        #[arg(index = 1)]
         remote: String,
+        #[arg(index = 2)]
         local: Option<PathBuf>,
         #[arg(long)]
         overwrite: bool,
     },
     Push {
+        #[arg(index = 1)]
         local: PathBuf,
+        #[arg(index = 2)]
         remote: String,
         #[arg(long)]
         overwrite: bool,
@@ -1106,6 +1118,35 @@ mod tests {
     }
 
     #[test]
+    fn command_tree_parses_every_v01_leaf_command() {
+        let commands = [
+            vec!["device", "list"],
+            vec!["device", "info"],
+            vec!["device", "ping"],
+            vec!["fs", "ls"],
+            vec!["fs", "stat", "/sdcard/a"],
+            vec!["fs", "count", "/sdcard"],
+            vec!["fs", "exists", "/sdcard/a"],
+            vec!["fs", "mkdir", "/sdcard/a"],
+            vec!["fs", "mv", "/sdcard/a", "/sdcard/b"],
+            vec!["fs", "rm", "/sdcard/a", "--recursive"],
+            vec!["fs", "pull", "/sdcard/a", "/tmp/a"],
+            vec!["fs", "push", "/tmp/a", "/sdcard/a"],
+            vec!["clipboard", "get"],
+            vec!["clipboard", "set", "text"],
+            vec!["clipboard", "set", "--stdin"],
+            vec!["clipboard", "delete", "42"],
+            vec!["clipboard", "clear"],
+            vec!["shell"],
+        ];
+        for command in commands {
+            let mut argv = vec!["handshaker"];
+            argv.extend(command);
+            Cli::try_parse_localized_from(argv).expect("v0.1 command should parse");
+        }
+    }
+
+    #[test]
     fn localized_leaf_help_uses_display_help() {
         let error = Cli::try_parse_localized_from(["handshaker", "fs", "ls", "--help"])
             .expect_err("help should stop parsing");
@@ -1150,5 +1191,24 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn push_uses_documented_local_then_remote_order() {
+        let cli = Cli::try_parse_from([
+            "handshaker",
+            "fs",
+            "push",
+            "/tmp/local.txt",
+            "/sdcard/remote.txt",
+        ])
+        .expect("parse push");
+        match cli.command {
+            Command::Fs(FsCommand::Push { local, remote, .. }) => {
+                assert_eq!(local, PathBuf::from("/tmp/local.txt"));
+                assert_eq!(remote, "/sdcard/remote.txt");
+            }
+            _ => panic!("expected fs push"),
+        }
     }
 }

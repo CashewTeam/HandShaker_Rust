@@ -35,6 +35,7 @@ HandShaker 的局域网设备发现使用 **Apple Bonjour（mDNS/DNS-SD）**，�
 | [12-macos-implementation](12-macos-implementation.md) | macOS 端实现要点（类映射、ADB 命令、音频 HTTP 服务） |
 | [13-verification-status](13-verification-status.md) | 已验证/待验证清单与源码引用索引 |
 | [14-capture-validation](14-capture-validation.md) | **真实抓包验证报告**（ADB 端口、封帧/分块、parseIoBuffer、签名、上下行数据面、**局域网 mDNS 发现 + WiFi 握手/信任 + 传输**） |
+| [15-adb-v0.1-baseline](15-adb-v0.1-baseline.md) | Rust CLI ADB v0.1 基线自动化与真机验收报告 |
 
 ## 术语
 

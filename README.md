@@ -33,7 +33,7 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
   - **局域网通道**：Bonjour/mDNS 发现（`_handshaker_ssp._tcp` 全记录 + SRV 端口实测）、WiFi 握手与
     信任（TRUST_REMOVE / derived_key 重连免弹窗）、局域网传输（数据 MD5 一致）。
   - 验证工具见 `tools/capture/`。
-- Rust CLI `0.1.2` 首版已进入可运行阶段：当前实现 ADB 接入、设备信息、文件管理、单文件上传下载、剪贴板和常驻 shell。
+- Rust CLI `0.1.3` 首版已进入可运行阶段：当前实现 ADB 接入、设备信息、文件管理、单文件上传下载、剪贴板和常驻 shell。
 - WiFi 信任握手、USB AOA、媒体库、目录监控和照片同步仍属于后续里程碑。
 
 ## 命令行教程
@@ -628,4 +628,4 @@ adb forward --list
 
 > `GET_DEVICE_INFO` 中向手机报告的主机兼容身份固定为原版 macOS HandShaker
 > `2.5.6 / 408`，用于通过手机端最低主机版本检查；它与本项目自身的 CLI/Cargo
-> 版本 `0.1.2` 相互独立。
+> 版本 `0.1.3` 相互独立。

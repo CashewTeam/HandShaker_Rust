@@ -1,3 +1,9 @@
+//! Reusable Rust client and CLI support for the Smartisan HandShaker SSP.
+//!
+//! The public API exposes stable domain values and connection configuration.
+//! Wire frames, generated protobuf messages, handshake keys, and session
+//! routing remain internal implementation details.
+
 mod client;
 mod domain;
 mod error;
@@ -5,6 +11,8 @@ pub mod i18n;
 mod protocol;
 mod session;
 mod state;
+#[cfg(test)]
+mod test_support;
 mod transport;
 
 pub use client::{ClientOptions, ConnectionTarget, HandShakerClient, PingResult};

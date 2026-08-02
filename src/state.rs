@@ -39,6 +39,11 @@ impl StateStore {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn at(path: PathBuf) -> Self {
+        Self { path }
+    }
+
     pub fn load_or_create(&self) -> Result<State> {
         if self.path.exists() {
             set_path_permissions(&self.path)?;
