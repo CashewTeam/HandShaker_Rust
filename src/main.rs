@@ -32,6 +32,7 @@ async fn main() {
     let command = command_name(&cli.command);
     let output = cli.output;
     let is_shell = matches!(cli.command, cli::Command::Shell);
+    let is_watch = matches!(cli.command, cli::Command::Watch { .. });
     let filter = match cli.verbose {
         0 => "warn",
         1 => "info",
@@ -42,7 +43,10 @@ async fn main() {
         .with_writer(std::io::stderr)
         .init();
 
-    let result = if is_shell {
+    // The shell drives its own readline loop and `watch` handles Ctrl-C itself
+    // (to unregister monitors); every other command lets the top-level select
+    // turn Ctrl-C into a user interrupt.
+    let result = if is_shell || is_watch {
         cli::run(cli).await
     } else {
         tokio::select! {

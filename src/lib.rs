@@ -22,9 +22,10 @@ mod transport;
 pub use cancellation::{CancellationInfo, CancellationOrigin, CancellationToken, RequestOptions};
 pub use client::{ClientOptions, ConnectionTarget, EventCallbacks, HandShakerClient, PingResult};
 pub use domain::{
-    AdbDevice, ClipboardEntry, DeleteOptions, DeviceInfo, RemoteFile, RemoteIoError,
+    AdbDevice, AudioAlbum, AudioFile, AudioLibrary, ClipboardEntry, DeleteOptions, DeviceInfo,
+    ExifData, ImageAlbum, ImageFile, PhotoLibrary, RemoteFile, RemoteIoError, Thumbnails,
     TransferDirection, TransferOptions, TransferProgress, TransferProgressCallback,
-    TrustRecordInfo, WifiDevice,
+    TrustRecordInfo, VideoAlbum, VideoFile, VideoLibrary, WifiDevice,
 };
 pub use error::{Error, ErrorCode, Result};
 pub use events::{

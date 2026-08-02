@@ -39,6 +39,8 @@ HandShaker 的局域网设备发现使用 **Apple Bonjour（mDNS/DNS-SD）**，�
 | [16-m1-events-cancellation](16-m1-events-cancellation.md) | M1 公共事件订阅、慢消费者契约与请求取消模型 |
 | [17-m1-device-validation](17-m1-device-validation.md) | M1 Smartisan U2 Pro 受控事件与清理验收报告 |
 | [18-m2-wifi-trust](18-m2-wifi-trust.md) | M2 WiFi 发现、连接与持久化信任（设计与实现记录） |
+| [19-m3-directory-watch](19-m3-directory-watch.md) | M3 目录监控与设备/剪贴板主动推送（设计与实现记录） |
+| [20-m4-media-library](20-m4-media-library.md) | M4 媒体库与缩略图（设计与实现记录） |
 
 ## 术语
 

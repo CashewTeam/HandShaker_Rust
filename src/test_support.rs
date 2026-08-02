@@ -154,7 +154,24 @@ impl FakeWifiSsp {
             .expect("fake wifi SSP listener");
         let address = listener.local_addr().expect("fake wifi SSP address");
         let state_path = temp.path().join("config").join("state.json");
-        let server = tokio::spawn(run_server_wifi(listener));
+        let server = tokio::spawn(run_server_wifi(listener, false));
+        Self {
+            temp,
+            address,
+            state_path,
+            server,
+        }
+    }
+
+    /// Fake phone whose MONITOR_FOLDER registration is rejected by the phone.
+    pub(crate) async fn start_with_monitor_reject() -> Self {
+        let temp = tempfile::tempdir().expect("fake wifi SSP tempdir");
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("fake wifi SSP listener");
+        let address = listener.local_addr().expect("fake wifi SSP address");
+        let state_path = temp.path().join("config").join("state.json");
+        let server = tokio::spawn(run_server_wifi(listener, true));
         Self {
             temp,
             address,
@@ -197,7 +214,7 @@ impl FakeWifiSsp {
     }
 }
 
-async fn run_server_wifi(listener: TcpListener) {
+async fn run_server_wifi(listener: TcpListener, monitor_reject: bool) {
     let (mut stream, _) = listener.accept().await.expect("fake wifi SSP accept");
 
     // REQUEST_01 -> RESPONSE_01
@@ -321,6 +338,107 @@ async fn run_server_wifi(listener: TcpListener) {
                         ..Default::default()
                     }],
                     timecost: Some(1),
+                    ..Default::default()
+                };
+                write_normal(&mut stream, sid, &response.encode_to_vec()).await;
+            }
+            SspRequestType::MonitorFolderRequest => {
+                let response = SspMonitorFolderResponseHeader {
+                    r#type: None,
+                    succeed: Some(!monitor_reject),
+                    error_message: monitor_reject.then(|| "monitor rejected".to_string()),
+                };
+                write_normal(&mut stream, sid, &response.encode_to_vec()).await;
+            }
+            SspRequestType::GetPhotoLibRequest => {
+                let response = SspGetPhotoLibraryResponse {
+                    r#type: None,
+                    image: vec![SspImageFile {
+                        path: Some("/storage/emulated/0/DCIM/a.jpg".to_string()),
+                        file_size: Some(1024),
+                        width: Some(640),
+                        height: Some(480),
+                        orientation: Some(1),
+                        media_id: Some(1),
+                        album_id: Some(100),
+                        mime_type: Some("image/jpeg".to_string()),
+                        album_name: Some("Camera".to_string()),
+                        title: Some("a.jpg".to_string()),
+                        starred: Some(true),
+                        ..Default::default()
+                    }],
+                    album: vec![SspImageAlbum {
+                        album_path: Some("/storage/emulated/0/DCIM".to_string()),
+                        album_id: Some(100),
+                        album_name: Some("Camera".to_string()),
+                        ..Default::default()
+                    }],
+                    camera_album_id: Some(100),
+                };
+                write_normal(&mut stream, sid, &response.encode_to_vec()).await;
+            }
+            SspRequestType::GetVideoLibRequest => {
+                let response = SspGetVideoLibraryResponse {
+                    r#type: None,
+                    video: vec![SspVideoFile {
+                        path: Some("/storage/emulated/0/Movies/b.mp4".to_string()),
+                        file_size: Some(2048),
+                        media_id: Some(2),
+                        album_id: Some(200),
+                        mime_type: Some("video/mp4".to_string()),
+                        duration: Some(12.5),
+                        ..Default::default()
+                    }],
+                    album: vec![SspVideoAlbum {
+                        album_path: Some("/storage/emulated/0/Movies".to_string()),
+                        album_id: Some(200),
+                        album_name: Some("Movies".to_string()),
+                    }],
+                };
+                write_normal(&mut stream, sid, &response.encode_to_vec()).await;
+            }
+            SspRequestType::GetAudioLibRequest => {
+                let response = SspGetAudioLibraryResponse {
+                    r#type: None,
+                    audio: vec![SspAudioFile {
+                        path: Some("/storage/emulated/0/Music/c.mp3".to_string()),
+                        file_size: Some(4096),
+                        media_id: Some(3),
+                        album_id: Some(300),
+                        title: Some("Song".to_string()),
+                        mime_type: Some("audio/mpeg".to_string()),
+                        artist: Some("Artist".to_string()),
+                        duration: Some(210000.0),
+                        ..Default::default()
+                    }],
+                    album: vec![SspAudioAlbum {
+                        album_path: Some("/storage/emulated/0/Music".to_string()),
+                        album_id: Some(300),
+                        album_name: Some("Album".to_string()),
+                        year: Some(2020),
+                        ..Default::default()
+                    }],
+                };
+                write_normal(&mut stream, sid, &response.encode_to_vec()).await;
+            }
+            SspRequestType::GetThumbnailRequest => {
+                let request =
+                    SspGetThumbnailRequest::decode(protobuf).expect("fake thumbnail request");
+                let response = SspGetThumbnailResponse {
+                    r#type: None,
+                    // First image succeeds with JPEG bytes, second reports an error.
+                    image: request
+                        .image
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, image)| SspImageFile {
+                            media_id: image.media_id,
+                            path: image.path,
+                            thumbnail: (index == 0).then(|| vec![0xFF, 0xD8, 0xFF, 0xE0]),
+                            get_thumbnail_error: Some(index != 0),
+                            ..Default::default()
+                        })
+                        .collect(),
                     ..Default::default()
                 };
                 write_normal(&mut stream, sid, &response.encode_to_vec()).await;

@@ -166,3 +166,35 @@ fn device_list_reads_only_adb_devices_long() {
         "device list must not start a service or create a forward"
     );
 }
+
+#[test]
+fn watch_help_is_localized() {
+    let output = Command::new(env!("CARGO_BIN_EXE_handshaker"))
+        .args(["watch", "--help"])
+        .output()
+        .expect("run watch help");
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).expect("UTF-8 help");
+    assert!(help.contains(handshaker_rust::i18n::text("cli.command.watch")));
+    assert!(help.contains(handshaker_rust::i18n::text("cli.arg.watch_path")));
+}
+
+#[test]
+fn media_help_is_localized() {
+    let output = Command::new(env!("CARGO_BIN_EXE_handshaker"))
+        .args(["media", "--help"])
+        .output()
+        .expect("run media help");
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).expect("UTF-8 help");
+    assert!(help.contains(handshaker_rust::i18n::text("cli.command.media")));
+    assert!(help.contains(handshaker_rust::i18n::text("cli.command.media_photo")));
+
+    let photo = Command::new(env!("CARGO_BIN_EXE_handshaker"))
+        .args(["media", "photo", "--help"])
+        .output()
+        .expect("run media photo help");
+    assert!(photo.status.success());
+    let photo = String::from_utf8(photo.stdout).expect("UTF-8 help");
+    assert!(photo.contains(handshaker_rust::i18n::text("cli.arg.media_limit")));
+}

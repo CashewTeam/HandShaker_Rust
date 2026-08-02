@@ -33,10 +33,16 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
   - **局域网通道**：Bonjour/mDNS 发现（`_handshaker_ssp._tcp` 全记录 + SRV 端口实测）、WiFi 握手与
     信任（TRUST_REMOVE / derived_key 重连免弹窗）、局域网传输（数据 MD5 一致）。
   - 验证工具见 `tools/capture/`。
-- Rust CLI `0.1.5` 已固化 ADB v0.1 基线，增加 library 级强类型事件订阅和请求取消，并实现 **WiFi（LAN）连接**：
+- Rust CLI `0.3.0` 已固化 ADB v0.1 基线，增加 library 级强类型事件订阅和请求取消，并实现 **WiFi（LAN）连接**：
   `device discover` mDNS 发现、`--wifi IP:PORT` 直连、REQUEST_01/02 握手与持久化信任
   （`TRUST_ALWAYS` 重连免弹窗、`trust list/remove/reset`）。
-- USB AOA、媒体库、目录监控和照片同步仍属于后续里程碑。
+- **目录监控与主动推送（M3，0.2.0）**：`monitor_folder(path, register)` library API 与
+  `watch` 命令——注册目录监控（`--path` 可重复）后实时输出设备主动推送（目录文件事件、
+  剪贴板变更、设备信息等），human/jsonl 两种输出；事件 JSON `kind` tag 为 0.2.0 兼容契约。
+- **媒体库与缩略图（M4，0.3.0）**：`get_photo/video/audio_library` 全量查询（真机 3005 张照片
+  验证）、`get_thumbnails` 批量缩略图（JPEG）、`media photo|video|audio`（默认预览上限 50 条，
+  `--limit`/`--all` 覆盖）与 `media thumbnail --output-dir` 写文件；`fetch_exif` 为 M5 预留接口。
+- USB AOA、媒体库、照片同步和 `SYNC_MONITOR`/`PHOTO_SYNC` 发送侧仍属于后续里程碑。
 
 ## 命令行教程
 
@@ -544,7 +550,7 @@ JSON 字段、命令名、事件名和错误 code 固定使用英文，不随显
 
 ### 14. Library 事件订阅与取消
 
-CLI v0.1.5 的事件总线和取消模型首先面向 Rust library 使用。订阅不会自动打开手机端 callback；需要主动事件时，
+CLI v0.3.0 的事件总线和取消模型首先面向 Rust library 使用。订阅不会自动打开手机端 callback；需要主动事件时，
 连接时显式启用对应的 `EventCallbacks`：
 
 ```rust,no_run
@@ -708,4 +714,4 @@ adb forward --list
 
 > `GET_DEVICE_INFO` 中向手机报告的主机兼容身份固定为原版 macOS HandShaker
 > `2.5.6 / 408`，用于通过手机端最低主机版本检查；它与本项目自身的 CLI/Cargo
-> 版本 `0.1.5` 相互独立。
+> 版本 `0.3.0` 相互独立。

@@ -16,8 +16,10 @@ use uuid::Uuid;
 
 use crate::cancellation::RequestOptions;
 use crate::domain::{
-    AdbDevice, ClipboardEntry, DeleteOptions, DeviceInfo, RemoteFile, TransferDirection,
-    TransferOptions, TransferProgress, TrustRecordInfo, WifiDevice,
+    AdbDevice, AudioAlbum, AudioFile, AudioLibrary, ClipboardEntry, DeleteOptions, DeviceInfo,
+    ExifData, ImageAlbum, ImageFile, PhotoLibrary, RemoteFile, Thumbnails, TransferDirection,
+    TransferOptions, TransferProgress, TrustRecordInfo, VideoAlbum, VideoFile, VideoLibrary,
+    WifiDevice,
 };
 use crate::error::{Error, Result};
 use crate::events::{EventFilter, EventSubscription};
@@ -38,6 +40,24 @@ use crate::transport::wifi::WifiConnector;
 // connection immediately after GET_DEVICE_INFO.
 const COMPATIBLE_HOST_APP_VERSION: &str = "2.5.6";
 const COMPATIBLE_HOST_APP_VERSION_CODE: u32 = 408;
+
+/// Upper bound for a single media-library or thumbnail response. Libraries are
+/// received in full (the protocol has no pagination), so an oversized reply is
+/// treated as a protocol error instead of being buffered without limit.
+const MEDIA_RESPONSE_LIMIT: usize = 64 * 1024 * 1024;
+
+/// Decode a media response after enforcing the size cap.
+fn decode_media_response<M: prost::Message + Default>(body: &[u8]) -> Result<M> {
+    if body.len() > MEDIA_RESPONSE_LIMIT {
+        return Err(Error::Protocol(i18n::format(
+            "media.response_too_large",
+            &[&(body.len() / 1024 / 1024).to_string()],
+        )));
+    }
+    M::decode(body).map_err(|error| {
+        Error::Protocol(i18n::format("error.protobuf_decode", &[&error.to_string()]))
+    })
+}
 
 /// A supported connection target.
 #[derive(Debug, Clone)]
@@ -611,6 +631,38 @@ impl HandShakerClient {
         Ok(response.file.into_iter().map(remote_file).collect())
     }
 
+    /// Register or unregister change monitoring on a remote directory.
+    ///
+    /// While registered, the phone pushes file events
+    /// (`ClientEvent::DirectoryChanged`) over the event stream; unregister
+    /// with `register = false` when done. Only plain directory paths are
+    /// supported (MediaStore URIs are ignored by the phone observer).
+    pub async fn monitor_folder(&self, path: &str, register: bool) -> Result<()> {
+        self.monitor_folder_with_options(path, register, RequestOptions::default())
+            .await
+    }
+
+    /// Register or unregister directory monitoring with optional cancellation.
+    pub async fn monitor_folder_with_options(
+        &self,
+        path: &str,
+        register: bool,
+        options: RequestOptions,
+    ) -> Result<()> {
+        let request = SspMonitorFolderRequest {
+            r#type: Some(SspRequestType::MonitorFolderRequest as i32),
+            file: Some(ssp_file(path, true, None)),
+            register: Some(register),
+        };
+        let response = SspMonitorFolderResponseHeader::decode(
+            self.session()?
+                .request_with_options(&request, options)
+                .await?
+                .as_slice(),
+        )?;
+        ensure_remote_success(response.succeed, None, response.error_message)
+    }
+
     /// Download one remote file through a temporary local file.
     pub async fn download(
         &self,
@@ -947,6 +999,142 @@ impl HandShakerClient {
         ensure_remote_success(response.succeed, None, None)
     }
 
+    /// Fetch the full phone photo library (images and albums).
+    pub async fn get_photo_library(&self) -> Result<PhotoLibrary> {
+        self.get_photo_library_with_options(RequestOptions::default())
+            .await
+    }
+
+    /// Fetch the full phone photo library with optional cancellation.
+    pub async fn get_photo_library_with_options(
+        &self,
+        options: RequestOptions,
+    ) -> Result<PhotoLibrary> {
+        let request = SspGetPhotoLibraryRequest {
+            r#type: Some(SspRequestType::GetPhotoLibRequest as i32),
+        };
+        let response = decode_media_response::<SspGetPhotoLibraryResponse>(
+            self.session()?
+                .request_with_options(&request, options)
+                .await?
+                .as_slice(),
+        )?;
+        Ok(PhotoLibrary {
+            images: response.image.into_iter().map(image_file).collect(),
+            albums: response.album.into_iter().map(image_album).collect(),
+            camera_album_id: response.camera_album_id,
+        })
+    }
+
+    /// Fetch the full phone video library (videos and albums).
+    pub async fn get_video_library(&self) -> Result<VideoLibrary> {
+        self.get_video_library_with_options(RequestOptions::default())
+            .await
+    }
+
+    /// Fetch the full phone video library with optional cancellation.
+    pub async fn get_video_library_with_options(
+        &self,
+        options: RequestOptions,
+    ) -> Result<VideoLibrary> {
+        let request = SspGetVideoLibraryRequest {
+            r#type: Some(SspRequestType::GetVideoLibRequest as i32),
+        };
+        let response = decode_media_response::<SspGetVideoLibraryResponse>(
+            self.session()?
+                .request_with_options(&request, options)
+                .await?
+                .as_slice(),
+        )?;
+        Ok(VideoLibrary {
+            videos: response.video.into_iter().map(video_file).collect(),
+            albums: response.album.into_iter().map(video_album).collect(),
+        })
+    }
+
+    /// Fetch the full phone audio library (tracks and albums).
+    pub async fn get_audio_library(&self) -> Result<AudioLibrary> {
+        self.get_audio_library_with_options(RequestOptions::default())
+            .await
+    }
+
+    /// Fetch the full phone audio library with optional cancellation.
+    pub async fn get_audio_library_with_options(
+        &self,
+        options: RequestOptions,
+    ) -> Result<AudioLibrary> {
+        let request = SspGetAudioLibraryRequest {
+            r#type: Some(SspRequestType::GetAudioLibRequest as i32),
+        };
+        let response = decode_media_response::<SspGetAudioLibraryResponse>(
+            self.session()?
+                .request_with_options(&request, options)
+                .await?
+                .as_slice(),
+        )?;
+        Ok(AudioLibrary {
+            tracks: response.audio.into_iter().map(audio_file).collect(),
+            albums: response.album.into_iter().map(audio_album).collect(),
+        })
+    }
+
+    /// Fetch thumbnails for images, videos, and audio albums in one request.
+    ///
+    /// Entries are matched by `media_id` first, falling back to `path` when
+    /// the id is absent; failed entries come back with `thumbnail_error` set
+    /// instead of failing the whole batch.
+    pub async fn get_thumbnails(
+        &self,
+        images: &[ImageFile],
+        videos: &[VideoFile],
+        audio_albums: &[AudioAlbum],
+    ) -> Result<Thumbnails> {
+        self.get_thumbnails_with_options(images, videos, audio_albums, RequestOptions::default())
+            .await
+    }
+
+    /// Fetch thumbnails with optional cancellation.
+    pub async fn get_thumbnails_with_options(
+        &self,
+        images: &[ImageFile],
+        videos: &[VideoFile],
+        audio_albums: &[AudioAlbum],
+        options: RequestOptions,
+    ) -> Result<Thumbnails> {
+        let request = SspGetThumbnailRequest {
+            r#type: Some(SspRequestType::GetThumbnailRequest as i32),
+            image: images.iter().map(thumbnail_image_request).collect(),
+            video: videos.iter().map(thumbnail_video_request).collect(),
+            audio_album: audio_albums
+                .iter()
+                .map(thumbnail_audio_album_request)
+                .collect(),
+        };
+        let response = decode_media_response::<SspGetThumbnailResponse>(
+            self.session()?
+                .request_with_options(&request, options)
+                .await?
+                .as_slice(),
+        )?;
+        Ok(Thumbnails {
+            images: response.image.into_iter().map(image_file).collect(),
+            videos: response.video.into_iter().map(video_file).collect(),
+            audio_albums: response.audio_album.into_iter().map(audio_album).collect(),
+        })
+    }
+
+    /// Fetch Exif metadata for a remote media file.
+    ///
+    /// **Reserved interface**: the original macOS client fetches EXIF over the
+    /// ADB shell channel; that implementation is planned for the M5 milestone.
+    /// This call currently returns a not-implemented error and never touches
+    /// the phone.
+    pub async fn fetch_exif(&self, _path: &str) -> Result<ExifData> {
+        Err(Error::Protocol(
+            i18n::text("exif.not_implemented").to_string(),
+        ))
+    }
+
     /// Send QUIT and remove the ADB forward created by this client.
     pub async fn close(mut self) -> Result<()> {
         let session_result = if let Some(session) = self.session.take() {
@@ -1035,6 +1223,124 @@ fn ssp_file(path: &str, is_directory: bool, size: Option<u64>) -> SspFile {
         path: Some(path.to_string()),
         file_size: size,
         is_directory: Some(is_directory),
+        ..Default::default()
+    }
+}
+
+fn image_file(file: SspImageFile) -> ImageFile {
+    ImageFile {
+        path: file.path,
+        size: file.file_size,
+        created_at: file.created_timestamp,
+        modified_at: file.modified_timestamp,
+        width: file.width,
+        height: file.height,
+        orientation: file.orientation,
+        media_id: file.media_id,
+        album_id: file.album_id,
+        mime_type: file.mime_type,
+        thumbnail: file.thumbnail,
+        album_name: file.album_name,
+        date_taken: file.date_taken,
+        latitude: file.latitude,
+        longitude: file.longitude,
+        mini_thumb_magic: file.mini_thumb_magic,
+        title: file.title,
+        thumbnail_error: file.get_thumbnail_error.unwrap_or(false),
+        starred: file.starred.unwrap_or(false),
+    }
+}
+
+fn image_album(album: SspImageAlbum) -> ImageAlbum {
+    ImageAlbum {
+        path: album.album_path,
+        album_id: album.album_id,
+        name: album.album_name,
+        cover_image: album.cover_image.map(|cover| Box::new(image_file(cover))),
+    }
+}
+
+fn video_file(file: SspVideoFile) -> VideoFile {
+    VideoFile {
+        path: file.path,
+        size: file.file_size,
+        created_at: file.created_timestamp.map(u64::from),
+        modified_at: file.modified_timestamp.map(u64::from),
+        width: file.width,
+        height: file.height,
+        orientation: file.orientation,
+        media_id: file.media_id,
+        album_id: file.album_id,
+        mime_type: file.mime_type,
+        thumbnail: file.thumbnail,
+        thumbnail_error: file.get_thumbnail_error.unwrap_or(false),
+        duration: file.duration,
+    }
+}
+
+fn video_album(album: SspVideoAlbum) -> VideoAlbum {
+    VideoAlbum {
+        path: album.album_path,
+        album_id: album.album_id,
+        name: album.album_name,
+    }
+}
+
+fn audio_file(file: SspAudioFile) -> AudioFile {
+    AudioFile {
+        path: file.path,
+        size: file.file_size,
+        created_at: file.created_timestamp,
+        modified_at: file.modified_timestamp,
+        media_id: file.media_id,
+        album_id: file.album_id,
+        title: file.title,
+        mime_type: file.mime_type,
+        artist_id: file.artist_id,
+        artist: file.artist,
+        composer: file.composer,
+        genre: file.genre,
+        comment: file.comment,
+        copyright: file.copyright,
+        audio_codec: file.audio_codec,
+        track: file.track,
+        duration: file.duration.map(|seconds| seconds / 1000.0),
+    }
+}
+
+fn audio_album(album: SspAudioAlbum) -> AudioAlbum {
+    AudioAlbum {
+        path: album.album_path,
+        album_id: album.album_id,
+        name: album.album_name,
+        artist_id: album.artist_id,
+        artist: album.artist,
+        year: album.year,
+        thumbnail: album.thumbnail,
+        thumbnail_error: album.get_thumbnail_error.unwrap_or(false),
+    }
+}
+
+fn thumbnail_image_request(image: &ImageFile) -> SspImageFile {
+    SspImageFile {
+        media_id: image.media_id,
+        path: image.path.clone(),
+        ..Default::default()
+    }
+}
+
+fn thumbnail_video_request(video: &VideoFile) -> SspVideoFile {
+    SspVideoFile {
+        media_id: video.media_id,
+        path: video.path.clone(),
+        ..Default::default()
+    }
+}
+
+fn thumbnail_audio_album_request(album: &AudioAlbum) -> SspAudioAlbum {
+    SspAudioAlbum {
+        album_id: album.album_id,
+        album_path: album.path.clone(),
         ..Default::default()
     }
 }
@@ -1195,7 +1501,9 @@ fn unix_millis() -> i64 {
 mod tests {
     use super::*;
     use crate::events::{ClientEvent, EventKind};
-    use crate::test_support::{DownloadBehavior, FakeSsp, FakeSspConfig, UploadBehavior};
+    use crate::test_support::{
+        DownloadBehavior, FakeSsp, FakeSspConfig, FakeWifiSsp, UploadBehavior,
+    };
 
     #[test]
     fn splits_remote_paths() {
@@ -1697,5 +2005,128 @@ mod tests {
             client.close().await.expect("close");
             fake.finish().await;
         }
+    }
+
+    #[tokio::test]
+    async fn wifi_monitor_folder_registers_and_unregisters() {
+        let fake = FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        client
+            .monitor_folder("/storage/emulated/0/watch", true)
+            .await
+            .expect("register monitor");
+        client
+            .monitor_folder("/storage/emulated/0/watch", false)
+            .await
+            .expect("unregister monitor");
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn wifi_monitor_folder_rejection_is_reported() {
+        let fake = FakeWifiSsp::start_with_monitor_reject().await;
+        let client = fake.connect().await;
+        let error = client
+            .monitor_folder("/storage/emulated/0/watch", true)
+            .await
+            .expect_err("monitor rejected");
+        assert!(matches!(error, Error::RemoteIo { .. }));
+        assert_eq!(error.exit_code(), 6);
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn wifi_media_libraries_decode_and_map_fields() {
+        let fake = FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+
+        let photo = client.get_photo_library().await.expect("photo library");
+        assert_eq!(photo.images.len(), 1);
+        let image = &photo.images[0];
+        assert_eq!(
+            image.path.as_deref(),
+            Some("/storage/emulated/0/DCIM/a.jpg")
+        );
+        assert_eq!(image.width, Some(640));
+        assert_eq!(image.orientation, Some(1));
+        assert_eq!(image.starred, true);
+        assert_eq!(image.thumbnail_error, false);
+        assert_eq!(photo.albums[0].name.as_deref(), Some("Camera"));
+        assert_eq!(photo.camera_album_id, Some(100));
+
+        let video = client.get_video_library().await.expect("video library");
+        assert_eq!(video.videos.len(), 1);
+        assert_eq!(video.videos[0].duration, Some(12.5));
+        assert_eq!(video.albums[0].album_id, Some(200));
+
+        let audio = client.get_audio_library().await.expect("audio library");
+        assert_eq!(audio.tracks.len(), 1);
+        assert_eq!(audio.tracks[0].artist.as_deref(), Some("Artist"));
+        assert_eq!(
+            audio.tracks[0].duration,
+            Some(210.0),
+            "audio duration is converted from milliseconds to seconds"
+        );
+        assert_eq!(audio.albums[0].year, Some(2020));
+
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn wifi_thumbnails_carry_bytes_and_report_failed_entries() {
+        let fake = FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+
+        let requested = vec![
+            ImageFile {
+                media_id: Some(1),
+                path: Some("/storage/emulated/0/DCIM/a.jpg".to_string()),
+                ..Default::default()
+            },
+            ImageFile {
+                media_id: Some(2),
+                path: Some("/storage/emulated/0/DCIM/b.jpg".to_string()),
+                ..Default::default()
+            },
+        ];
+        let thumbnails = client
+            .get_thumbnails(&requested, &[], &[])
+            .await
+            .expect("thumbnails");
+        assert_eq!(thumbnails.images.len(), 2);
+        assert_eq!(
+            thumbnails.images[0].thumbnail.as_deref(),
+            Some(&[0xFF, 0xD8, 0xFF, 0xE0][..]),
+            "first thumbnail carries JPEG bytes"
+        );
+        assert_eq!(thumbnails.images[0].thumbnail_error, false);
+        assert_eq!(
+            thumbnails.images[1].thumbnail.as_ref().map(Vec::len),
+            None,
+            "failed entry omits thumbnail bytes"
+        );
+        assert_eq!(thumbnails.images[1].thumbnail_error, true);
+        assert!(thumbnails.videos.is_empty());
+        assert!(thumbnails.audio_albums.is_empty());
+
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn fetch_exif_is_a_reserved_interface() {
+        let fake = FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        let error = client
+            .fetch_exif("/storage/emulated/0/DCIM/a.jpg")
+            .await
+            .expect_err("exif not implemented");
+        assert_eq!(error.code(), crate::error::ErrorCode::Protocol);
+        assert_eq!(error.exit_code(), 5);
+        client.close().await.expect("close");
+        fake.finish().await;
     }
 }

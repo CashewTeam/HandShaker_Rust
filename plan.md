@@ -1,6 +1,6 @@
 # HandShaker_Rust 后端现状与完整开发计划
 
-> 状态基线：2026-08-02，Cargo package `handshaker_rust 0.1.5`。
+> 状态基线：2026-08-02，Cargo package `handshaker_rust 0.3.0`。
 >
 > 本文只把已经存在于 Rust 代码中的能力标记为“已实现”。协议文档、proto schema 或抓包已经确认，
 > 但尚未形成正式 Rust API/CLI 的能力，仍标记为“未实现”。
@@ -225,7 +225,13 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 - ✅ 设备信息、剪贴板、照片/视频/音频、目录、FILE_CHANGE、PHOTO_SYNC、SYNC_MONITOR 和远端取消解码。
 - ✅ field 1 缺失时的唯一候选推断和歧义 `UnknownEvent` 安全元数据。
 - ✅ pending sid 优先路由、历史 sid 复用和下载裸流冲突保护。
-- 🟡 CLI 尚未提供 directory/media/sync watch；M1 只完成 library 事件基础。
+- ✅ **M3（0.2.0）**：`monitor_folder(path, register)` library API（MONITOR_FOLDER_REQUEST 注册/注销）；
+  CLI `watch`（`--path` 可重复注册目录监控、全量事件流 human/jsonl 输出、Ctrl-C 注销后退出 130）。
+- ✅ **M4（0.3.0）**：媒体库查询（`get_photo/video/audio_library`）与缩略图（`get_thumbnails`，
+  JPEG、失败条目不整批失败）；CLI `media photo|video|audio`（**默认预览上限 50 条**，
+  `--limit`/`--all` 覆盖，json 带 `total`/`truncated`）与 `media thumbnail --output-dir`；
+  `fetch_exif` 预留接口（M5 实现，见 docs/20 §4）。
+- ✅ 事件 JSON `kind` tag 与 watch jsonl 信封为 0.2.0 兼容契约（docs/19 §4）。
 - ⬜ 断线后的显式重新订阅策略由后续 watch/API 里程碑定义；当前不自动重连。
 
 ### 4.4 文件与传输扩展
@@ -243,10 +249,14 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ### 4.5 媒体库
 
-- ⬜ 照片库查询、相册和分页/范围参数。
-- ⬜ 视频库查询和视频相册。
-- ⬜ 音频库查询、音频专辑和音频元数据。
-- ⬜ 图片、视频和音频缩略图请求。
+- ✅ 照片库查询、相册和 `camera_album_id`（M4，真机 3005 张验证）。
+- ✅ 视频库查询和视频相册。
+- ✅ 音频库查询、音频专辑和音频元数据（artist/专辑/year）。
+- ✅ 图片、视频和音频缩略图请求（`get_thumbnails`，JPEG、失败条目不整批失败）。
+- ✅ CLI `media photo|video|audio`（默认预览上限 50、`--limit`/`--all`）与 `media thumbnail --output-dir`。
+- ✅ EXIF 方向/经纬度/date_taken 随查询返回；独立 EXIF 拉取为 `fetch_exif` 预留接口（M5）。
+- ⬜ 媒体库变更增量合并（当前 watch 输出原始 added/deleted/updated 列表）。
+- ⬜ 媒体库分页（协议请求无分页参数，当前 CLI 层预览截断；需协议确认后实现服务端分页）。
 - ⬜ EXIF、方向、经纬度、收藏状态和媒体 ID 的领域模型。
 - ⬜ 媒体库变更增量合并。
 - ⬜ 大型媒体库的流式/分页输出和内存上限。
@@ -542,22 +552,23 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ## 9. 版本建议
 
-- 当前 `0.1.x`：稳定 ADB 首版、事件基础和小型 API 增补。
-- WiFi 完整可用后：由维护者决定是否进入 `0.2.0`。
-- 媒体、监控、同步或 USB 等较大里程碑：根据 public API 兼容性由维护者决定 Y 版本。
+- 当前 `0.3.0`：ADB 基线 + 事件/取消 + WiFi 连接与信任 + 目录监控/主动推送 watch + 媒体库与缩略图。
+- 媒体、同步或 USB 等较大里程碑：根据 public API 兼容性由维护者决定 Y 版本。
 - `1.0.0` 前提：至少 ADB + WiFi 稳定、公开 API 和 JSON schema 有兼容承诺、跨平台发布流程成熟。
 - 单次 Bug 修复和简单功能默认只递增 Z；纯文档不递增版本。
 - 手机兼容身份 `2.5.6 / 408` 永远不跟随 Cargo 版本自动变化。
 
 ## 10. 下一步建议
 
-M0（ADB 基线）、M1（事件/取消）、M2（WiFi 连接与信任）均已完成。建议接着执行 **M3**：
+M0（ADB 基线）、M1（事件/取消）、M2（WiFi 连接与信任）、M3（目录监控与主动推送 watch）、
+M4（媒体库与缩略图）均已完成。建议接着执行 **M5**：
 
-1. 先补一次 M2 的受控真机验收（首次授权、重连免弹窗、TRUST_REMOVE、WiFi 业务复用）；
-2. 实现目录监控与设备/剪贴板主动推送（`MONITOR_FOLDER`、`CLIPBOARD_CHANGE` 等），
-   依赖已就绪的强类型事件总线。
+1. 先补一次 M3 的受控真机补验（若需要）：真实终端验证 `watch` 的 Ctrl-C 注销与退出码 130；
+2. 实现 **EXIF 拉取**（`fetch_exif` 预留接口落地，走 ADB shell 通道，覆盖 ROM 差异的
+   ext_data 解析）与媒体库变更增量合并；
+3. 或优先做多文件/递归传输与批量进度（文件与传输扩展）。
 
-这样可以继续在现有 Session/事件基础上叠加实时功能，媒体、同步阶段不需要再改 Session。
+依赖已就绪的强类型事件总线，同步阶段不需要再改 Session。
 
 ## 11. 相关文档
 

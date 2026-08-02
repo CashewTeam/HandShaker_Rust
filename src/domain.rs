@@ -173,3 +173,218 @@ impl std::fmt::Debug for TransferOptions {
             .finish()
     }
 }
+
+/// An image entry from the phone photo library.
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+pub struct ImageFile {
+    /// Absolute remote path.
+    pub path: Option<String>,
+    /// File size in bytes.
+    pub size: Option<u64>,
+    /// Creation timestamp.
+    pub created_at: Option<u64>,
+    /// Modification timestamp.
+    pub modified_at: Option<u64>,
+    /// Width in pixels.
+    pub width: Option<u32>,
+    /// Height in pixels.
+    pub height: Option<u32>,
+    /// Exif orientation value.
+    pub orientation: Option<u32>,
+    /// Media-store identifier.
+    pub media_id: Option<u64>,
+    /// Album identifier.
+    pub album_id: Option<u64>,
+    /// MIME type.
+    pub mime_type: Option<String>,
+    /// Embedded thumbnail bytes (JPEG), when fetched.
+    pub thumbnail: Option<Vec<u8>>,
+    /// Album display name.
+    pub album_name: Option<String>,
+    /// Time the photo was taken.
+    pub date_taken: Option<u64>,
+    /// Latitude, as reported by the phone.
+    pub latitude: Option<String>,
+    /// Longitude, as reported by the phone.
+    pub longitude: Option<String>,
+    /// Miniature-thumbnail cache magic.
+    pub mini_thumb_magic: Option<String>,
+    /// Display title.
+    pub title: Option<String>,
+    /// Whether the phone failed to produce a thumbnail for this entry.
+    pub thumbnail_error: bool,
+    /// Whether the image is starred (favorite).
+    pub starred: bool,
+}
+
+/// A photo album.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ImageAlbum {
+    /// Album directory path.
+    pub path: Option<String>,
+    /// Album (bucket) identifier.
+    pub album_id: Option<u64>,
+    /// Album display name.
+    pub name: Option<String>,
+    /// Cover image, when supplied by the phone.
+    pub cover_image: Option<Box<ImageFile>>,
+}
+
+/// A video entry from the phone video library.
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+pub struct VideoFile {
+    /// Absolute remote path.
+    pub path: Option<String>,
+    /// File size in bytes.
+    pub size: Option<u64>,
+    /// Creation timestamp.
+    pub created_at: Option<u64>,
+    /// Modification timestamp.
+    pub modified_at: Option<u64>,
+    /// Width in pixels.
+    pub width: Option<u32>,
+    /// Height in pixels.
+    pub height: Option<u32>,
+    /// Exif orientation value.
+    pub orientation: Option<u32>,
+    /// Media-store identifier.
+    pub media_id: Option<u64>,
+    /// Album identifier.
+    pub album_id: Option<u64>,
+    /// MIME type.
+    pub mime_type: Option<String>,
+    /// Embedded thumbnail bytes (JPEG), when fetched.
+    pub thumbnail: Option<Vec<u8>>,
+    /// Whether the phone failed to produce a thumbnail.
+    pub thumbnail_error: bool,
+    /// Duration in seconds.
+    pub duration: Option<f64>,
+}
+
+/// A video album.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct VideoAlbum {
+    /// Album directory path.
+    pub path: Option<String>,
+    /// Album (bucket) identifier.
+    pub album_id: Option<u64>,
+    /// Album display name.
+    pub name: Option<String>,
+}
+
+/// An audio track from the phone music library.
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+pub struct AudioFile {
+    /// Absolute file path.
+    pub path: Option<String>,
+    /// File size in bytes.
+    pub size: Option<u64>,
+    /// Creation timestamp.
+    pub created_at: Option<u64>,
+    /// Modification timestamp.
+    pub modified_at: Option<u64>,
+    /// Media-store identifier.
+    pub media_id: Option<u64>,
+    /// Album identifier.
+    pub album_id: Option<u64>,
+    /// Track title.
+    pub title: Option<String>,
+    /// MIME type.
+    pub mime_type: Option<String>,
+    /// Artist identifier.
+    pub artist_id: Option<u64>,
+    /// Artist name.
+    pub artist: Option<String>,
+    /// Composer name.
+    pub composer: Option<String>,
+    /// ID3v1 genre index.
+    pub genre: Option<u32>,
+    /// Free-form comment.
+    pub comment: Option<String>,
+    /// Copyright string.
+    pub copyright: Option<String>,
+    /// Audio codec.
+    pub audio_codec: Option<String>,
+    /// Track number.
+    pub track: Option<u32>,
+    /// Duration in seconds.
+    pub duration: Option<f64>,
+}
+
+/// An audio album.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct AudioAlbum {
+    /// Album directory path.
+    pub path: Option<String>,
+    /// Album identifier.
+    pub album_id: Option<u64>,
+    /// Album display name.
+    pub name: Option<String>,
+    /// Artist identifier.
+    pub artist_id: Option<u64>,
+    /// Artist name.
+    pub artist: Option<String>,
+    /// Release year.
+    pub year: Option<u32>,
+    /// Album-art thumbnail bytes, when fetched.
+    pub thumbnail: Option<Vec<u8>>,
+    /// Whether the phone failed to produce a thumbnail.
+    pub thumbnail_error: bool,
+}
+
+/// A snapshot of the phone photo library.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PhotoLibrary {
+    /// All images in the library.
+    pub images: Vec<ImageFile>,
+    /// All photo albums.
+    pub albums: Vec<ImageAlbum>,
+    /// Media-store id of the camera album, when reported.
+    pub camera_album_id: Option<u64>,
+}
+
+/// A snapshot of the phone video library.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct VideoLibrary {
+    /// All videos in the library.
+    pub videos: Vec<VideoFile>,
+    /// All video albums.
+    pub albums: Vec<VideoAlbum>,
+}
+
+/// A snapshot of the phone audio library.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct AudioLibrary {
+    /// All audio tracks in the library.
+    pub tracks: Vec<AudioFile>,
+    /// All audio albums.
+    pub albums: Vec<AudioAlbum>,
+}
+
+/// Thumbnail responses keyed by media category.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Thumbnails {
+    /// Image thumbnails, in request order.
+    pub images: Vec<ImageFile>,
+    /// Video thumbnails, in request order.
+    pub videos: Vec<VideoFile>,
+    /// Audio album-art thumbnails, in request order.
+    pub audio_albums: Vec<AudioAlbum>,
+}
+
+/// Exif metadata for a media file.
+///
+/// Reserved for the EXIF fetch milestone (M5, planned to use the ADB shell
+/// channel like the original macOS client); `HandShakerClient::fetch_exif`
+/// currently returns a not-implemented error.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ExifData {
+    /// Exif orientation value.
+    pub orientation: Option<u32>,
+    /// Time the photo was taken.
+    pub date_taken: Option<u64>,
+    /// Latitude string.
+    pub latitude: Option<String>,
+    /// Longitude string.
+    pub longitude: Option<String>,
+}

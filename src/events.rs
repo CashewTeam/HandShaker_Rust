@@ -286,6 +286,74 @@ mod tests {
         assert_eq!(value["data"]["sid"], 8);
         assert!(value["data"].get("payload").is_none());
     }
+
+    #[test]
+    fn all_event_kinds_serialize_to_stable_snake_case_tags() {
+        // 0.2.0 compatibility contract: these JSON `kind` tags are part of the
+        // public watch schema and must not change without a major bump.
+        let cases = [
+            (EventKind::DeviceInfoChanged, "device_info_changed"),
+            (EventKind::ClipboardChanged, "clipboard_changed"),
+            (EventKind::MediaLibraryChanged, "media_library_changed"),
+            (EventKind::DirectoryChanged, "directory_changed"),
+            (EventKind::FileChanged, "file_changed"),
+            (EventKind::PhotoSyncChanged, "photo_sync_changed"),
+            (EventKind::SyncMonitorChanged, "sync_monitor_changed"),
+            (EventKind::RequestCancelled, "request_cancelled"),
+            (EventKind::Unknown, "unknown"),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(
+                serde_json::to_string(&kind).unwrap(),
+                format!("\"{expected}\"")
+            );
+        }
+    }
+
+    #[test]
+    fn directory_and_file_events_round_trip_with_stable_kinds() {
+        let directory = ClientEvent::DirectoryChanged(vec![FileEvent {
+            file: Some(crate::domain::RemoteFile {
+                path: "/storage/emulated/0/DCIM/a.jpg".to_string(),
+                size: 0,
+                created_at: None,
+                modified_at: None,
+                is_directory: false,
+                checksum: None,
+                is_trash: None,
+                id: None,
+            }),
+            kind: FileEventKind::Create,
+        }]);
+        let value = serde_json::to_value(&directory).unwrap();
+        assert_eq!(value["kind"], "directory_changed");
+        assert_eq!(
+            value["data"][0]["file"]["path"],
+            "/storage/emulated/0/DCIM/a.jpg"
+        );
+        assert_eq!(value["data"][0]["kind"], "create");
+
+        let file = ClientEvent::FileChanged(vec![FileChange {
+            file: Some(crate::domain::RemoteFile {
+                path: "/storage/emulated/0/b.txt".to_string(),
+                size: 0,
+                created_at: None,
+                modified_at: None,
+                is_directory: false,
+                checksum: None,
+                is_trash: None,
+                id: None,
+            }),
+            status: FileChangeStatus::Modified,
+        }]);
+        let value = serde_json::to_value(&file).unwrap();
+        assert_eq!(value["kind"], "file_changed");
+        assert_eq!(
+            value["data"][0]["file"]["path"],
+            "/storage/emulated/0/b.txt"
+        );
+        assert_eq!(value["data"][0]["status"], "modified");
+    }
 }
 
 /// Which media library produced a change.

@@ -11,8 +11,9 @@ use rustyline::error::ReadlineError;
 use serde::Serialize;
 
 use handshaker_rust::{
-    ClientOptions, ConnectionTarget, DeleteOptions, Error, HandShakerClient, RemoteFile, Result,
-    TransferOptions, TransferProgress,
+    ClientEvent, ClientOptions, ConnectionTarget, DeleteOptions, DeviceInfo, Error, EventCallbacks,
+    EventFilter, EventStreamError, HandShakerClient, RemoteFile, Result, TransferOptions,
+    TransferProgress,
     i18n::{self, Localizer, MessageKey, ZhCn},
 };
 
@@ -82,7 +83,9 @@ fn localized_command() -> clap::Command {
     localize_subcommand(&mut command, "fs", "cli.command.fs");
     localize_subcommand(&mut command, "clipboard", "cli.command.clipboard");
     localize_subcommand(&mut command, "trust", "cli.command.trust");
+    localize_subcommand(&mut command, "media", "cli.command.media");
     localize_subcommand(&mut command, "shell", "cli.command.shell");
+    localize_subcommand(&mut command, "watch", "cli.command.watch");
 
     if let Some(device) = command.find_subcommand_mut("device") {
         localize_subcommand(device, "list", "cli.command.list");
@@ -115,6 +118,12 @@ fn localized_command() -> clap::Command {
         localize_subcommand(trust, "list", "cli.command.trust_list");
         localize_subcommand(trust, "remove", "cli.command.trust_remove");
         localize_subcommand(trust, "reset", "cli.command.trust_reset");
+    }
+    if let Some(media) = command.find_subcommand_mut("media") {
+        localize_subcommand(media, "photo", "cli.command.media_photo");
+        localize_subcommand(media, "video", "cli.command.media_video");
+        localize_subcommand(media, "audio", "cli.command.media_audio");
+        localize_subcommand(media, "thumbnail", "cli.command.media_thumbnail");
     }
     command
 }
@@ -163,6 +172,21 @@ fn localize_arguments(mut command: clap::Command) -> clap::Command {
             arg.help(i18n::text("cli.timeout"))
                 .value_name(i18n::text("cli.value.timeout"))
                 .hide_default_value(true)
+        });
+    }
+    if has_argument(&command, "watch_path") {
+        command = command.mut_arg("watch_path", |arg| {
+            arg.help(i18n::text("cli.arg.watch_path"))
+        });
+    }
+    if has_argument(&command, "media_limit") {
+        command = command.mut_arg("media_limit", |arg| {
+            arg.help(i18n::text("cli.arg.media_limit"))
+        });
+    }
+    if has_argument(&command, "thumb_output_dir") {
+        command = command.mut_arg("thumb_output_dir", |arg| {
+            arg.help(i18n::text("cli.arg.thumb_output_dir"))
         });
     }
     if has_argument(&command, "discover_timeout") {
@@ -278,7 +302,17 @@ pub(crate) enum Command {
     Clipboard(ClipboardCommand),
     #[command(subcommand)]
     Trust(TrustCommand),
+    #[command(subcommand)]
+    Media(MediaCommand),
     Shell,
+    /// Watch the connected device for events (directory monitor, clipboard,
+    /// device info and other pushes). Registers monitors for each --path and
+    /// streams events until interrupted or the connection closes.
+    Watch {
+        /// Remote directories to monitor; repeatable. Omit to only listen.
+        #[arg(long = "path", id = "watch_path")]
+        paths: Vec<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -361,6 +395,36 @@ pub(crate) enum TrustCommand {
     Reset { device_uuid: String },
 }
 
+/// Shared preview options for media library listings.
+#[derive(Debug, Args, Clone)]
+pub(crate) struct MediaPreviewArgs {
+    /// Show at most this many entries (default preview limit).
+    #[arg(long = "limit", id = "media_limit")]
+    limit: Option<usize>,
+    /// Show the whole library, ignoring the preview limit.
+    #[arg(long = "all")]
+    all: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum MediaCommand {
+    /// Preview the photo library.
+    Photo(MediaPreviewArgs),
+    /// Preview the video library.
+    Video(MediaPreviewArgs),
+    /// Preview the audio library.
+    Audio(MediaPreviewArgs),
+    /// Fetch thumbnails for media ids or paths and write them to a directory.
+    Thumbnail {
+        /// Media ids or remote paths; numeric values are treated as ids.
+        #[arg(index = 1, required = true)]
+        targets: Vec<String>,
+        /// Local directory the thumbnails are written to.
+        #[arg(long = "output-dir", id = "thumb_output_dir")]
+        output_dir: PathBuf,
+    },
+}
+
 #[derive(Debug, Args)]
 pub(crate) struct ClipboardSetArgs {
     #[arg(conflicts_with = "stdin")]
@@ -404,7 +468,12 @@ pub(crate) fn command_name(command: &Command) -> &'static str {
         Command::Trust(TrustCommand::List) => "trust.list",
         Command::Trust(TrustCommand::Remove { .. }) => "trust.remove",
         Command::Trust(TrustCommand::Reset { .. }) => "trust.reset",
+        Command::Media(MediaCommand::Photo(_)) => "media.photo",
+        Command::Media(MediaCommand::Video(_)) => "media.video",
+        Command::Media(MediaCommand::Audio(_)) => "media.audio",
+        Command::Media(MediaCommand::Thumbnail { .. }) => "media.thumbnail",
         Command::Shell => "shell",
+        Command::Watch { .. } => "watch",
     }
 }
 
@@ -441,6 +510,9 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         }
         return run_shell(&cli).await;
     }
+    if matches!(cli.command, Command::Watch { .. }) {
+        return watch(&cli).await;
+    }
 
     let client = connect(&cli).await?;
     let context = CommandContext {
@@ -461,18 +533,92 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
     }
 }
 
+async fn watch(cli: &Cli) -> Result<()> {
+    let client = connect_with_all_callbacks(cli).await?;
+    let localizer = ZhCn;
+    let Command::Watch { paths } = &cli.command else {
+        unreachable!("watch command");
+    };
+    for (index, path) in paths.iter().enumerate() {
+        if let Err(error) = client.monitor_folder(path, true).await {
+            // Unregister everything registered before the failing entry. The
+            // phone treats duplicate unregister calls as idempotent no-ops,
+            // so repeated --path values are safe to unregister twice.
+            for registered in paths.iter().take(index) {
+                let _ = client.monitor_folder(registered, false).await;
+            }
+            return Err(error);
+        }
+    }
+    if !paths.is_empty() {
+        eprintln!("{}", localizer.text(MessageKey::WatchRegistered));
+    }
+    let mut events = client.subscribe_events(EventFilter::all());
+    loop {
+        tokio::select! {
+            event = events.recv() => match event {
+                Ok(event) => {
+                    match cli.output {
+                        OutputFormat::Jsonl => {
+                            let envelope = watch_envelope(client.device_info(), &event);
+                            println!("{envelope}");
+                        }
+                        _ => println!(
+                            "{}",
+                            sanitize_human(
+                                &serde_json::to_string(&event).expect("event json")
+                            )
+                        ),
+                    }
+                    let _ = io::stdout().flush();
+                }
+                Err(EventStreamError::Lagged { missed }) => {
+                    eprintln!(
+                        "{}",
+                        localizer.format(MessageKey::WatchLagged, &[&missed.to_string()])
+                    );
+                }
+                Err(EventStreamError::Closed) => {
+                    return Err(Error::Transport(
+                        localizer.text(MessageKey::WatchDisconnected).to_string(),
+                    ));
+                }
+            },
+            _ = tokio::signal::ctrl_c() => {
+                // Graceful stop: unregister every monitor so the phone stops
+                // watching, then report the user interrupt.
+                for path in paths {
+                    let _ = client.monitor_folder(path, false).await;
+                }
+                return Err(Error::Interrupted);
+            }
+        }
+    }
+}
+
+fn watch_envelope(info: &DeviceInfo, event: &ClientEvent) -> serde_json::Value {
+    let info = info;
+    serde_json::json!({
+        "schema_version": 1,
+        "ok": true,
+        "command": "watch",
+        "device": {
+            "serial": info.serial,
+            "name": info.name,
+        },
+        "event": "watch",
+        "data": event,
+        "warnings": [],
+    })
+}
+
 async fn connect(cli: &Cli) -> Result<HandShakerClient> {
     if cli.wifi.is_some() {
         // First connects and resets require acting on the phone; give a hint
         // before the handshake blocks waiting for the trust dialog.
         eprintln!("{}", ZhCn.text(MessageKey::WifiTrustHint));
     }
-    let target = match cli.wifi {
-        Some(address) => ConnectionTarget::Wifi { address },
-        None => ConnectionTarget::Adb {
-            serial: cli.serial.clone(),
-        },
-    };
+    let target = connection_target(cli);
     HandShakerClient::connect(
         target,
         ClientOptions {
@@ -482,6 +628,41 @@ async fn connect(cli: &Cli) -> Result<HandShakerClient> {
         },
     )
     .await
+}
+
+/// Connect for `watch`, enabling every phone-side push callback so directory,
+/// clipboard, device and media events are all delivered.
+async fn connect_with_all_callbacks(cli: &Cli) -> Result<HandShakerClient> {
+    if cli.wifi.is_some() {
+        // First connects and resets require acting on the phone; give a hint
+        // before the handshake blocks waiting for the trust dialog.
+        eprintln!("{}", ZhCn.text(MessageKey::WifiTrustHint));
+    }
+    let target = connection_target(cli);
+    HandShakerClient::connect_with_event_callbacks(
+        target,
+        ClientOptions {
+            timeout: cli.timeout,
+            wire_log: cli.wire_log.clone(),
+            ..Default::default()
+        },
+        EventCallbacks {
+            device_info: true,
+            photo_library: true,
+            audio_library: true,
+            video_library: true,
+        },
+    )
+    .await
+}
+
+fn connection_target(cli: &Cli) -> ConnectionTarget {
+    match cli.wifi {
+        Some(address) => ConnectionTarget::Wifi { address },
+        None => ConnectionTarget::Adb {
+            serial: cli.serial.clone(),
+        },
+    }
 }
 
 async fn device_list(timeout: Duration) -> Result<Outcome> {
@@ -876,8 +1057,324 @@ async fn execute_connected(
                 localizer.text(MessageKey::ShellNested).to_string(),
             ));
         }
+        Command::Watch { .. } => {
+            return Err(Error::Usage(
+                localizer.text(MessageKey::WatchNested).to_string(),
+            ));
+        }
+        Command::Media(command) => {
+            return media_command(client, &context, command).await;
+        }
     };
     Ok(outcome.with_device(client.device_info()))
+}
+
+/// Default preview cap for `media` listings: a functional preview of a large
+/// media library, overridable with `--limit` or `--all`.
+const DEFAULT_MEDIA_PREVIEW_LIMIT: usize = 50;
+
+/// Strip control characters from a device-controlled string before printing
+/// it in human output, so a hostile phone cannot inject terminal escapes.
+fn sanitize_human(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| {
+            !matches!(
+                *character,
+                '\0'..='\u{1F}' | '\u{7F}' | '\u{80}'..='\u{9F}'
+            )
+        })
+        .collect()
+}
+
+fn media_preview_limit(args: &MediaPreviewArgs) -> Option<usize> {
+    if args.all {
+        return None;
+    }
+    Some(args.limit.unwrap_or(DEFAULT_MEDIA_PREVIEW_LIMIT))
+}
+
+async fn media_command(
+    client: &HandShakerClient,
+    context: &CommandContext,
+    command: &MediaCommand,
+) -> Result<Outcome> {
+    let localizer = ZhCn;
+    match command {
+        MediaCommand::Photo(args) => {
+            let library = client.get_photo_library().await?;
+            let limit = media_preview_limit(args);
+            let (shown, entries_truncated) = truncate(&library.images, limit);
+            let (albums, albums_truncated) = truncate(&library.albums, limit);
+            let truncated = entries_truncated || albums_truncated;
+            let human = shown
+                .iter()
+                .enumerate()
+                .map(|(index, image)| {
+                    format!(
+                        "{}\t{}\t{}x{}",
+                        index + 1,
+                        sanitize_human(
+                            image
+                                .title
+                                .as_deref()
+                                .or(image.path.as_deref())
+                                .unwrap_or("")
+                        ),
+                        image.width.unwrap_or(0),
+                        image.height.unwrap_or(0)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let data = serde_json::json!({
+                "images": shown,
+                "albums": albums,
+                "camera_album_id": library.camera_album_id,
+            });
+            let (human, data) = preview_summary(
+                human,
+                data,
+                library.images.len(),
+                truncated,
+                limit,
+                localizer,
+            );
+            Ok(Outcome::new("media.photo", data, human)?)
+        }
+        MediaCommand::Video(args) => {
+            let library = client.get_video_library().await?;
+            let limit = media_preview_limit(args);
+            let (shown, entries_truncated) = truncate(&library.videos, limit);
+            let (albums, albums_truncated) = truncate(&library.albums, limit);
+            let truncated = entries_truncated || albums_truncated;
+            let human = shown
+                .iter()
+                .enumerate()
+                .map(|(index, video)| {
+                    format!(
+                        "{}\t{}\t{}s",
+                        index + 1,
+                        sanitize_human(video.path.as_deref().unwrap_or("")),
+                        video.duration.unwrap_or(0.0)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let data = serde_json::json!({
+                "videos": shown,
+                "albums": albums,
+            });
+            let (human, data) = preview_summary(
+                human,
+                data,
+                library.videos.len(),
+                truncated,
+                limit,
+                localizer,
+            );
+            Ok(Outcome::new("media.video", data, human)?)
+        }
+        MediaCommand::Audio(args) => {
+            let library = client.get_audio_library().await?;
+            let limit = media_preview_limit(args);
+            let (shown, entries_truncated) = truncate(&library.tracks, limit);
+            let (albums, albums_truncated) = truncate(&library.albums, limit);
+            let truncated = entries_truncated || albums_truncated;
+            let human = shown
+                .iter()
+                .enumerate()
+                .map(|(index, track)| {
+                    format!(
+                        "{}\t{}\t{}\t{}",
+                        index + 1,
+                        sanitize_human(track.title.as_deref().unwrap_or("")),
+                        sanitize_human(track.artist.as_deref().unwrap_or("")),
+                        sanitize_human(track.path.as_deref().unwrap_or(""))
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let data = serde_json::json!({
+                "tracks": shown,
+                "albums": albums,
+            });
+            let (human, data) = preview_summary(
+                human,
+                data,
+                library.tracks.len(),
+                truncated,
+                limit,
+                localizer,
+            );
+            Ok(Outcome::new("media.audio", data, human)?)
+        }
+        MediaCommand::Thumbnail {
+            targets,
+            output_dir,
+        } => {
+            let output_dir = resolve_local(&context.local_cwd, output_dir);
+            std::fs::create_dir_all(&output_dir).map_err(|error| {
+                Error::LocalIo(i18n::format(
+                    "media.output_dir_create_failed",
+                    &[&output_dir.display().to_string(), &error.to_string()],
+                ))
+            })?;
+            let images: Vec<handshaker_rust::ImageFile> = targets
+                .iter()
+                .map(|target| {
+                    if target.chars().all(|character| character.is_ascii_digit()) {
+                        let media_id = target.parse::<u64>().map_err(|_| {
+                            Error::Usage(
+                                localizer.format(MessageKey::MediaThumbnailInvalidId, &[target]),
+                            )
+                        })?;
+                        Ok(handshaker_rust::ImageFile {
+                            media_id: Some(media_id),
+                            ..Default::default()
+                        })
+                    } else {
+                        Ok(handshaker_rust::ImageFile {
+                            path: Some(resolve_remote(&context.remote_cwd, target)),
+                            ..Default::default()
+                        })
+                    }
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let thumbnails = client.get_thumbnails(&images, &[], &[]).await?;
+            let mut written = Vec::new();
+            let mut failed = Vec::new();
+            for (index, target) in targets.iter().enumerate() {
+                // Match responses by the echoed media_id/path instead of by
+                // request position: a phone that reorders or dedupes entries
+                // must not misattribute thumbnail bytes.
+                let request = &images[index];
+                let image = thumbnails.images.iter().find(|image| {
+                    (request.media_id.is_some() && image.media_id == request.media_id)
+                        || (request.path.is_some() && image.path == request.path)
+                });
+                let Some(image) = image else {
+                    failed.push(serde_json::json!({
+                        "target": target,
+                        "reason": "missing_response"
+                    }));
+                    continue;
+                };
+                if image.thumbnail_error {
+                    failed.push(serde_json::json!({
+                        "target": target,
+                        "reason": "thumbnail_error"
+                    }));
+                    eprintln!(
+                        "{}",
+                        localizer.format(MessageKey::MediaThumbnailFailed, &[target])
+                    );
+                    continue;
+                }
+                let Some(bytes) = &image.thumbnail else {
+                    failed.push(serde_json::json!({
+                        "target": target,
+                        "reason": "missing_data"
+                    }));
+                    continue;
+                };
+                let name = thumbnail_file_name(target, index);
+                tokio::fs::write(output_dir.join(&name), bytes)
+                    .await
+                    .map_err(|error| {
+                        Error::LocalIo(i18n::format(
+                            "media.thumbnail_write_failed",
+                            &[&name, &error.to_string()],
+                        ))
+                    })?;
+                written.push(serde_json::json!({
+                    "target": target,
+                    "file": output_dir.join(&name).display().to_string(),
+                }));
+            }
+            let human = if failed.is_empty() {
+                localizer.format(
+                    MessageKey::MediaThumbnailWritten,
+                    &[&written.len().to_string()],
+                )
+            } else {
+                localizer.format(
+                    MessageKey::MediaThumbnailPartial,
+                    &[&written.len().to_string(), &failed.len().to_string()],
+                )
+            };
+            Ok(Outcome::new(
+                "media.thumbnail",
+                serde_json::json!({ "written": written, "failed": failed }),
+                human,
+            )?)
+        }
+    }
+}
+
+fn truncate<T>(entries: &[T], limit: Option<usize>) -> (&[T], bool) {
+    match limit {
+        Some(limit) if entries.len() > limit => (&entries[..limit], true),
+        Some(limit) => (&entries[..entries.len().min(limit)], false),
+        None => (entries, false),
+    }
+}
+
+fn preview_summary(
+    human: String,
+    data: serde_json::Value,
+    total: usize,
+    truncated: bool,
+    limit: Option<usize>,
+    localizer: ZhCn,
+) -> (String, serde_json::Value) {
+    let mut data = data;
+    data["total"] = serde_json::json!(total);
+    // Always present: JSON consumers can distinguish a capped preview from an
+    // absent flag without probing the number of entries.
+    data["truncated"] = serde_json::json!(truncated);
+    let human = if truncated {
+        format!(
+            "{}\n{}",
+            human,
+            localizer.format(
+                MessageKey::MediaPreviewTruncated,
+                &[&total.to_string(), &limit.unwrap_or(0).to_string()],
+            )
+        )
+    } else {
+        human
+    };
+    (human, data)
+}
+
+/// Local-only thumbnail file name derived from the caller's target: numeric
+/// targets become `<id>.jpg`, paths become the last path component. Remote
+/// names are never used, so a hostile phone cannot escape the output dir.
+fn thumbnail_file_name(target: &str, index: usize) -> String {
+    let component = target
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|component| !component.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| index.to_string());
+    let stem = component
+        .rsplit_once('.')
+        .map(|(stem, _)| stem.to_owned())
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or(component);
+    // Strip path separators, drive-letter colons and control characters so a
+    // hostile or odd target can never escape the output directory.
+    let stem: String = stem
+        .chars()
+        .filter(|character| !matches!(*character, '/' | '\\' | ':' | '\0'..='\u{1F}' | '\u{7F}'))
+        .collect();
+    let stem = if stem.is_empty() {
+        index.to_string()
+    } else {
+        stem
+    };
+    format!("{index}_{stem}.jpg")
 }
 
 async fn run_shell(cli: &Cli) -> Result<()> {
@@ -1390,5 +1887,114 @@ mod tests {
             }
             _ => panic!("expected fs push"),
         }
+    }
+
+    #[test]
+    fn watch_accepts_repeatable_paths() {
+        let cli = Cli::try_parse_from([
+            "handshaker",
+            "watch",
+            "--path",
+            "/storage/emulated/0/DCIM",
+            "--path",
+            "/storage/emulated/0/Pictures",
+        ])
+        .expect("parse watch");
+        match cli.command {
+            Command::Watch { paths } => {
+                assert_eq!(
+                    paths,
+                    vec![
+                        "/storage/emulated/0/DCIM".to_string(),
+                        "/storage/emulated/0/Pictures".to_string()
+                    ]
+                );
+            }
+            _ => panic!("expected watch command"),
+        }
+    }
+
+    #[test]
+    fn watch_envelope_carries_event_payload() {
+        let event = ClientEvent::ClipboardChanged(vec![handshaker_rust::ClipboardEntry {
+            text: "hello".to_string(),
+            timestamp_ms: 42,
+        }]);
+        let device = DeviceInfo {
+            serial: "serial-1".to_string(),
+            name: Some("phone".to_string()),
+            ..DeviceInfo::default()
+        };
+        let envelope = super::watch_envelope(&device, &event);
+        assert_eq!(envelope["schema_version"], 1);
+        assert_eq!(envelope["command"], "watch");
+        assert_eq!(envelope["ok"], true);
+        assert_eq!(envelope["event"], "watch");
+        assert_eq!(envelope["data"]["kind"], "clipboard_changed");
+        assert_eq!(envelope["device"]["serial"], "serial-1");
+    }
+
+    #[test]
+    fn media_preview_limit_defaults_to_preview_cap() {
+        let args = MediaPreviewArgs {
+            limit: None,
+            all: false,
+        };
+        assert_eq!(
+            super::media_preview_limit(&args),
+            Some(super::DEFAULT_MEDIA_PREVIEW_LIMIT)
+        );
+
+        let limited = MediaPreviewArgs {
+            limit: Some(7),
+            all: false,
+        };
+        assert_eq!(super::media_preview_limit(&limited), Some(7));
+
+        let all = MediaPreviewArgs {
+            limit: None,
+            all: true,
+        };
+        assert_eq!(super::media_preview_limit(&all), None);
+    }
+
+    #[test]
+    fn media_truncation_reports_total_and_flags() {
+        let entries = vec![1, 2, 3, 4, 5];
+        let (shown, truncated) = super::truncate(&entries, Some(3));
+        assert_eq!(shown, &[1, 2, 3][..]);
+        assert!(truncated);
+
+        let (all_shown, truncated) = super::truncate(&entries, None);
+        assert_eq!(all_shown, &entries[..]);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn thumbnail_file_names_are_local_and_safe() {
+        assert_eq!(
+            super::thumbnail_file_name("42", 0),
+            "0_42.jpg",
+            "numeric targets become index_id.jpg"
+        );
+        assert_eq!(
+            super::thumbnail_file_name("/storage/emulated/0/DCIM/a.jpg", 3),
+            "3_a.jpg",
+            "path targets keep only the last component"
+        );
+        assert_eq!(
+            super::thumbnail_file_name("../../evil/../x", 1),
+            "1_x.jpg",
+            "parent segments cannot escape the output directory"
+        );
+    }
+
+    #[test]
+    fn human_output_strips_terminal_escape_characters() {
+        let escaped = "\u{1B}[2Jevil\u{9B}CSItitle";
+        // ESC and CSI control characters are removed; the residue "[2J" is
+        // inert plain text once the escape introducer is gone.
+        assert_eq!(super::sanitize_human(escaped), "[2JevilCSItitle");
+        assert_eq!(super::sanitize_human("normal text"), "normal text");
     }
 }

@@ -695,6 +695,11 @@ impl NormalAccumulator {
 
 const MAX_PUSH_MESSAGE: usize = 4 * 1024 * 1024;
 
+/// Upper bound for a reassembled normal response body. Media libraries and
+/// other bulk replies are capped here before buffering, so a hostile device
+/// declaring an oversized `total` cannot force unbounded memory use.
+const NORMAL_RESPONSE_LIMIT: usize = 64 * 1024 * 1024;
+
 #[derive(Default)]
 struct DownloadDiscriminator {
     candidate: Vec<u8>,
@@ -772,6 +777,12 @@ async fn receive_normal(
                 let total = usize::try_from(total).map_err(|_| {
                     Error::Protocol(i18n::text("session.response_length_too_large").to_string())
                 })?;
+                if total > NORMAL_RESPONSE_LIMIT {
+                    return Err(Error::Protocol(i18n::format(
+                        "session.response_cap_exceeded",
+                        &[&(total / 1024 / 1024).to_string()],
+                    )));
+                }
                 let expected = total.checked_add(8).ok_or_else(|| {
                     Error::Protocol(i18n::text("session.response_length_overflow").to_string())
                 })?;
@@ -955,6 +966,22 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn normal_response_rejects_oversized_declared_total() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        // A hostile device declaring a total beyond NORMAL_RESPONSE_LIMIT must
+        // be rejected as soon as the 8-byte prefix assembles.
+        let total = (NORMAL_RESPONSE_LIMIT as u64) + 1;
+        sender
+            .send(Ok(Incoming::Data(total.to_be_bytes().to_vec())))
+            .unwrap();
+        let inner = test_inner(Duration::from_secs(1));
+        let error = receive_normal(&mut receiver, Duration::from_secs(1), None, 1, &inner)
+            .await
+            .expect_err("oversized declared total");
+        assert!(matches!(error, Error::Protocol(_)));
     }
 
     #[tokio::test]
