@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use md5::{Digest as _, Md5};
@@ -8,25 +8,32 @@ use prost::Message;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{interval, timeout};
 
 use crate::error::{Error, Result};
+use crate::event_decode::{decode_cancel, decode_event};
+use crate::events::{ClientEvent, EventFilter, EventSubscription, event_channel};
 use crate::i18n;
 use crate::protocol::crypto::SessionKeys;
 use crate::protocol::frame::{WireDirection, WireLog, read_downstream, write_upstream};
 use crate::protocol::handshake::HandshakeStrategy;
 use crate::protocol::proto::{SspHeartBeatRequest, SspRequestType};
 
-type ChunkReceiver = mpsc::UnboundedReceiver<Result<Vec<u8>>>;
+type ChunkReceiver = mpsc::UnboundedReceiver<Result<Incoming>>;
 
 const PHASE_NORMAL: u8 = 0;
 const PHASE_DOWNLOAD_RAW: u8 = 1;
 
 #[derive(Clone)]
 struct PendingRequest {
-    sender: mpsc::UnboundedSender<Result<Vec<u8>>>,
+    sender: mpsc::UnboundedSender<Result<Incoming>>,
+}
+
+enum Incoming {
+    Data(Vec<u8>),
+    RemoteCancelled(crate::cancellation::CancellationInfo),
 }
 
 struct WriteCommand {
@@ -44,6 +51,8 @@ struct SessionInner {
     request_timeout: Duration,
     closed: Arc<AtomicBool>,
     wire_log: Option<Arc<WireLog>>,
+    serial: String,
+    events: StdMutex<Option<broadcast::Sender<ClientEvent>>>,
 }
 
 pub(crate) struct OpenRequest {
@@ -52,6 +61,7 @@ pub(crate) struct OpenRequest {
     inner: Arc<SessionInner>,
     phase: u8,
     completed: bool,
+    cancellation: Option<crate::cancellation::CancellationToken>,
 }
 
 impl OpenRequest {
@@ -61,8 +71,20 @@ impl OpenRequest {
                 i18n::text("session.raw_after_download").to_string(),
             ));
         }
-        let result = receive_normal(&mut self.receiver, self.inner.request_timeout).await;
-        if result.is_err() {
+        let result = receive_normal(
+            &mut self.receiver,
+            self.inner.request_timeout,
+            self.cancellation.as_ref(),
+            self.sid,
+            &self.inner,
+        )
+        .await;
+        if matches!(&result, Err(Error::Cancelled(_))) {
+            self.completed = true;
+        }
+        if result.is_err()
+            && !matches!(&result, Err(Error::Cancelled(info)) if !info.connection_closed)
+        {
             self.inner.fail_connection().await;
         }
         result
@@ -87,14 +109,25 @@ impl OpenRequest {
             let mut digest = Md5::new();
             let mut discriminator = DownloadDiscriminator::default();
             while received < total {
-                let chunk = timeout(inner.request_timeout, self.receiver.recv())
-                    .await
-                    .map_err(|_| {
+                let incoming = receive_incoming(
+                    &mut self.receiver,
+                    inner.request_timeout,
+                    self.cancellation.as_ref(),
+                    self.sid,
+                    &inner,
+                    true,
+                )
+                .await
+                .map_err(|error| match error {
+                    Error::Timeout(_) => {
                         Error::Timeout(i18n::text("session.receive_file_chunk").to_string())
-                    })?
-                    .ok_or_else(|| {
-                        Error::Transport(i18n::text("session.download_closed").to_string())
-                    })??;
+                    }
+                    other => other,
+                })?;
+                let chunk = match incoming {
+                    Incoming::Data(chunk) => chunk,
+                    Incoming::RemoteCancelled(info) => return Err(Error::Cancelled(info)),
+                };
                 let remaining = total - received;
                 let Some(chunk) = discriminator.push(&chunk, remaining)? else {
                     continue;
@@ -131,14 +164,62 @@ impl OpenRequest {
             Ok(format!("{:x}", digest.finalize()))
         }
         .await;
-        if result.is_err() {
+        if matches!(&result, Err(Error::Cancelled(_))) {
+            self.completed = true;
+        }
+        if result.is_err()
+            && !matches!(&result, Err(Error::Cancelled(info)) if !info.connection_closed)
+        {
             inner.fail_connection().await;
         }
         result
     }
 
-    pub async fn send(&self, flag: u8, payload: &[u8]) -> Result<()> {
-        self.inner.send(self.sid, flag, payload).await
+    pub async fn send(&mut self, flag: u8, payload: &[u8]) -> Result<()> {
+        let result = match self.ensure_not_cancelled(false).await {
+            Ok(()) => self.inner.send(self.sid, flag, payload).await,
+            Err(error) => Err(error),
+        };
+        if matches!(&result, Err(Error::Cancelled(_))) {
+            self.completed = true;
+        }
+        result
+    }
+
+    async fn ensure_not_cancelled(&self, close_connection: bool) -> Result<()> {
+        if self
+            .cancellation
+            .as_ref()
+            .is_some_and(crate::cancellation::CancellationToken::is_cancelled)
+        {
+            self.cancel_local(close_connection).await
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn cancel_local(&self, close_connection: bool) -> Result<()> {
+        self.inner.pending.lock().await.remove(&self.sid);
+        if close_connection {
+            self.inner.fail_connection().await;
+        }
+        let flag_sent = if close_connection {
+            false
+        } else {
+            let result = self.inner.cancel(self.sid).await;
+            if result.is_err() {
+                tracing::debug!(
+                    sid = self.sid,
+                    message = i18n::text("session.cancel_failed")
+                );
+            }
+            result.is_ok()
+        };
+        Err(Error::Cancelled(crate::cancellation::CancellationInfo {
+            sid: self.sid,
+            origin: crate::cancellation::CancellationOrigin::Local { flag_sent },
+            connection_closed: close_connection,
+        }))
     }
 
     pub async fn finish(mut self) {
@@ -173,7 +254,6 @@ pub(crate) struct Session {
     reader_task: JoinHandle<()>,
     writer_task: JoinHandle<()>,
     heartbeat_task: JoinHandle<()>,
-    event_task: JoinHandle<()>,
 }
 
 impl Session {
@@ -183,6 +263,7 @@ impl Session {
         heartbeat_interval: Duration,
         wire_log: Option<Arc<WireLog>>,
         handshake: &dyn HandshakeStrategy,
+        serial: String,
     ) -> Result<Self> {
         let keys = Arc::new(
             handshake
@@ -198,6 +279,7 @@ impl Session {
             Arc::clone(&closed),
             wire_log.clone(),
         );
+        let events = event_channel();
         let inner = Arc::new(SessionInner {
             writer: writer_sender,
             pending: Mutex::new(HashMap::new()),
@@ -206,17 +288,16 @@ impl Session {
             request_timeout,
             closed,
             wire_log,
+            serial,
+            events: StdMutex::new(Some(events)),
         });
-        let (event_sender, event_receiver) = mpsc::channel(64);
-        let reader_task = spawn_reader(reader, Arc::clone(&inner), event_sender);
-        let event_task = spawn_event_drain(event_receiver);
+        let reader_task = spawn_reader(reader, Arc::clone(&inner));
         let heartbeat_task = spawn_heartbeat(Arc::clone(&inner), heartbeat_interval);
         Ok(Self {
             inner,
             reader_task,
             writer_task,
             heartbeat_task,
-            event_task,
         })
     }
 
@@ -227,9 +308,33 @@ impl Session {
         response
     }
 
+    pub async fn request_with_options<M: Message>(
+        &self,
+        message: &M,
+        options: crate::cancellation::RequestOptions,
+    ) -> Result<Vec<u8>> {
+        let mut request = self.open_with_options(message, options).await?;
+        let response = request.receive_normal().await;
+        request.finish().await;
+        response
+    }
+
     pub async fn open<M: Message>(&self, message: &M) -> Result<OpenRequest> {
+        self.open_with_options(message, crate::cancellation::RequestOptions::default())
+            .await
+    }
+
+    pub async fn open_with_options<M: Message>(
+        &self,
+        message: &M,
+        options: crate::cancellation::RequestOptions,
+    ) -> Result<OpenRequest> {
         let payload = message.encode_to_vec();
-        self.inner.open_signed(&payload).await
+        self.inner.open_signed(&payload, options.cancellation).await
+    }
+
+    pub fn subscribe_events(&self, filter: EventFilter) -> EventSubscription {
+        self.inner.subscribe_events(filter)
     }
 
     pub async fn close(self) -> Result<()> {
@@ -249,7 +354,6 @@ impl Session {
         }
         self.reader_task.abort();
         self.writer_task.abort();
-        self.event_task.abort();
         result
     }
 }
@@ -260,24 +364,59 @@ impl Drop for Session {
         self.heartbeat_task.abort();
         self.reader_task.abort();
         self.writer_task.abort();
-        self.event_task.abort();
     }
 }
 
 impl SessionInner {
+    fn subscribe_events(&self, filter: EventFilter) -> EventSubscription {
+        let receiver = self
+            .events
+            .lock()
+            .ok()
+            .and_then(|events| events.as_ref().map(broadcast::Sender::subscribe));
+        match receiver {
+            Some(receiver) => EventSubscription::new(receiver, filter),
+            None => EventSubscription::closed(filter),
+        }
+    }
+
+    fn publish_event(&self, event: ClientEvent) {
+        if let Ok(events) = self.events.lock()
+            && let Some(sender) = events.as_ref()
+        {
+            let _ = sender.send(event);
+        }
+    }
+
     fn next_sid(&self) -> u32 {
         self.next_sid
             .fetch_add(1, Ordering::Relaxed)
             .wrapping_add(1)
     }
 
-    async fn open_signed(self: &Arc<Self>, payload: &[u8]) -> Result<OpenRequest> {
+    async fn allocate_sid(&self) -> Result<u32> {
+        for _ in 0..1024 {
+            let sid = self.next_sid();
+            if !self.pending.lock().await.contains_key(&sid) {
+                return Ok(sid);
+            }
+        }
+        Err(Error::Protocol(
+            i18n::text("session.sid_exhausted").to_string(),
+        ))
+    }
+
+    async fn open_signed(
+        self: &Arc<Self>,
+        payload: &[u8],
+        cancellation: Option<crate::cancellation::CancellationToken>,
+    ) -> Result<OpenRequest> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::Transport(
                 i18n::text("client.connection_closed").to_string(),
             ));
         }
-        let sid = self.next_sid();
+        let sid = self.allocate_sid().await?;
         let (sender, receiver) = mpsc::unbounded_channel();
         self.pending
             .lock()
@@ -294,7 +433,21 @@ impl SessionInner {
             inner: Arc::clone(self),
             phase: PHASE_NORMAL,
             completed: false,
+            cancellation,
         };
+        if request
+            .cancellation
+            .as_ref()
+            .is_some_and(crate::cancellation::CancellationToken::is_cancelled)
+        {
+            self.pending.lock().await.remove(&sid);
+            request.completed = true;
+            return Err(Error::Cancelled(crate::cancellation::CancellationInfo {
+                sid,
+                origin: crate::cancellation::CancellationOrigin::Local { flag_sent: false },
+                connection_closed: false,
+            }));
+        }
         if let Err(error) = self.send(sid, 1, &body).await {
             self.pending.lock().await.remove(&sid);
             request.completed = true;
@@ -341,13 +494,16 @@ impl SessionInner {
         if self.closed.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let cancel_sid = self.next_sid();
+        let cancel_sid = self.allocate_sid().await?;
         self.send(cancel_sid, 2, &target_sid.to_be_bytes()).await
     }
 
     async fn fail_connection(&self) {
         self.closed.store(true, Ordering::SeqCst);
         self.pending.lock().await.clear();
+        if let Ok(mut events) = self.events.lock() {
+            events.take();
+        }
     }
 }
 
@@ -386,11 +542,7 @@ fn spawn_writer(
     })
 }
 
-fn spawn_reader(
-    mut reader: OwnedReadHalf,
-    inner: Arc<SessionInner>,
-    event_sender: mpsc::Sender<(u32, Vec<u8>)>,
-) -> JoinHandle<()> {
+fn spawn_reader(mut reader: OwnedReadHalf, inner: Arc<SessionInner>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut unmatched = HashMap::<u32, NormalAccumulator>::new();
         loop {
@@ -401,8 +553,7 @@ fn spawn_reader(
                     if !inner.closed.load(Ordering::SeqCst) {
                         tracing::debug!(%error, message = i18n::text("session.reader_ended"));
                     }
-                    inner.closed.store(true, Ordering::SeqCst);
-                    inner.pending.lock().await.clear();
+                    inner.fail_connection().await;
                     break;
                 }
             };
@@ -420,7 +571,7 @@ fn spawn_reader(
             }
             let pending = inner.pending.lock().await.get(&sid).cloned();
             if let Some(pending) = pending {
-                if pending.sender.send(Ok(chunk)).is_err() {
+                if pending.sender.send(Ok(Incoming::Data(chunk))).is_err() {
                     inner.pending.lock().await.remove(&sid);
                 }
             } else {
@@ -428,11 +579,27 @@ fn spawn_reader(
                 match accumulator.push(&chunk) {
                     Ok(Some(body)) => {
                         unmatched.remove(&sid);
-                        if event_sender.try_send((sid, body)).is_err() {
-                            tracing::debug!(message = i18n::text("session.event_queue_full"));
-                            inner.closed.store(true, Ordering::SeqCst);
-                            inner.pending.lock().await.clear();
-                            break;
+                        if let Some(cancel) = decode_cancel(&body) {
+                            let target_sid = cancel
+                                .session_id
+                                .and_then(|value| u32::try_from(value).ok())
+                                .unwrap_or(sid);
+                            let info = crate::cancellation::CancellationInfo {
+                                sid: target_sid,
+                                origin: crate::cancellation::CancellationOrigin::Remote {
+                                    error_code: cancel.error_code,
+                                },
+                                connection_closed: false,
+                            };
+                            let target = inner.pending.lock().await.remove(&target_sid);
+                            if let Some(target) = target {
+                                let _ = target.sender.send(Ok(Incoming::RemoteCancelled(info)));
+                            } else {
+                                inner.publish_event(ClientEvent::RequestCancelled(info));
+                            }
+                        } else {
+                            let event = decode_event(sid, &body, &inner.serial);
+                            inner.publish_event(event);
                         }
                     }
                     Ok(None) => {}
@@ -442,18 +609,6 @@ fn spawn_reader(
                     }
                 }
             }
-        }
-    })
-}
-
-fn spawn_event_drain(mut receiver: mpsc::Receiver<(u32, Vec<u8>)>) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        while let Some((sid, body)) = receiver.recv().await {
-            tracing::debug!(
-                sid = format_args!("{sid:#010x}"),
-                length = body.len(),
-                message = i18n::text("session.event_received")
-            );
         }
     })
 }
@@ -472,7 +627,7 @@ fn spawn_heartbeat(inner: Arc<SessionInner>, heartbeat_interval: Duration) -> Jo
                 host_timestamp: Some(unix_seconds()),
             };
             let payload = heartbeat.encode_to_vec();
-            let mut request = match inner.open_signed(&payload).await {
+            let mut request = match inner.open_signed(&payload, None).await {
                 Ok(request) => request,
                 Err(error) => {
                     tracing::debug!(%error, message = i18n::text("session.heartbeat_send_failed"));
@@ -500,8 +655,18 @@ struct NormalAccumulator {
 impl NormalAccumulator {
     fn push(&mut self, chunk: &[u8]) -> Result<Option<Vec<u8>>> {
         self.bytes.extend_from_slice(chunk);
+        if self.bytes.len() > MAX_PUSH_MESSAGE + 8 {
+            return Err(Error::Protocol(
+                i18n::text("session.event_length_too_large").to_string(),
+            ));
+        }
         if self.total.is_none() && self.bytes.len() >= 8 {
             let total = u64::from_be_bytes(self.bytes[..8].try_into().expect("eight bytes"));
+            if total > MAX_PUSH_MESSAGE as u64 {
+                return Err(Error::Protocol(
+                    i18n::text("session.event_length_too_large").to_string(),
+                ));
+            }
             self.total = Some(usize::try_from(total).map_err(|_| {
                 Error::Protocol(i18n::text("session.event_length_too_large").to_string())
             })?);
@@ -578,14 +743,21 @@ impl DownloadDiscriminator {
 async fn receive_normal(
     receiver: &mut ChunkReceiver,
     request_timeout: Duration,
+    cancellation: Option<&crate::cancellation::CancellationToken>,
+    sid: u32,
+    inner: &Arc<SessionInner>,
 ) -> Result<Vec<u8>> {
     let future = async {
         let mut assembled = Vec::new();
         let mut total = None;
         loop {
-            let chunk = receiver.recv().await.ok_or_else(|| {
-                Error::Transport(i18n::text("session.response_closed").to_string())
-            })??;
+            let incoming =
+                receive_incoming(receiver, request_timeout, cancellation, sid, inner, false)
+                    .await?;
+            let chunk = match incoming {
+                Incoming::Data(chunk) => chunk,
+                Incoming::RemoteCancelled(info) => return Err(Error::Cancelled(info)),
+            };
             assembled.extend_from_slice(&chunk);
             if total.is_none() && assembled.len() >= 8 {
                 total = Some(u64::from_be_bytes(
@@ -600,7 +772,20 @@ async fn receive_normal(
                     Error::Protocol(i18n::text("session.response_length_overflow").to_string())
                 })?;
                 if assembled.len() == expected {
-                    return Ok(assembled.split_off(8));
+                    let body = assembled.split_off(8);
+                    if let Some(cancel) = decode_cancel(&body) {
+                        return Err(Error::Cancelled(crate::cancellation::CancellationInfo {
+                            sid: cancel
+                                .session_id
+                                .and_then(|value| u32::try_from(value).ok())
+                                .unwrap_or(sid),
+                            origin: crate::cancellation::CancellationOrigin::Remote {
+                                error_code: cancel.error_code,
+                            },
+                            connection_closed: false,
+                        }));
+                    }
+                    return Ok(body);
                 }
                 if assembled.len() > expected {
                     return Err(Error::Protocol(
@@ -611,6 +796,52 @@ async fn receive_normal(
         }
     };
     timeout(request_timeout, future)
+        .await
+        .map_err(|_| Error::Timeout(i18n::text("session.wait_response").to_string()))?
+}
+
+async fn receive_incoming(
+    receiver: &mut ChunkReceiver,
+    request_timeout: Duration,
+    cancellation: Option<&crate::cancellation::CancellationToken>,
+    sid: u32,
+    inner: &Arc<SessionInner>,
+    close_connection_on_cancel: bool,
+) -> Result<Incoming> {
+    let receive = async {
+        let item = if let Some(token) = cancellation {
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => {
+                    inner.pending.lock().await.remove(&sid);
+                    if close_connection_on_cancel {
+                        inner.fail_connection().await;
+                    }
+                    let flag_sent = if close_connection_on_cancel {
+                        false
+                    } else {
+                        inner.cancel(sid).await.is_ok()
+                    };
+                    return Err(Error::Cancelled(crate::cancellation::CancellationInfo {
+                        sid,
+                        origin: crate::cancellation::CancellationOrigin::Local { flag_sent },
+                        connection_closed: close_connection_on_cancel,
+                    }));
+                }
+                item = receiver.recv() => item,
+            }
+        } else {
+            receiver.recv().await
+        };
+        match item {
+            Some(Ok(incoming)) => Ok(incoming),
+            Some(Err(error)) => Err(error),
+            None => Err(Error::Transport(
+                i18n::text("session.response_closed").to_string(),
+            )),
+        }
+    };
+    timeout(request_timeout, receive)
         .await
         .map_err(|_| Error::Timeout(i18n::text("session.wait_response").to_string()))?
 }
@@ -672,18 +903,36 @@ mod tests {
         }
     }
 
+    fn test_inner(request_timeout: Duration) -> Arc<SessionInner> {
+        let (writer, _receiver) = mpsc::channel(1);
+        Arc::new(SessionInner {
+            writer,
+            pending: Mutex::new(HashMap::new()),
+            next_sid: AtomicU32::new(0x8000_0001),
+            keys: Arc::new(SessionKeys::generate().unwrap()),
+            request_timeout,
+            closed: Arc::new(AtomicBool::new(false)),
+            wire_log: None,
+            serial: "test".to_string(),
+            events: StdMutex::new(Some(event_channel())),
+        })
+    }
+
     #[tokio::test]
     async fn normal_response_prefix_can_span_chunks() {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let body = b"hello";
         sender
-            .send(Ok((body.len() as u64).to_be_bytes()[..3].to_vec()))
+            .send(Ok(Incoming::Data(
+                (body.len() as u64).to_be_bytes()[..3].to_vec(),
+            )))
             .unwrap();
         let mut second = (body.len() as u64).to_be_bytes()[3..].to_vec();
         second.extend_from_slice(body);
-        sender.send(Ok(second)).unwrap();
+        sender.send(Ok(Incoming::Data(second))).unwrap();
+        let inner = test_inner(Duration::from_secs(1));
         assert_eq!(
-            receive_normal(&mut receiver, Duration::from_secs(1))
+            receive_normal(&mut receiver, Duration::from_secs(1), None, 1, &inner)
                 .await
                 .expect("response"),
             body
@@ -695,12 +944,94 @@ mod tests {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let mut bytes = 1_u64.to_be_bytes().to_vec();
         bytes.extend_from_slice(b"xx");
-        sender.send(Ok(bytes)).unwrap();
+        sender.send(Ok(Incoming::Data(bytes))).unwrap();
+        let inner = test_inner(Duration::from_secs(1));
         assert!(
-            receive_normal(&mut receiver, Duration::from_secs(1))
+            receive_normal(&mut receiver, Duration::from_secs(1), None, 1, &inner)
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn local_request_cancellation_sends_target_sid_flag() {
+        let (writer, mut commands) = mpsc::channel(1);
+        let inner = Arc::new(SessionInner {
+            writer,
+            pending: Mutex::new(HashMap::new()),
+            next_sid: AtomicU32::new(0x8000_0001),
+            keys: Arc::new(SessionKeys::generate().unwrap()),
+            request_timeout: Duration::from_secs(1),
+            closed: Arc::new(AtomicBool::new(false)),
+            wire_log: None,
+            serial: "test".to_string(),
+            events: StdMutex::new(Some(event_channel())),
+        });
+        let (sender, mut receiver) = mpsc::unbounded_channel::<Result<Incoming>>();
+        let token = crate::cancellation::CancellationToken::new();
+        let receive_inner = Arc::clone(&inner);
+        let receive_token = token.clone();
+        let task = tokio::spawn(async move {
+            receive_normal(
+                &mut receiver,
+                Duration::from_secs(1),
+                Some(&receive_token),
+                0x8000_0002,
+                &receive_inner,
+            )
+            .await
+        });
+        drop(sender);
+        token.cancel();
+
+        let command = commands.recv().await.expect("cancel command");
+        assert_eq!(command.flag, 2);
+        assert_eq!(command.payload, 0x8000_0002_u32.to_be_bytes());
+        command.completion.send(Ok(Vec::new())).unwrap();
+
+        let error = task.await.unwrap().expect_err("cancelled");
+        assert!(matches!(
+            error,
+            Error::Cancelled(crate::cancellation::CancellationInfo {
+                sid: 0x8000_0002,
+                origin: crate::cancellation::CancellationOrigin::Local { flag_sent: true },
+                connection_closed: false,
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn remote_cancel_response_is_not_decoded_as_success() {
+        let (sender, mut receiver) = mpsc::unbounded_channel::<Result<Incoming>>();
+        let body = crate::protocol::proto::SspCancelRequest {
+            r#type: Some(SspRequestType::CancelRequest as i32),
+            session_id: Some(0x8000_0002),
+            error_code: Some(1),
+        }
+        .encode_to_vec();
+        let mut framed = (body.len() as u64).to_be_bytes().to_vec();
+        framed.extend_from_slice(&body);
+        sender.send(Ok(Incoming::Data(framed))).unwrap();
+        let inner = test_inner(Duration::from_secs(1));
+        let error = receive_normal(
+            &mut receiver,
+            Duration::from_secs(1),
+            None,
+            0x8000_0002,
+            &inner,
+        )
+        .await
+        .expect_err("remote cancellation");
+        assert!(matches!(
+            error,
+            Error::Cancelled(crate::cancellation::CancellationInfo {
+                sid: 0x8000_0002,
+                origin: crate::cancellation::CancellationOrigin::Remote {
+                    error_code: Some(1)
+                },
+                connection_closed: false,
+            })
+        ));
     }
 
     #[tokio::test]
@@ -724,6 +1055,8 @@ mod tests {
             request_timeout: Duration::from_millis(20),
             closed: Arc::new(AtomicBool::new(false)),
             wire_log: None,
+            serial: "test".to_string(),
+            events: StdMutex::new(Some(event_channel())),
         });
         let error = inner
             .send(0x8000_0002, 1, b"blocked")
@@ -754,6 +1087,8 @@ mod tests {
             request_timeout: Duration::from_secs(5),
             closed,
             wire_log: None,
+            serial: "test".to_string(),
+            events: StdMutex::new(Some(event_channel())),
         });
         let payload = vec![0x5a; MAX_UPSTREAM_PAYLOAD];
         let send_inner = Arc::clone(&inner);
@@ -864,6 +1199,7 @@ mod tests {
             Duration::from_secs(60),
             None,
             &AdbRawKeyExchange,
+            "test".to_string(),
         )
         .await
         .expect("session");

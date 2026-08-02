@@ -33,7 +33,7 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
   - **局域网通道**：Bonjour/mDNS 发现（`_handshaker_ssp._tcp` 全记录 + SRV 端口实测）、WiFi 握手与
     信任（TRUST_REMOVE / derived_key 重连免弹窗）、局域网传输（数据 MD5 一致）。
   - 验证工具见 `tools/capture/`。
-- Rust CLI `0.1.3` 首版已进入可运行阶段：当前实现 ADB 接入、设备信息、文件管理、单文件上传下载、剪贴板和常驻 shell。
+- Rust CLI `0.1.4` 已固化 ADB v0.1 基线，并增加 library 级强类型事件订阅和请求取消；CLI 当前实现 ADB 接入、设备信息、文件管理、单文件上传下载、剪贴板和常驻 shell。
 - WiFi 信任握手、USB AOA、媒体库、目录监控和照片同步仍属于后续里程碑。
 
 ## 命令行教程
@@ -512,7 +512,58 @@ handshaker --output jsonl fs push ./large.zip Download/large.zip
 JSON 字段、命令名、事件名和错误 code 固定使用英文，不随显示语言变化。普通诊断日志写入 stderr，
 不会混入 JSON stdout。
 
-### 14. 超时、日志和线路记录
+### 14. Library 事件订阅与取消
+
+CLI v0.1.4 的事件总线和取消模型首先面向 Rust library 使用。订阅不会自动打开手机端 callback；需要主动事件时，
+连接时显式启用对应的 `EventCallbacks`：
+
+```rust,no_run
+use handshaker_rust::{
+    ClientOptions, ConnectionTarget, EventCallbacks, EventFilter, HandShakerClient,
+};
+
+# #[tokio::main]
+# async fn main() -> Result<(), Box<dyn std::error::Error>> {
+let client = HandShakerClient::connect_with_event_callbacks(
+    ConnectionTarget::Adb { serial: None },
+    ClientOptions::default(),
+    EventCallbacks {
+        device_info: true,
+        ..EventCallbacks::default()
+    },
+).await?;
+let mut events = client.subscribe_events(EventFilter::all());
+let event = events.recv().await?;
+println!("{}", serde_json::to_string(&event)?);
+client.close().await?;
+# Ok(())
+# }
+```
+
+`ClientEvent` 使用稳定的英文 kind 名称，覆盖设备信息、剪贴板、媒体库、目录、文件变更、照片同步、同步监控和
+远端取消。`EventFilter::only([...])` 可筛选事件。订阅容量固定为 64；慢消费者先收到 `Lagged { missed }`，
+处理该错误后仍可继续读取后续事件。连接关闭后返回 `Closed`，不会自动重连。
+
+所有公开请求都保留原方法，并提供 `*_with_options` 版本：
+
+```rust,no_run
+use handshaker_rust::{CancellationToken, RequestOptions};
+
+# async fn example(client: &handshaker_rust::HandShakerClient) -> handshaker_rust::Result<()> {
+let token = CancellationToken::new();
+let options = RequestOptions::with_cancellation(token.clone());
+let task = client.ping_with_options(options);
+token.cancel();
+let _ = task.await;
+# Ok(())
+# }
+```
+
+普通请求和上传取消会发送 flag `2`，并返回 `ErrorCode::Cancelled`；手机主动取消会标记为 remote，退出码为 `6`。
+下载取消会删除临时文件、保留原目标文件并关闭当前 Session，之后需要重新连接。原有 `connect()` 默认关闭设备和媒体
+callback；使用 `connect_with_event_callbacks()` 才会显式启用它们。
+
+### 15. 超时、日志和线路记录
 
 设置 500 毫秒、45 秒或 2 分钟超时：
 
@@ -538,7 +589,7 @@ handshaker --wire-log ./handshaker-wire.log device info
 wire log 文件在 Unix 上使用 `0600` 权限，但内容仍可能包含文件数据和剪贴板正文。不要上传、提交或
 公开分享未经清理的线路日志。
 
-### 15. 退出码
+### 16. 退出码
 
 | 退出码 | 含义 |
 |---:|---|
@@ -563,7 +614,7 @@ else
 fi
 ```
 
-### 16. 常见问题
+### 17. 常见问题
 
 #### 找不到 `cargo`
 
@@ -614,7 +665,7 @@ adb forward --list
 
 不要自动删除无法确认归属的 forward。
 
-### 17. 当前 CLI 尚未支持
+### 18. 当前 CLI 尚未支持
 
 - WiFi/Bonjour 发现与信任连接；
 - USB AOA；
@@ -628,4 +679,4 @@ adb forward --list
 
 > `GET_DEVICE_INFO` 中向手机报告的主机兼容身份固定为原版 macOS HandShaker
 > `2.5.6 / 408`，用于通过手机端最低主机版本检查；它与本项目自身的 CLI/Cargo
-> 版本 `0.1.3` 相互独立。
+> 版本 `0.1.4` 相互独立。

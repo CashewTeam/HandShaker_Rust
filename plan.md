@@ -1,6 +1,6 @@
 # HandShaker_Rust 后端现状与完整开发计划
 
-> 状态基线：2026-08-02，Cargo package `handshaker_rust 0.1.3`。
+> 状态基线：2026-08-02，Cargo package `handshaker_rust 0.1.4`。
 >
 > 本文只把已经存在于 Rust 代码中的能力标记为“已实现”。协议文档、proto schema 或抓包已经确认，
 > 但尚未形成正式 Rust API/CLI 的能力，仍标记为“未实现”。
@@ -88,10 +88,13 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 - ✅ 连接 Ready 后周期性发送心跳，上传和下载期间同样维持心跳。
 - ✅ 请求级超时、EOF、帧错误、写任务失败和主动关闭进入统一关闭路径。
 - ✅ QUIT 请求和 adb forward 清理。
-- 🟡 未匹配 sid 的完整普通消息能够被组装并进入内部事件队列，但目前只记录日志，没有公开为强类型
-  事件流。
-- 🟡 请求对象被丢弃时可以发送 flag 2 取消，但手机不会中断已经开始的下载裸流；当前没有完整的
-  公共取消令牌/API。
+- ✅ 未匹配 sid 的完整普通消息通过固定容量 64 的广播总线发布为强类型 `ClientEvent`，支持过滤、独立游标、
+  `Lagged` 和 `Closed`。
+- ✅ 设备、剪贴板、媒体、目录、文件变更、照片同步、同步监控和远端取消均有领域事件映射；无法安全判断时
+  只发布安全元数据 `UnknownEvent`。
+- ✅ 请求和上传支持 `CancellationToken`/`RequestOptions`；普通请求发送 flag 2 后保持连接，下载取消关闭当前
+  Session 并清理临时文件，远端取消与本地取消可区分。
+- ✅ `connect_with_event_callbacks` 显式控制初始设备、照片、音频和视频 callback，普通 `connect()` 保持关闭。
 
 ### 3.5 设备能力
 
@@ -156,6 +159,8 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 - ✅ 普通响应 8 字节长度跨帧、超长拒绝和下载裸流判别测试。
 - ✅ RSA 签名、错误签名、AES/enckey 和握手往返测试。
 - ✅ 写队列超时、调用方取消和 sid 请求路由测试。
+- ✅ 事件 field 1 存在/缺失解码、Unknown 安全元数据、过滤、多订阅者、Lagged 和 Closed 测试。
+- ✅ 本地 flag 2、远端取消识别、普通请求连接复用和下载取消临时文件清理测试。
 - ✅ 假 adb 的设备解析、超时、动态端口和精确清理测试。
 - ✅ CLI JSON envelope、中文帮助和 `device list` 无副作用测试。
 - ✅ Rust 源码 CJK 文案扫描，防止用户文本重新硬编码。
@@ -180,21 +185,21 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 | 12–14 | DOWNLOAD 请求、响应头、数据面 | ✅ 单文件全量下载；⬜ range/resume 未实现 |
 | 15–18 | UPLOAD 请求头、ready、数据面、完成 | ✅ 单文件上传 |
 | 19 | DELETE_FILE | ✅ 已实现 |
-| 20 | PHOTO_LIB_CHANGE | ⬜ 未实现强类型推送 |
-| 21 | AUDIO_LIB_CHANGE | ⬜ 未实现强类型推送 |
-| 22 | VIDEO_LIB_CHANGE | ⬜ 未实现强类型推送 |
+| 20 | PHOTO_LIB_CHANGE | ✅ library 强类型事件；查询 API 未实现 |
+| 21 | AUDIO_LIB_CHANGE | ✅ library 强类型事件；查询 API 未实现 |
+| 22 | VIDEO_LIB_CHANGE | ✅ library 强类型事件；查询 API 未实现 |
 | 23–25 | MONITOR_FOLDER 请求、确认、回调 | ⬜ 未实现 |
 | 26 | GET_CLIPBOARD | ✅ 已实现 |
 | 27 | POST_CLIPBOARD | ✅ 已实现 |
 | 28 | CLEAR_CLIPBOARD | ✅ 已实现 |
 | 29 | DELETE_CLIPBOARD | ✅ 已实现 |
-| 30 | CLIPBOARD_CHANGE | ⬜ 未实现强类型推送 |
+| 30 | CLIPBOARD_CHANGE | ✅ library 强类型事件；CLI watch 未实现 |
 | 31–34 | WiFi REQUEST_01/02 握手与信任 | ⬜ 未实现 |
 | 35 | QUIT | ✅ 已实现 |
-| 36 | CANCEL | 🟡 flag 2 内部取消已实现；公共取消语义未完成 |
-| 37 | PHOTO_SYNC | ⬜ 未实现 |
-| 38 | FILE_CHANGE | ⬜ 未实现 |
-| 39 | SYNC_MONITOR | ⬜ 未实现 |
+| 36 | CANCEL | ✅ 公共本地/远端取消模型和 flag 2 路由 |
+| 37 | PHOTO_SYNC | ✅ library 事件解码；同步请求 API 未实现 |
+| 38 | FILE_CHANGE | ✅ library 事件解码；同步状态机未实现 |
+| 39 | SYNC_MONITOR | ✅ library 事件解码；同步 API 未实现 |
 | 40–41 | UPDATE_FILE_INFO 请求/响应 | ⬜ 未实现 |
 
 ### 4.2 连接与信任
@@ -214,14 +219,13 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ### 4.3 主动推送与订阅
 
-- 🟡 Session 能组装未匹配 sid 的普通消息，但尚未解析并对外发布。
-- ⬜ 稳定的 `ClientEvent` 领域枚举和异步订阅 API。
-- ⬜ 设备信息变更回调。
-- ⬜ 照片、视频、音频库变更回调。
-- ⬜ 剪贴板变更回调。
-- ⬜ 目录监控和文件变更回调。
-- ⬜ 推送与历史请求 sid 碰撞的完整业务级测试。
-- ⬜ 慢消费者背压、事件队列溢出和断线重订阅策略。
+- ✅ `ClientEvent`、`EventKind`、`EventFilter` 和 `EventSubscription` 公共领域 API。
+- ✅ 64 容量广播、独立订阅游标、慢消费者 `Lagged`、主动关闭和连接关闭 `Closed` 行为。
+- ✅ 设备信息、剪贴板、照片/视频/音频、目录、FILE_CHANGE、PHOTO_SYNC、SYNC_MONITOR 和远端取消解码。
+- ✅ field 1 缺失时的唯一候选推断和歧义 `UnknownEvent` 安全元数据。
+- ✅ pending sid 优先路由、历史 sid 复用和下载裸流冲突保护。
+- 🟡 CLI 尚未提供 directory/media/sync watch；M1 只完成 library 事件基础。
+- ⬜ 断线后的显式重新订阅策略由后续 watch/API 里程碑定义；当前不自动重连。
 
 ### 4.4 文件与传输扩展
 
@@ -269,12 +273,12 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ## 5. 当前部分实现与已知限制
 
-1. **主动事件尚不可消费**：未匹配 sid 消息只进入内部队列并记录日志，不能支撑监控和同步。
-2. **取消不是远端强中断**：flag 2 不会停止手机已经开始的下载流；下载 Ctrl-C 必须关闭连接。
+1. **事件只在 library 可消费**：CLI 尚未提供目录、媒体或同步 watch 命令；事件总线本身不隐式开启手机 callback。
+2. **取消不是远端强中断**：flag 2 不会停止手机已经开始的下载流；下载取消必须关闭当前连接。
 3. **传输仅限单文件全量模式**：没有目录、多文件、range、resume 或任务恢复。
 4. **`stat` 不是独立协议命令**：通过根目录信息或父目录 `list_dir` 查找，性能和边界依赖目录列表。
 5. **信任状态只是数据结构预留**：`state.json` 的 trust map 尚未接入任何连接流程。
-6. **媒体 callback 全部关闭**：设备信息请求中的 photo/audio/video callback 标志当前为 false。
+6. **媒体 callback 默认关闭**：普通 `connect()` 保持旧行为；只有显式 `connect_with_event_callbacks()` 才会开启指定 callback。
 7. **删除的 `sync` 选项未形成同步功能**：公开 `DeleteOptions.sync` 只是映射协议字段。
 8. **JSON schema 仍是 v1 首版**：新增事件和批量任务前必须先设计兼容扩展，不能临时改变 envelope。
 9. **没有后台 daemon**：所有连接和任务随当前 CLI/library 进程结束，这是当前设计约束而非缺陷。
@@ -329,23 +333,26 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ### M1：公共取消模型与强类型事件总线
 
+> 状态：✅ 已完成（2026-08-02）；API 和行为文档见 `docs/16-m1-events-cancellation.md`。
+
 目标：为监控、WiFi 信任状态和同步提供统一异步基础。
 
-任务：
+已完成：
 
-- 定义不暴露 Prost 的 `ClientEvent`、`EventKind` 和订阅句柄。
-- 将未匹配 sid 的完整消息按预期类型解码并发布。
-- 对设备信息、剪贴板、媒体库、目录和同步事件建立明确路由。
-- 定义慢消费者、队列容量、溢出错误和连接关闭行为。
-- 引入请求取消句柄或 cancellation token，区分“停止等待”和“远端已取消”。
-- 下载取消继续采用关闭连接语义，并在 API 中明确报告。
-- 完善 sid 碰撞、历史 sid 复用、并发请求和事件插入测试。
+- 定义不暴露 Prost 的 `ClientEvent`、`EventKind`、`EventFilter` 和订阅句柄。
+- 将未匹配 sid 的完整消息按预期类型解码并发布，无法安全判定时只发布 `UnknownEvent` 元数据。
+- 对设备信息、剪贴板、媒体库、目录和同步事件建立明确路由，并保留 field 1 缺失的安全推断。
+- 定义 64 容量广播、独立游标、慢消费者 `Lagged` 和连接关闭 `Closed` 行为。
+- 引入 `CancellationToken`/`RequestOptions`，区分本地取消、手机取消、超时和协议错误。
+- 下载取消继续采用关闭连接语义，删除临时文件并保留原目标。
+- 增加事件过滤、多订阅者、队列溢出、事件解码、取消 flag 2 和 sid 路由测试。
 
 验收：
 
-- 消费者可以稳定订阅、过滤和停止事件流。
-- 任何事件都不会被误写入下载文件。
-- 队列溢出、取消、关闭和重连行为有确定结果。
+- 消费者可以稳定订阅、过滤和停止事件流；慢消费者不影响其他订阅者或普通请求。
+- 任何事件都不会被误写入下载文件；Unknown 事件不暴露原始 payload。
+- 队列溢出、取消和关闭行为有确定结果；不自动重连，重连策略留给后续功能。
+- 真机事件验证若无法在不扩大操作范围的情况下完成，必须在验收报告中明确记录。
 
 ### M2：WiFi 发现、连接与持久化信任
 
@@ -547,10 +554,10 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ## 10. 下一步建议
 
-建议接着执行 **M1 -> M2**：
+建议接着执行 **M2**：
 
-1. 将内部 unmatched event queue 升级为公共强类型事件总线，并完成取消模型；
-2. 再实现 WiFi Bonjour、REQUEST_01/02 和持久化信任。
+1. 保持 M1 ADB 事件/取消 API 稳定；
+2. 实现独立的 WiFi Bonjour、REQUEST_01/02 和持久化信任，不复用 ADB 裸握手。
 
 这样可以避免在媒体、监控和同步阶段重复改 Session，也能确保 WiFi 与 ADB 只在 connector/handshake
 层分叉，后续全部业务 API 保持复用。
@@ -563,3 +570,5 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 - `docs/13-verification-status.md`：协议结论的验证等级。
 - `docs/14-capture-validation.md`：真实抓包验证结果。
 - `proto/smartsync.proto`：完整 proto2 schema。
+- `docs/16-m1-events-cancellation.md`：M1 事件订阅与取消行为。
+- `docs/17-m1-device-validation.md`：M1 真机事件与清理验收。

@@ -22,7 +22,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
-use crate::client::{ClientOptions, ConnectionTarget, HandShakerClient};
+use crate::client::{ClientOptions, ConnectionTarget, EventCallbacks, HandShakerClient};
 use crate::protocol::crypto::KEY_TABLE;
 use crate::protocol::proto::*;
 
@@ -34,6 +34,7 @@ pub(crate) enum DownloadBehavior {
     Success,
     Md5Mismatch,
     Short,
+    Slow,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -48,6 +49,8 @@ pub(crate) enum UploadBehavior {
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct FakeSspConfig {
     pub(crate) minimal_device_info: bool,
+    pub(crate) send_device_event: bool,
+    pub(crate) delay_heartbeat: bool,
     pub(crate) partial_delete: bool,
     pub(crate) download: DownloadBehavior,
     pub(crate) upload: UploadBehavior,
@@ -92,7 +95,14 @@ impl FakeSsp {
     }
 
     pub(crate) async fn connect(&self) -> HandShakerClient {
-        HandShakerClient::connect_for_test(
+        self.connect_with_callbacks(EventCallbacks::default()).await
+    }
+
+    pub(crate) async fn connect_with_callbacks(
+        &self,
+        callbacks: EventCallbacks,
+    ) -> HandShakerClient {
+        HandShakerClient::connect_for_test_with_callbacks(
             ConnectionTarget::Adb {
                 serial: Some("FAKE123".to_string()),
             },
@@ -103,6 +113,7 @@ impl FakeSsp {
                 wire_log: None,
             },
             self.state_path.clone(),
+            callbacks,
         )
         .await
         .expect("fake SSP client connection")
@@ -202,6 +213,9 @@ async fn run_server(listener: TcpListener, config: FakeSspConfig) {
             write_normal(&mut stream, upload_sid, &response.encode_to_vec()).await;
             continue;
         }
+        if flag == 2 {
+            continue;
+        }
         if body.len() < 128 {
             break;
         }
@@ -215,6 +229,8 @@ async fn run_server(listener: TcpListener, config: FakeSspConfig) {
         };
         match request_type {
             SspRequestType::GetDeviceInfoRequest => {
+                let request =
+                    SspGetDeviceInfoRequest::decode(protobuf).expect("device info request");
                 let response = if config.minimal_device_info {
                     SspGetDeviceInfoResponse {
                         r#type: None,
@@ -239,9 +255,21 @@ async fn run_server(listener: TcpListener, config: FakeSspConfig) {
                     }
                 };
                 write_normal(&mut stream, sid, &response.encode_to_vec()).await;
+                if config.send_device_event && request.need_device_info_callback == Some(true) {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    let event = SspGetDeviceInfoResponse {
+                        r#type: Some(SspRequestType::GetDeviceInfoRequest as i32),
+                        phone_name: Some("pushed device".to_string()),
+                        ..Default::default()
+                    };
+                    write_normal(&mut stream, 0x9000_0001, &event.encode_to_vec()).await;
+                }
             }
             SspRequestType::HeartBeatRequest => {
                 let request = SspHeartBeatRequest::decode(protobuf).expect("heartbeat request");
+                if config.delay_heartbeat {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
                 let response = SspHeartBeatResponse {
                     r#type: None,
                     host_timestamp: request.host_timestamp,
@@ -357,6 +385,9 @@ async fn run_server(listener: TcpListener, config: FakeSspConfig) {
                 if matches!(config.download, DownloadBehavior::Short) {
                     write_raw(&mut stream, sid, &data[..data.len() - 2]).await;
                     return;
+                }
+                if matches!(config.download, DownloadBehavior::Slow) {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                 }
                 write_raw(&mut stream, sid, &data).await;
             }

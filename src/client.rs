@@ -13,11 +13,13 @@ use tokio::fs::{self, File};
 use tokio::io::AsyncReadExt;
 use uuid::Uuid;
 
+use crate::cancellation::RequestOptions;
 use crate::domain::{
     AdbDevice, ClipboardEntry, DeleteOptions, DeviceInfo, RemoteFile, TransferDirection,
     TransferOptions, TransferProgress,
 };
 use crate::error::{Error, Result};
+use crate::events::{EventFilter, EventSubscription};
 use crate::i18n;
 use crate::protocol::frame::{MAX_UPSTREAM_PAYLOAD, WireLog};
 use crate::protocol::handshake::AdbRawKeyExchange;
@@ -52,6 +54,19 @@ pub struct ClientOptions {
     pub wire_log: Option<PathBuf>,
     /// Path to the adb executable.
     pub adb_path: PathBuf,
+}
+
+/// Optional phone-side push callbacks enabled during the initial device-info request.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EventCallbacks {
+    /// Ask the phone to report device information changes.
+    pub device_info: bool,
+    /// Ask the phone to report photo-library changes.
+    pub photo_library: bool,
+    /// Ask the phone to report audio-library changes.
+    pub audio_library: bool,
+    /// Ask the phone to report video-library changes.
+    pub video_library: bool,
 }
 
 impl Default for ClientOptions {
@@ -117,13 +132,23 @@ impl HandShakerClient {
 
     /// Connect, complete the ADB raw-key handshake, and fetch device info.
     pub async fn connect(target: ConnectionTarget, options: ClientOptions) -> Result<Self> {
-        Self::connect_with_state(target, options, StateStore::discover()?).await
+        Self::connect_with_event_callbacks(target, options, EventCallbacks::default()).await
+    }
+
+    /// Connect with explicit phone-side push callback settings.
+    pub async fn connect_with_event_callbacks(
+        target: ConnectionTarget,
+        options: ClientOptions,
+        callbacks: EventCallbacks,
+    ) -> Result<Self> {
+        Self::connect_with_state(target, options, StateStore::discover()?, callbacks).await
     }
 
     async fn connect_with_state(
         target: ConnectionTarget,
         options: ClientOptions,
         state: StateStore,
+        callbacks: EventCallbacks,
     ) -> Result<Self> {
         let _state = state.load_or_create()?;
         let wire_log = options
@@ -145,6 +170,7 @@ impl HandShakerClient {
             options.heartbeat_interval,
             wire_log,
             &AdbRawKeyExchange,
+            serial.clone(),
         )
         .await?;
         let mut client = Self {
@@ -168,17 +194,26 @@ impl HandShakerClient {
                 phone_locked: None,
             },
         };
-        client.device = client.fetch_device_info().await?;
+        client.device = client.fetch_device_info(callbacks).await?;
         Ok(client)
     }
 
     #[cfg(test)]
-    pub(crate) async fn connect_for_test(
+    pub(crate) async fn connect_for_test_with_callbacks(
         target: ConnectionTarget,
         options: ClientOptions,
         state_path: PathBuf,
+        callbacks: EventCallbacks,
     ) -> Result<Self> {
-        Self::connect_with_state(target, options, StateStore::at(state_path)).await
+        Self::connect_with_state(target, options, StateStore::at(state_path), callbacks).await
+    }
+
+    /// Subscribe to typed unsolicited events from this connection.
+    pub fn subscribe_events(&self, filter: EventFilter) -> EventSubscription {
+        self.session
+            .as_ref()
+            .map(|session| session.subscribe_events(filter.clone()))
+            .unwrap_or_else(|| EventSubscription::closed(filter))
     }
 
     /// Return the device information fetched during connection.
@@ -193,13 +228,22 @@ impl HandShakerClient {
 
     /// Send one heartbeat and return its timing and timestamps.
     pub async fn ping(&self) -> Result<PingResult> {
+        self.ping_with_options(RequestOptions::default()).await
+    }
+
+    /// Send one heartbeat with optional cancellation.
+    pub async fn ping_with_options(&self, options: RequestOptions) -> Result<PingResult> {
         let request = SspHeartBeatRequest {
             r#type: Some(SspRequestType::HeartBeatRequest as i32),
             host_timestamp: Some(unix_seconds()),
         };
         let start = Instant::now();
-        let response =
-            SspHeartBeatResponse::decode(self.session()?.request(&request).await?.as_slice())?;
+        let response = SspHeartBeatResponse::decode(
+            self.session()?
+                .request_with_options(&request, options)
+                .await?
+                .as_slice(),
+        )?;
         Ok(PingResult {
             round_trip_ms: start.elapsed().as_millis(),
             host_timestamp: response.host_timestamp,
@@ -209,42 +253,97 @@ impl HandShakerClient {
 
     /// List files below a remote directory up to depth.
     pub async fn list_dir(&self, path: &str, depth: u32) -> Result<Vec<RemoteFile>> {
+        self.list_dir_with_options(path, depth, RequestOptions::default())
+            .await
+    }
+
+    /// List files below a remote directory with optional cancellation.
+    pub async fn list_dir_with_options(
+        &self,
+        path: &str,
+        depth: u32,
+        options: RequestOptions,
+    ) -> Result<Vec<RemoteFile>> {
         let request = SspGetDirFilesRequest {
             r#type: Some(SspRequestType::GetDirFilesRequest as i32),
             dir: Some(ssp_file(path, true, None)),
             maxdepth: Some(depth.max(1)),
         };
-        let response =
-            SspGetDirFilesResponse::decode(self.session()?.request(&request).await?.as_slice())?;
+        let response = SspGetDirFilesResponse::decode(
+            self.session()?
+                .request_with_options(&request, options)
+                .await?
+                .as_slice(),
+        )?;
         Ok(response.file.into_iter().map(remote_file).collect())
     }
 
     /// Count files below a remote directory with optional exclusion patterns.
     pub async fn file_count(&self, path: &str, depth: u32, exclusions: Vec<String>) -> Result<u64> {
+        self.file_count_with_options(path, depth, exclusions, RequestOptions::default())
+            .await
+    }
+
+    /// Count files with optional exclusion patterns and cancellation.
+    pub async fn file_count_with_options(
+        &self,
+        path: &str,
+        depth: u32,
+        exclusions: Vec<String>,
+        options: RequestOptions,
+    ) -> Result<u64> {
         let request = SspGetFileCountRequest {
             r#type: Some(SspRequestType::GetFileCountRequest as i32),
             dir: Some(ssp_file(path, true, None)),
             maxdepth: Some(depth.max(1)),
             exclusion_pattern: exclusions,
         };
-        let response =
-            SspGetFileCountResponse::decode(self.session()?.request(&request).await?.as_slice())?;
+        let response = SspGetFileCountResponse::decode(
+            self.session()?
+                .request_with_options(&request, options)
+                .await?
+                .as_slice(),
+        )?;
         Ok(response.count.unwrap_or(0))
     }
 
     /// Check whether a remote file path exists.
     pub async fn file_exists(&self, path: &str) -> Result<bool> {
+        self.file_exists_with_options(path, RequestOptions::default())
+            .await
+    }
+
+    /// Check whether a remote path exists with optional cancellation.
+    pub async fn file_exists_with_options(
+        &self,
+        path: &str,
+        options: RequestOptions,
+    ) -> Result<bool> {
         let request = SspFileExistRequest {
             r#type: Some(SspRequestType::GetFileExistRequest as i32),
             file: Some(ssp_file(path, false, None)),
         };
-        let response =
-            SspFileExistResponse::decode(self.session()?.request(&request).await?.as_slice())?;
+        let response = SspFileExistResponse::decode(
+            self.session()?
+                .request_with_options(&request, options)
+                .await?
+                .as_slice(),
+        )?;
         Ok(response.exist.unwrap_or(false))
     }
 
     /// Read metadata for a remote path.
     pub async fn stat(&self, path: &str) -> Result<Option<RemoteFile>> {
+        self.stat_with_options(path, RequestOptions::default())
+            .await
+    }
+
+    /// Read metadata with optional cancellation.
+    pub async fn stat_with_options(
+        &self,
+        path: &str,
+        options: RequestOptions,
+    ) -> Result<Option<RemoteFile>> {
         if path == self.root_path() {
             return Ok(Some(RemoteFile {
                 path: path.to_string(),
@@ -259,7 +358,7 @@ impl HandShakerClient {
         }
         let (parent, _) = split_remote_path(path)?;
         Ok(self
-            .list_dir(parent, 1)
+            .list_dir_with_options(parent, 1, options)
             .await?
             .into_iter()
             .find(|file| file.path == path))
@@ -267,12 +366,26 @@ impl HandShakerClient {
 
     /// Create a remote directory and return its metadata.
     pub async fn create_dir(&self, path: &str) -> Result<RemoteFile> {
+        self.create_dir_with_options(path, RequestOptions::default())
+            .await
+    }
+
+    /// Create a remote directory with optional cancellation.
+    pub async fn create_dir_with_options(
+        &self,
+        path: &str,
+        options: RequestOptions,
+    ) -> Result<RemoteFile> {
         let request = SspCreateFolderRequest {
             r#type: Some(SspRequestType::GetCreateFolderRequest as i32),
             file: Some(ssp_file(path, true, None)),
         };
-        let response =
-            SspCreateFolderResponse::decode(self.session()?.request(&request).await?.as_slice())?;
+        let response = SspCreateFolderResponse::decode(
+            self.session()?
+                .request_with_options(&request, options)
+                .await?
+                .as_slice(),
+        )?;
         ensure_remote_success(
             response.succeed,
             response.error_code,
@@ -286,13 +399,28 @@ impl HandShakerClient {
 
     /// Rename a remote file or directory.
     pub async fn rename(&self, source: &str, target: &str) -> Result<()> {
+        self.rename_with_options(source, target, RequestOptions::default())
+            .await
+    }
+
+    /// Rename a remote path with optional cancellation.
+    pub async fn rename_with_options(
+        &self,
+        source: &str,
+        target: &str,
+        options: RequestOptions,
+    ) -> Result<()> {
         let request = SspRenameFileRequest {
             r#type: Some(SspRequestType::GetRenameFileRequest as i32),
             source_file: Some(ssp_file(source, false, None)),
             target_file: Some(ssp_file(target, false, None)),
         };
-        let response =
-            SspRenameFileResponse::decode(self.session()?.request(&request).await?.as_slice())?;
+        let response = SspRenameFileResponse::decode(
+            self.session()?
+                .request_with_options(&request, options)
+                .await?
+                .as_slice(),
+        )?;
         ensure_remote_success(
             response.succeed,
             response.error_code,
@@ -306,6 +434,17 @@ impl HandShakerClient {
         paths: &[String],
         options: DeleteOptions,
     ) -> Result<Vec<RemoteFile>> {
+        self.delete_with_options(paths, options, RequestOptions::default())
+            .await
+    }
+
+    /// Delete remote paths with optional cancellation.
+    pub async fn delete_with_options(
+        &self,
+        paths: &[String],
+        options: DeleteOptions,
+        request_options: RequestOptions,
+    ) -> Result<Vec<RemoteFile>> {
         let request = SspDeleteFileRequest {
             r#type: Some(SspRequestType::GetDeleteFileRequest as i32),
             file: paths
@@ -315,8 +454,12 @@ impl HandShakerClient {
             is_sync: Some(options.sync),
             is_trash: Some(options.trash),
         };
-        let response =
-            SspDeleteFileResponse::decode(self.session()?.request(&request).await?.as_slice())?;
+        let response = SspDeleteFileResponse::decode(
+            self.session()?
+                .request_with_options(&request, request_options)
+                .await?
+                .as_slice(),
+        )?;
         ensure_remote_success(
             response.succeed,
             response.error_code,
@@ -332,6 +475,18 @@ impl HandShakerClient {
         remote: &str,
         local: &Path,
         options: TransferOptions,
+    ) -> Result<u64> {
+        self.download_with_options(remote, local, options, RequestOptions::default())
+            .await
+    }
+
+    /// Download one remote file with transfer and cancellation options.
+    pub async fn download_with_options(
+        &self,
+        remote: &str,
+        local: &Path,
+        options: TransferOptions,
+        request_options: RequestOptions,
     ) -> Result<u64> {
         if local.exists() && !options.overwrite {
             return Err(Error::LocalIo(i18n::format(
@@ -350,7 +505,10 @@ impl HandShakerClient {
             gzip: Some(false),
             is_sync: Some(false),
         };
-        let mut open = self.session()?.open(&request).await?;
+        let mut open = self
+            .session()?
+            .open_with_options(&request, request_options)
+            .await?;
         let header =
             SspDownloadFileResponseHeader::decode(open.receive_normal().await?.as_slice())?;
         if header.ready != Some(true) {
@@ -433,6 +591,18 @@ impl HandShakerClient {
         remote: &str,
         options: TransferOptions,
     ) -> Result<u64> {
+        self.upload_with_options(local, remote, options, RequestOptions::default())
+            .await
+    }
+
+    /// Upload one local file with transfer and cancellation options.
+    pub async fn upload_with_options(
+        &self,
+        local: &Path,
+        remote: &str,
+        options: TransferOptions,
+        request_options: RequestOptions,
+    ) -> Result<u64> {
         let metadata = fs::metadata(local).await.map_err(|error| {
             Error::LocalIo(i18n::format(
                 "client.read_failed",
@@ -445,7 +615,11 @@ impl HandShakerClient {
                 &[&local.display().to_string()],
             )));
         }
-        if !options.overwrite && self.file_exists(remote).await? {
+        if !options.overwrite
+            && self
+                .file_exists_with_options(remote, request_options.clone())
+                .await?
+        {
             return Err(Error::RemoteIo {
                 code: Some(SspFileIoError::FileIoTargetAlreadyExist as i32),
                 message: i18n::format("client.remote_target_exists", &[remote]),
@@ -459,7 +633,10 @@ impl HandShakerClient {
             gzip: Some(false),
             is_sync: Some(false),
         };
-        let mut open = self.session()?.open(&request).await?;
+        let mut open = self
+            .session()?
+            .open_with_options(&request, request_options)
+            .await?;
         let header = SspUploadFileResponseHeader::decode(open.receive_normal().await?.as_slice())?;
         if header.ready != Some(true) {
             open.finish().await;
@@ -517,12 +694,31 @@ impl HandShakerClient {
 
     /// Read and decompress the phone clipboard history.
     pub async fn clipboard_list(&self) -> Result<Vec<ClipboardEntry>> {
-        let entries = self.fetch_clipboards().await?;
+        self.clipboard_list_with_options(RequestOptions::default())
+            .await
+    }
+
+    /// Read and decompress clipboard history with optional cancellation.
+    pub async fn clipboard_list_with_options(
+        &self,
+        options: RequestOptions,
+    ) -> Result<Vec<ClipboardEntry>> {
+        let entries = self.fetch_clipboards(options).await?;
         entries.into_iter().map(decode_clipboard).collect()
     }
 
     /// Add a text entry to the phone clipboard.
     pub async fn clipboard_set(&self, text: &str) -> Result<()> {
+        self.clipboard_set_with_options(text, RequestOptions::default())
+            .await
+    }
+
+    /// Add a text entry with optional cancellation.
+    pub async fn clipboard_set_with_options(
+        &self,
+        text: &str,
+        options: RequestOptions,
+    ) -> Result<()> {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(text.as_bytes()).map_err(|error| {
             Error::LocalIo(i18n::format(
@@ -543,15 +739,29 @@ impl HandShakerClient {
                 mstimestamp: Some(unix_millis()),
             },
         };
-        let response =
-            SspPostClipboardResponse::decode(self.session()?.request(&request).await?.as_slice())?;
+        let response = SspPostClipboardResponse::decode(
+            self.session()?
+                .request_with_options(&request, options)
+                .await?
+                .as_slice(),
+        )?;
         ensure_remote_success(response.succeed, None, None)
     }
 
     /// Delete one clipboard entry by its millisecond timestamp.
     pub async fn clipboard_delete(&self, timestamp_ms: i64) -> Result<()> {
+        self.clipboard_delete_with_options(timestamp_ms, RequestOptions::default())
+            .await
+    }
+
+    /// Delete one clipboard entry with optional cancellation.
+    pub async fn clipboard_delete_with_options(
+        &self,
+        timestamp_ms: i64,
+        options: RequestOptions,
+    ) -> Result<()> {
         let clipboard = self
-            .fetch_clipboards()
+            .fetch_clipboards(options.clone())
             .await?
             .into_iter()
             .find(|item| item.mstimestamp == Some(timestamp_ms))
@@ -567,18 +777,31 @@ impl HandShakerClient {
             clipboard,
         };
         let response = SspDeleteClipboardResponse::decode(
-            self.session()?.request(&request).await?.as_slice(),
+            self.session()?
+                .request_with_options(&request, options)
+                .await?
+                .as_slice(),
         )?;
         ensure_remote_success(response.succeed, None, None)
     }
 
     /// Clear the phone clipboard history.
     pub async fn clipboard_clear(&self) -> Result<()> {
+        self.clipboard_clear_with_options(RequestOptions::default())
+            .await
+    }
+
+    /// Clear clipboard history with optional cancellation.
+    pub async fn clipboard_clear_with_options(&self, options: RequestOptions) -> Result<()> {
         let request = SspClearClipboardRequest {
             r#type: Some(SspRequestType::ClearClipboardRequest as i32),
         };
-        let response =
-            SspClearClipboardResponse::decode(self.session()?.request(&request).await?.as_slice())?;
+        let response = SspClearClipboardResponse::decode(
+            self.session()?
+                .request_with_options(&request, options)
+                .await?
+                .as_slice(),
+        )?;
         ensure_remote_success(response.succeed, None, None)
     }
 
@@ -597,15 +820,15 @@ impl HandShakerClient {
         session_result.and(cleanup_result)
     }
 
-    async fn fetch_device_info(&self) -> Result<DeviceInfo> {
+    async fn fetch_device_info(&self, callbacks: EventCallbacks) -> Result<DeviceInfo> {
         let request = SspGetDeviceInfoRequest {
             r#type: Some(SspRequestType::GetDeviceInfoRequest as i32),
             host_timestamp: Some(unix_seconds()),
             host_smart_sync_protocol_version: Some("1".to_string()),
-            need_device_info_callback: Some(false),
-            need_photo_library_callback: Some(false),
-            need_audio_library_callback: Some(false),
-            need_video_library_callback: Some(false),
+            need_device_info_callback: Some(callbacks.device_info),
+            need_photo_library_callback: Some(callbacks.photo_library),
+            need_audio_library_callback: Some(callbacks.audio_library),
+            need_video_library_callback: Some(callbacks.video_library),
             host_app_version: Some(COMPATIBLE_HOST_APP_VERSION.to_string()),
             host_min_client_version: Some("1.0.0".to_string()),
             host_type: Some(1),
@@ -632,12 +855,16 @@ impl HandShakerClient {
         })
     }
 
-    async fn fetch_clipboards(&self) -> Result<Vec<SspClipboard>> {
+    async fn fetch_clipboards(&self, options: RequestOptions) -> Result<Vec<SspClipboard>> {
         let request = SspGetClipboardRequest {
             r#type: Some(SspRequestType::GetClipboardRequest as i32),
         };
-        let response =
-            SspGetClipboardResponse::decode(self.session()?.request(&request).await?.as_slice())?;
+        let response = SspGetClipboardResponse::decode(
+            self.session()?
+                .request_with_options(&request, options)
+                .await?
+                .as_slice(),
+        )?;
         Ok(response.clipboard)
     }
 
@@ -825,6 +1052,7 @@ fn unix_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::{ClientEvent, EventKind};
     use crate::test_support::{DownloadBehavior, FakeSsp, FakeSspConfig, UploadBehavior};
 
     #[test]
@@ -961,6 +1189,132 @@ mod tests {
         let calls = fake.adb_calls();
         assert!(calls.contains("forward --remove tcp:"));
         assert!(!calls.contains("force-stop"));
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn explicit_callbacks_route_typed_device_events() {
+        let fake = FakeSsp::start(FakeSspConfig {
+            send_device_event: true,
+            ..Default::default()
+        })
+        .await;
+        let client = fake
+            .connect_with_callbacks(EventCallbacks {
+                device_info: true,
+                ..Default::default()
+            })
+            .await;
+        let mut events = client.subscribe_events(EventFilter::only([EventKind::DeviceInfoChanged]));
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("device event timeout")
+            .expect("device event");
+        let ClientEvent::DeviceInfoChanged(info) = event else {
+            panic!("device info event")
+        };
+        assert_eq!(info.name.as_deref(), Some("pushed device"));
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn client_request_token_cancels_with_flag_and_keeps_session_usable() {
+        let fake = FakeSsp::start(FakeSspConfig {
+            delay_heartbeat: true,
+            ..Default::default()
+        })
+        .await;
+        let client = fake.connect().await;
+        let token = crate::cancellation::CancellationToken::new();
+        let error = {
+            let request = client.ping_with_options(crate::cancellation::RequestOptions {
+                cancellation: Some(token.clone()),
+            });
+            tokio::pin!(request);
+            tokio::select! {
+                result = &mut request => result.expect_err("ping should be cancelled"),
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    token.cancel();
+                    request
+                        .as_mut()
+                        .await
+                        .expect_err("ping should be cancelled")
+                }
+            }
+        };
+        assert!(matches!(
+            error,
+            Error::Cancelled(crate::cancellation::CancellationInfo {
+                origin: crate::cancellation::CancellationOrigin::Local { flag_sent: true },
+                connection_closed: false,
+                ..
+            })
+        ));
+        assert!(client.ping().await.is_ok());
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn download_cancellation_closes_session_and_preserves_target() {
+        let fake = FakeSsp::start(FakeSspConfig {
+            download: DownloadBehavior::Slow,
+            ..Default::default()
+        })
+        .await;
+        let local = tempfile::tempdir().expect("local tempdir");
+        let target = local.path().join("target.txt");
+        std::fs::write(&target, b"keep").expect("target");
+        let client = fake.connect().await;
+        let token = crate::cancellation::CancellationToken::new();
+        let error = {
+            let request = client.download_with_options(
+                "/storage/emulated/0/test.txt",
+                &target,
+                TransferOptions {
+                    overwrite: true,
+                    ..Default::default()
+                },
+                crate::cancellation::RequestOptions {
+                    cancellation: Some(token.clone()),
+                },
+            );
+            tokio::pin!(request);
+            tokio::select! {
+                result = &mut request => result.expect_err("download should be cancelled"),
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    token.cancel();
+                    request
+                        .as_mut()
+                        .await
+                        .expect_err("download should be cancelled")
+                }
+            }
+        };
+        assert!(matches!(
+            error,
+            Error::Cancelled(crate::cancellation::CancellationInfo {
+                origin: crate::cancellation::CancellationOrigin::Local { .. },
+                connection_closed: true,
+                ..
+            })
+        ));
+        assert_eq!(
+            std::fs::read(&target).expect("target after cancel"),
+            b"keep"
+        );
+        assert!(
+            std::fs::read_dir(local.path())
+                .expect("local entries")
+                .filter_map(std::result::Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("handshaker-part"))
+        );
+        assert!(client.ping().await.is_err());
+        client.close().await.expect("close");
         fake.finish().await;
     }
 

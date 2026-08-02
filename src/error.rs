@@ -1,5 +1,6 @@
 use serde::Serialize;
 
+use crate::cancellation::CancellationInfo;
 use crate::i18n;
 
 /// Result type returned by the HandShaker library.
@@ -21,6 +22,7 @@ pub enum ErrorCode {
     LocalIo,
     ConfirmationRequired,
     Interrupted,
+    Cancelled,
 }
 
 #[derive(Debug)]
@@ -38,6 +40,7 @@ pub enum Error {
     LocalIo(String),
     ConfirmationRequired(String),
     Interrupted,
+    Cancelled(CancellationInfo),
 }
 
 impl std::fmt::Display for Error {
@@ -59,6 +62,17 @@ impl std::fmt::Display for Error {
                 i18n::format("error.confirmation_required", &[message])
             }
             Self::Interrupted => i18n::text("error.interrupted").to_string(),
+            Self::Cancelled(info) => {
+                let origin = match info.origin {
+                    crate::cancellation::CancellationOrigin::Local { .. } => {
+                        i18n::text("error.cancelled_local")
+                    }
+                    crate::cancellation::CancellationOrigin::Remote { .. } => {
+                        i18n::text("error.cancelled_remote")
+                    }
+                };
+                i18n::format("error.cancelled", &[&info.sid.to_string(), origin])
+            }
         };
         formatter.write_str(&message)
     }
@@ -82,6 +96,7 @@ impl Error {
             Self::LocalIo(_) => ErrorCode::LocalIo,
             Self::ConfirmationRequired(_) => ErrorCode::ConfirmationRequired,
             Self::Interrupted => ErrorCode::Interrupted,
+            Self::Cancelled(_) => ErrorCode::Cancelled,
         }
     }
 
@@ -96,6 +111,10 @@ impl Error {
             Self::LocalIo(_) => 7,
             Self::ConfirmationRequired(_) => 8,
             Self::Interrupted => 130,
+            Self::Cancelled(info) => match info.origin {
+                crate::cancellation::CancellationOrigin::Local { .. } => 130,
+                crate::cancellation::CancellationOrigin::Remote { .. } => 6,
+            },
         }
     }
 }
