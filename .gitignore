@@ -6,6 +6,9 @@
 # macOS Finder metadata.
 .DS_Store
 
+# Reasonix desktop metadata.
+/.reasonix/
+
 
 # Added by cargo
 

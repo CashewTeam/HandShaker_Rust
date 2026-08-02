@@ -1,0 +1,2 @@
+[permissions]
+allow = ["Bash=git -C /Users/con11/Documents/GitHub/HandShaker_Rust log --oneline -15 && echo \"---STATUS---\" && git -C /Users/con11/Documents/GitHub/HandShaker_Rust status --short"]
