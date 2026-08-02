@@ -8,6 +8,7 @@ use rsa::{Pkcs1v15Encrypt, Pkcs1v15Sign, RsaPrivateKey};
 use sha2::Sha256;
 
 use crate::error::{Error, Result};
+use crate::i18n;
 
 type Aes256CbcEncryptor = cbc::Encryptor<Aes256>;
 
@@ -24,12 +25,21 @@ pub(crate) struct SessionKeys {
 
 impl SessionKeys {
     pub fn generate() -> Result<Self> {
-        let private = RsaPrivateKey::new(&mut OsRng, 1024)
-            .map_err(|error| Error::Handshake(format!("生成 RSA-1024 密钥失败：{error}")))?;
+        let private = RsaPrivateKey::new(&mut OsRng, 1024).map_err(|error| {
+            Error::Handshake(i18n::format(
+                "crypto.rsa_generate_failed",
+                &[&error.to_string()],
+            ))
+        })?;
         let public_der = private
             .to_public_key()
             .to_pkcs1_der()
-            .map_err(|error| Error::Handshake(format!("编码 RSA 公钥失败：{error}")))?
+            .map_err(|error| {
+                Error::Handshake(i18n::format(
+                    "crypto.rsa_public_encode_failed",
+                    &[&error.to_string()],
+                ))
+            })?
             .as_bytes()
             .to_vec();
         Ok(Self {
@@ -46,7 +56,12 @@ impl SessionKeys {
         let digest = Sha256::digest(data);
         self.private
             .sign(Pkcs1v15Sign::new::<Sha256>(), &digest)
-            .map_err(|error| Error::Protocol(format!("RSA 签名失败：{error}")))
+            .map_err(|error| {
+                Error::Protocol(i18n::format(
+                    "crypto.rsa_sign_failed",
+                    &[&error.to_string()],
+                ))
+            })
     }
 
     pub fn decrypt_handshake_result(&self, encoded: &[u8]) -> Result<Vec<u8>> {
@@ -57,10 +72,20 @@ impl SessionKeys {
             .collect();
         let encrypted = base64::engine::general_purpose::STANDARD
             .decode(normalized)
-            .map_err(|error| Error::Handshake(format!("握手响应 Base64 无效：{error}")))?;
+            .map_err(|error| {
+                Error::Handshake(i18n::format(
+                    "crypto.handshake_base64_invalid",
+                    &[&error.to_string()],
+                ))
+            })?;
         self.private
             .decrypt(Pkcs1v15Encrypt, &encrypted)
-            .map_err(|error| Error::Handshake(format!("握手响应 RSA 解密失败：{error}")))
+            .map_err(|error| {
+                Error::Handshake(i18n::format(
+                    "crypto.handshake_decrypt_failed",
+                    &[&error.to_string()],
+                ))
+            })
     }
 
     #[cfg(test)]

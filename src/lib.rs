@@ -1,6 +1,7 @@
 mod client;
 mod domain;
 mod error;
+pub mod i18n;
 mod protocol;
 mod session;
 mod state;

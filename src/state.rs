@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::{Error, Result};
+use crate::i18n;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TrustRecord {
@@ -30,8 +31,9 @@ pub(crate) struct StateStore {
 
 impl StateStore {
     pub fn discover() -> Result<Self> {
-        let dirs = ProjectDirs::from("", "", "handshaker")
-            .ok_or_else(|| Error::Configuration("无法确定用户配置目录".to_string()))?;
+        let dirs = ProjectDirs::from("", "", "handshaker").ok_or_else(|| {
+            Error::Configuration(i18n::text("state.config_dir_missing").to_string())
+        })?;
         Ok(Self {
             path: dirs.config_dir().join("state.json"),
         })
@@ -41,15 +43,21 @@ impl StateStore {
         if self.path.exists() {
             set_path_permissions(&self.path)?;
             let bytes = fs::read(&self.path).map_err(|error| {
-                Error::Configuration(format!("读取 {} 失败：{error}", self.path.display()))
+                Error::Configuration(i18n::format(
+                    "state.read_failed",
+                    &[&self.path.display().to_string(), &error.to_string()],
+                ))
             })?;
             let state: State = serde_json::from_slice(&bytes).map_err(|error| {
-                Error::Configuration(format!("解析 {} 失败：{error}", self.path.display()))
+                Error::Configuration(i18n::format(
+                    "state.parse_failed",
+                    &[&self.path.display().to_string(), &error.to_string()],
+                ))
             })?;
             if state.schema_version != 1 {
-                return Err(Error::Configuration(format!(
-                    "不支持的状态文件版本 {}",
-                    state.schema_version
+                return Err(Error::Configuration(i18n::format(
+                    "state.version_unsupported",
+                    &[&state.schema_version.to_string()],
                 )));
             }
             return Ok(state);
@@ -68,25 +76,41 @@ impl StateStore {
         let parent = self
             .path
             .parent()
-            .ok_or_else(|| Error::Configuration("状态文件路径没有父目录".to_string()))?;
+            .ok_or_else(|| Error::Configuration(i18n::text("state.parent_missing").to_string()))?;
         fs::create_dir_all(parent).map_err(|error| {
-            Error::Configuration(format!("创建 {} 失败：{error}", parent.display()))
+            Error::Configuration(i18n::format(
+                "state.create_failed",
+                &[&parent.display().to_string(), &error.to_string()],
+            ))
         })?;
         set_directory_permissions(parent)?;
 
-        let bytes = serde_json::to_vec_pretty(state)
-            .map_err(|error| Error::Configuration(format!("序列化状态文件失败：{error}")))?;
+        let bytes = serde_json::to_vec_pretty(state).map_err(|error| {
+            Error::Configuration(i18n::format(
+                "state.serialize_failed",
+                &[&error.to_string()],
+            ))
+        })?;
         let mut options = OpenOptions::new();
         options.write(true).create(true).truncate(true);
         set_file_mode(&mut options);
         let mut file = options.open(&self.path).map_err(|error| {
-            Error::Configuration(format!("写入 {} 失败：{error}", self.path.display()))
+            Error::Configuration(i18n::format(
+                "state.write_failed",
+                &[&self.path.display().to_string(), &error.to_string()],
+            ))
         })?;
         file.write_all(&bytes).map_err(|error| {
-            Error::Configuration(format!("写入 {} 失败：{error}", self.path.display()))
+            Error::Configuration(i18n::format(
+                "state.write_failed",
+                &[&self.path.display().to_string(), &error.to_string()],
+            ))
         })?;
         file.sync_all().map_err(|error| {
-            Error::Configuration(format!("同步 {} 失败：{error}", self.path.display()))
+            Error::Configuration(i18n::format(
+                "state.sync_failed",
+                &[&self.path.display().to_string(), &error.to_string()],
+            ))
         })?;
         set_path_permissions(&self.path)?;
         Ok(())
@@ -105,8 +129,12 @@ fn set_file_mode(_options: &mut OpenOptions) {}
 #[cfg(unix)]
 fn set_directory_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .map_err(|error| Error::Configuration(format!("设置 {} 权限失败：{error}", path.display())))
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+        Error::Configuration(i18n::format(
+            "state.permission_failed",
+            &[&path.display().to_string(), &error.to_string()],
+        ))
+    })
 }
 
 #[cfg(not(unix))]
@@ -117,8 +145,12 @@ fn set_directory_permissions(_path: &Path) -> Result<()> {
 #[cfg(unix)]
 fn set_path_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .map_err(|error| Error::Configuration(format!("设置 {} 权限失败：{error}", path.display())))
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+        Error::Configuration(i18n::format(
+            "state.permission_failed",
+            &[&path.display().to_string(), &error.to_string()],
+        ))
+    })
 }
 
 #[cfg(not(unix))]

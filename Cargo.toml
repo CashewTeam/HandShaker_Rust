@@ -1,6 +1,6 @@
 [package]
 name = "handshaker_rust"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 build = "build.rs"
 
@@ -24,7 +24,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = { version = "0.10", features = ["oid"] }
 shell-words = "1"
-thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

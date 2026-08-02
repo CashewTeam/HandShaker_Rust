@@ -1,8 +1,7 @@
 mod cli;
-mod messages;
 mod output;
 
-use clap::{Parser, error::ErrorKind};
+use clap::error::ErrorKind;
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{Cli, OutputFormat, command_name};
@@ -11,7 +10,7 @@ use crate::output::render_error;
 #[tokio::main]
 async fn main() {
     let fallback_output = output_from_raw_args();
-    let cli = match Cli::try_parse() {
+    let cli = match Cli::try_parse_localized() {
         Ok(cli) => cli,
         Err(error)
             if matches!(
@@ -22,8 +21,10 @@ async fn main() {
             let _ = error.print();
             return;
         }
-        Err(error) => {
-            let app_error = handshaker_rust::Error::Usage(error.to_string());
+        Err(_error) => {
+            let app_error = handshaker_rust::Error::Usage(
+                handshaker_rust::i18n::text("cli.parse_error").to_string(),
+            );
             render_error(&app_error, "unknown", fallback_output);
             std::process::exit(app_error.exit_code());
         }
@@ -49,7 +50,7 @@ async fn main() {
             signal = tokio::signal::ctrl_c() => match signal {
                 Ok(()) => Err(handshaker_rust::Error::Interrupted),
                 Err(error) => Err(handshaker_rust::Error::LocalIo(
-                    format!("监听 Ctrl-C 失败：{error}"),
+                    handshaker_rust::i18n::format("error.ctrl_c", &[&error.to_string()]),
                 )),
             },
         }

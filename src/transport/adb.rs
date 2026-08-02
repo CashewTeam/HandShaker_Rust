@@ -11,6 +11,7 @@ use tokio::time::{Instant, sleep, timeout_at};
 
 use crate::domain::AdbDevice;
 use crate::error::{Error, Result};
+use crate::i18n;
 use crate::transport::{ConnectedTransport, TransportConnector};
 
 const PHONE_PORT: u16 = 10086;
@@ -75,9 +76,9 @@ impl TransportConnector for AdbConnector {
             Ok(port) => port,
             Err(error) => {
                 cleanup_new_forwards(&self.adb_path, &device.serial, &before, self.timeout).await?;
-                return Err(Error::Transport(format!(
-                    "无法解析 adb 分配的本地端口 {:?}：{error}",
-                    output.trim()
+                return Err(Error::Transport(i18n::format(
+                    "adb.port_parse_failed",
+                    &[&format!("{:?}", output.trim()), &error.to_string()],
                 )));
             }
         };
@@ -93,19 +94,20 @@ impl TransportConnector for AdbConnector {
             match TcpStream::connect(("127.0.0.1", port)).await {
                 Ok(stream) => break stream,
                 Err(error) if Instant::now() < deadline => {
-                    tracing::debug!(%error, port, "等待 ADB 转发端口就绪");
+                    tracing::debug!(%error, port, message = i18n::text("adb.forward_wait"));
                     sleep(Duration::from_millis(100)).await;
                 }
                 Err(error) => {
-                    return Err(Error::Transport(format!(
-                        "连接 ADB 转发端口 127.0.0.1:{port} 失败：{error}"
+                    return Err(Error::Transport(i18n::format(
+                        "adb.forward_connect_failed",
+                        &[&port.to_string(), &error.to_string()],
                     )));
                 }
             }
         };
-        stream
-            .set_nodelay(true)
-            .map_err(|error| Error::Transport(format!("设置 TCP_NODELAY 失败：{error}")))?;
+        stream.set_nodelay(true).map_err(|error| {
+            Error::Transport(i18n::format("adb.nodelay_failed", &[&error.to_string()]))
+        })?;
 
         Ok(ConnectedTransport {
             stream,
@@ -169,13 +171,18 @@ fn select_device(devices: Vec<AdbDevice>, requested: Option<&str>) -> Result<Adb
         return online
             .into_iter()
             .find(|device| device.serial == serial)
-            .ok_or_else(|| Error::DeviceSelection(format!("设备 {serial} 不在线或不存在")));
+            .ok_or_else(|| {
+                Error::DeviceSelection(i18n::format("adb.device_unavailable", &[serial]))
+            });
     }
     match online.len() {
-        0 => Err(Error::DeviceSelection("没有在线的 ADB 设备".to_string())),
+        0 => Err(Error::DeviceSelection(
+            i18n::text("adb.no_online_device").to_string(),
+        )),
         1 => Ok(online.into_iter().next().expect("one device")),
-        count => Err(Error::DeviceSelection(format!(
-            "检测到 {count} 台在线设备，请使用 --serial 指定"
+        count => Err(Error::DeviceSelection(i18n::format(
+            "adb.multiple_devices",
+            &[&count.to_string()],
         ))),
     }
 }
@@ -188,7 +195,12 @@ async fn run_adb(adb_path: &Path, args: &[&str], command_timeout: Duration) -> R
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| Error::AdbUnavailable(format!("{}：{error}", adb_path.display())))?;
+        .map_err(|error| {
+            Error::AdbUnavailable(i18n::format(
+                "adb.spawn_failed",
+                &[&adb_path.display().to_string(), &error.to_string()],
+            ))
+        })?;
     let mut stdout = child.stdout.take().expect("piped stdout");
     let mut stderr = child.stderr.take().expect("piped stderr");
     let mut stdout_task = tokio::spawn(async move {
@@ -201,15 +213,18 @@ async fn run_adb(adb_path: &Path, args: &[&str], command_timeout: Duration) -> R
     });
     let deadline = Instant::now() + command_timeout;
     let status = match timeout_at(deadline, child.wait()).await {
-        Ok(result) => {
-            result.map_err(|error| Error::Transport(format!("等待 adb 子进程失败：{error}")))?
-        }
+        Ok(result) => result.map_err(|error| {
+            Error::Transport(i18n::format("adb.wait_failed", &[&error.to_string()]))
+        })?,
         Err(_) => {
             stdout_task.abort();
             stderr_task.abort();
             let _ = child.kill().await;
             let _ = child.wait().await;
-            return Err(Error::Timeout(format!("adb {}", args.join(" "))));
+            return Err(Error::Timeout(i18n::format(
+                "adb.command_timeout",
+                &[&args.join(" ")],
+            )));
         }
     };
     let outputs = timeout_at(deadline, async {
@@ -223,15 +238,38 @@ async fn run_adb(adb_path: &Path, args: &[&str], command_timeout: Duration) -> R
         Err(_) => {
             stdout_task.abort();
             stderr_task.abort();
-            return Err(Error::Timeout(format!("收集 adb {} 输出", args.join(" "))));
+            return Err(Error::Timeout(i18n::format(
+                "adb.collect_timeout",
+                &[&args.join(" ")],
+            )));
         }
     };
     let stdout = stdout
-        .map_err(|error| Error::Transport(format!("读取 adb stdout 失败：{error}")))?
-        .map_err(|error| Error::Transport(format!("读取 adb stdout 失败：{error}")))?;
+        .map_err(|error| {
+            Error::Transport(i18n::format(
+                "adb.read_stdout_failed",
+                &[&error.to_string()],
+            ))
+        })?
+        .map_err(|error| {
+            Error::Transport(i18n::format(
+                "adb.read_stdout_failed",
+                &[&error.to_string()],
+            ))
+        })?;
     let stderr = stderr
-        .map_err(|error| Error::Transport(format!("读取 adb stderr 失败：{error}")))?
-        .map_err(|error| Error::Transport(format!("读取 adb stderr 失败：{error}")))?;
+        .map_err(|error| {
+            Error::Transport(i18n::format(
+                "adb.read_stderr_failed",
+                &[&error.to_string()],
+            ))
+        })?
+        .map_err(|error| {
+            Error::Transport(i18n::format(
+                "adb.read_stderr_failed",
+                &[&error.to_string()],
+            ))
+        })?;
     if !status.success() {
         let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&stdout).trim().to_string();
@@ -300,9 +338,9 @@ fn unique_added_forward(before: &HashSet<u16>, after: &HashSet<u16>) -> Result<O
         if added.is_empty() {
             return Ok(None);
         }
-        return Err(Error::Transport(format!(
-            "动态端口输出无效，且检测到 {} 个并发新增 forward；为避免误删未自动清理",
-            added.len()
+        return Err(Error::Transport(i18n::format(
+            "adb.forward_cleanup_ambiguous",
+            &[&added.len().to_string()],
         )));
     };
     Ok(Some(*port))

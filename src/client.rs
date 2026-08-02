@@ -18,6 +18,7 @@ use crate::domain::{
     TransferOptions, TransferProgress,
 };
 use crate::error::{Error, Result};
+use crate::i18n;
 use crate::protocol::frame::{MAX_UPSTREAM_PAYLOAD, WireLog};
 use crate::protocol::handshake::AdbRawKeyExchange;
 use crate::protocol::proto::*;
@@ -222,7 +223,7 @@ impl HandShakerClient {
         response
             .file
             .map(remote_file)
-            .ok_or_else(|| Error::Protocol("建目录响应缺少 file".to_string()))
+            .ok_or_else(|| Error::Protocol(i18n::text("client.mkdir_missing_file").to_string()))
     }
 
     pub async fn rename(&self, source: &str, target: &str) -> Result<()> {
@@ -272,9 +273,9 @@ impl HandShakerClient {
         options: TransferOptions,
     ) -> Result<u64> {
         if local.exists() && !options.overwrite {
-            return Err(Error::LocalIo(format!(
-                "本地目标 {} 已存在",
-                local.display()
+            return Err(Error::LocalIo(i18n::format(
+                "client.local_target_exists",
+                &[&local.display().to_string()],
             )));
         }
         let request = SspDownloadFileRequest {
@@ -293,12 +294,14 @@ impl HandShakerClient {
             SspDownloadFileResponseHeader::decode(open.receive_normal().await?.as_slice())?;
         if header.ready != Some(true) {
             open.finish().await;
-            return Err(remote_error(header.error_code, "手机未准备好下载"));
+            return Err(remote_error(
+                header.error_code,
+                i18n::text("client.download_not_ready"),
+            ));
         }
-        let total = header
-            .range
-            .and_then(|range| range.length)
-            .ok_or_else(|| Error::Protocol("下载响应缺少 range.length".to_string()))?;
+        let total = header.range.and_then(|range| range.length).ok_or_else(|| {
+            Error::Protocol(i18n::text("client.download_missing_length").to_string())
+        })?;
         if let Some(callback) = &options.progress {
             callback(TransferProgress {
                 direction: TransferDirection::Download,
@@ -309,7 +312,10 @@ impl HandShakerClient {
         let temporary = temporary_download_path(local)?;
         let mut temporary_guard = TemporaryDownload::new(temporary.clone());
         let mut file = File::create(&temporary).await.map_err(|error| {
-            Error::LocalIo(format!("创建 {} 失败：{error}", temporary.display()))
+            Error::LocalIo(i18n::format(
+                "client.create_failed",
+                &[&temporary.display().to_string(), &error.to_string()],
+            ))
         })?;
         let progress = options.progress.clone();
         let receive = open
@@ -331,21 +337,28 @@ impl HandShakerClient {
             }
         };
         file.sync_all().await.map_err(|error| {
-            Error::LocalIo(format!("同步 {} 失败：{error}", temporary.display()))
+            Error::LocalIo(i18n::format(
+                "client.sync_failed",
+                &[&temporary.display().to_string(), &error.to_string()],
+            ))
         })?;
         drop(file);
         if let Some(expected) = header.data_md5.filter(|value| !value.is_empty())
             && !expected.eq_ignore_ascii_case(&actual_md5)
         {
-            return Err(Error::Protocol(format!(
-                "下载 MD5 不一致：手机 {expected}，本地 {actual_md5}"
+            return Err(Error::Protocol(i18n::format(
+                "client.download_md5_mismatch",
+                &[&expected, &actual_md5],
             )));
         }
         fs::rename(&temporary, local).await.map_err(|error| {
-            Error::LocalIo(format!(
-                "将 {} 移动到 {} 失败：{error}",
-                temporary.display(),
-                local.display()
+            Error::LocalIo(i18n::format(
+                "client.move_failed",
+                &[
+                    &temporary.display().to_string(),
+                    &local.display().to_string(),
+                    &error.to_string(),
+                ],
             ))
         })?;
         temporary_guard.commit();
@@ -358,16 +371,22 @@ impl HandShakerClient {
         remote: &str,
         options: TransferOptions,
     ) -> Result<u64> {
-        let metadata = fs::metadata(local)
-            .await
-            .map_err(|error| Error::LocalIo(format!("读取 {} 失败：{error}", local.display())))?;
+        let metadata = fs::metadata(local).await.map_err(|error| {
+            Error::LocalIo(i18n::format(
+                "client.read_failed",
+                &[&local.display().to_string(), &error.to_string()],
+            ))
+        })?;
         if !metadata.is_file() {
-            return Err(Error::LocalIo(format!("{} 不是普通文件", local.display())));
+            return Err(Error::LocalIo(i18n::format(
+                "client.not_regular_file",
+                &[&local.display().to_string()],
+            )));
         }
         if !options.overwrite && self.file_exists(remote).await? {
             return Err(Error::RemoteIo {
                 code: Some(SspFileIoError::FileIoTargetAlreadyExist as i32),
-                message: format!("远端目标 {remote} 已存在"),
+                message: i18n::format("client.remote_target_exists", &[remote]),
             });
         }
         let (data_md5, size) = file_md5(local).await?;
@@ -382,11 +401,17 @@ impl HandShakerClient {
         let header = SspUploadFileResponseHeader::decode(open.receive_normal().await?.as_slice())?;
         if header.ready != Some(true) {
             open.finish().await;
-            return Err(remote_error(header.error_code, "手机拒绝上传"));
+            return Err(remote_error(
+                header.error_code,
+                i18n::text("client.upload_rejected"),
+            ));
         }
-        let mut file = File::open(local)
-            .await
-            .map_err(|error| Error::LocalIo(format!("打开 {} 失败：{error}", local.display())))?;
+        let mut file = File::open(local).await.map_err(|error| {
+            Error::LocalIo(i18n::format(
+                "client.open_failed",
+                &[&local.display().to_string(), &error.to_string()],
+            ))
+        })?;
         let mut buffer = vec![0_u8; MAX_UPSTREAM_PAYLOAD.min(1024 * 1024)];
         let mut transferred = 0_u64;
         if let Some(callback) = &options.progress {
@@ -398,7 +423,10 @@ impl HandShakerClient {
         }
         loop {
             let read = file.read(&mut buffer).await.map_err(|error| {
-                Error::LocalIo(format!("读取 {} 失败：{error}", local.display()))
+                Error::LocalIo(i18n::format(
+                    "client.read_failed",
+                    &[&local.display().to_string(), &error.to_string()],
+                ))
             })?;
             if read == 0 {
                 break;
@@ -419,7 +447,7 @@ impl HandShakerClient {
         if complete.canceled == Some(true) {
             return Err(Error::RemoteIo {
                 code: complete.error_code,
-                message: "上传被手机取消".to_string(),
+                message: i18n::text("client.upload_canceled").to_string(),
             });
         }
         Ok(size)
@@ -432,12 +460,18 @@ impl HandShakerClient {
 
     pub async fn clipboard_set(&self, text: &str) -> Result<()> {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder
-            .write_all(text.as_bytes())
-            .map_err(|error| Error::LocalIo(format!("压缩剪贴板失败：{error}")))?;
-        let content = encoder
-            .finish()
-            .map_err(|error| Error::LocalIo(format!("压缩剪贴板失败：{error}")))?;
+        encoder.write_all(text.as_bytes()).map_err(|error| {
+            Error::LocalIo(i18n::format(
+                "client.compress_clipboard_failed",
+                &[&error.to_string()],
+            ))
+        })?;
+        let content = encoder.finish().map_err(|error| {
+            Error::LocalIo(i18n::format(
+                "client.compress_clipboard_failed",
+                &[&error.to_string()],
+            ))
+        })?;
         let request = SspPostClipboardRequest {
             r#type: Some(SspRequestType::PostClipboardRequest as i32),
             clipboard: SspClipboard {
@@ -458,7 +492,10 @@ impl HandShakerClient {
             .find(|item| item.mstimestamp == Some(timestamp_ms))
             .ok_or_else(|| Error::RemoteIo {
                 code: None,
-                message: format!("未找到时间戳为 {timestamp_ms} 的剪贴板条目"),
+                message: i18n::format(
+                    "client.clipboard_entry_missing",
+                    &[&timestamp_ms.to_string()],
+                ),
             })?;
         let request = SspDeleteClipboardRequest {
             r#type: Some(SspRequestType::DeleteClipboardRequest as i32),
@@ -540,7 +577,7 @@ impl HandShakerClient {
     fn session(&self) -> Result<&Session> {
         self.session
             .as_ref()
-            .ok_or_else(|| Error::Transport("连接已经关闭".to_string()))
+            .ok_or_else(|| Error::Transport(i18n::text("client.connection_closed").to_string()))
     }
 }
 
@@ -576,7 +613,7 @@ fn ensure_remote_success(
     }
     Err(remote_error(
         code,
-        &message.unwrap_or_else(|| "手机端返回失败".to_string()),
+        &message.unwrap_or_else(|| i18n::text("client.remote_failed").to_string()),
     ))
 }
 
@@ -584,9 +621,9 @@ fn ensure_deleted_files_succeeded(files: &[SspFile]) -> Result<()> {
     if let Some(failed) = files.iter().find(|file| file.succeed == Some(false)) {
         return Err(Error::RemoteIo {
             code: failed.error_code,
-            message: format!(
-                "删除 {} 失败",
-                failed.path.as_deref().unwrap_or("<unknown>")
+            message: i18n::format(
+                "client.delete_failed",
+                &[failed.path.as_deref().unwrap_or("<unknown>")],
             ),
         });
     }
@@ -605,9 +642,12 @@ fn decode_clipboard(clipboard: SspClipboard) -> Result<ClipboardEntry> {
     let compressed = clipboard.content.unwrap_or_default();
     let mut decoder = GzDecoder::new(compressed.as_slice());
     let mut text = String::new();
-    decoder
-        .read_to_string(&mut text)
-        .map_err(|error| Error::Protocol(format!("解压剪贴板失败：{error}")))?;
+    decoder.read_to_string(&mut text).map_err(|error| {
+        Error::Protocol(i18n::format(
+            "client.decompress_clipboard_failed",
+            &[&error.to_string()],
+        ))
+    })?;
     Ok(ClipboardEntry {
         text,
         timestamp_ms: clipboard.mstimestamp.unwrap_or(0),
@@ -615,13 +655,19 @@ fn decode_clipboard(clipboard: SspClipboard) -> Result<ClipboardEntry> {
 }
 
 fn split_remote_path(path: &str) -> Result<(&str, &str)> {
-    let index = path
-        .rfind('/')
-        .ok_or_else(|| Error::Usage(format!("远端路径必须包含目录：{path}")))?;
+    let index = path.rfind('/').ok_or_else(|| {
+        Error::Usage(i18n::format(
+            "client.remote_path_directory_required",
+            &[path],
+        ))
+    })?;
     let parent = if index == 0 { "/" } else { &path[..index] };
     let name = &path[index + 1..];
     if name.is_empty() {
-        return Err(Error::Usage(format!("远端路径缺少文件名：{path}")));
+        return Err(Error::Usage(i18n::format(
+            "client.remote_path_name_required",
+            &[path],
+        )));
     }
     Ok((parent, name))
 }
@@ -631,7 +677,12 @@ fn temporary_download_path(local: &Path) -> Result<PathBuf> {
     let name = local
         .file_name()
         .and_then(|value| value.to_str())
-        .ok_or_else(|| Error::LocalIo(format!("本地路径 {} 缺少有效文件名", local.display())))?;
+        .ok_or_else(|| {
+            Error::LocalIo(i18n::format(
+                "client.local_path_name_required",
+                &[&local.display().to_string()],
+            ))
+        })?;
     Ok(parent.join(format!(".{name}.handshaker-part-{}", Uuid::new_v4())))
 }
 
@@ -662,17 +713,22 @@ impl Drop for TemporaryDownload {
 }
 
 async fn file_md5(path: &Path) -> Result<(String, u64)> {
-    let mut file = File::open(path)
-        .await
-        .map_err(|error| Error::LocalIo(format!("打开 {} 失败：{error}", path.display())))?;
+    let mut file = File::open(path).await.map_err(|error| {
+        Error::LocalIo(i18n::format(
+            "client.open_failed",
+            &[&path.display().to_string(), &error.to_string()],
+        ))
+    })?;
     let mut digest = Md5::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
     let mut total = 0_u64;
     loop {
-        let read = file
-            .read(&mut buffer)
-            .await
-            .map_err(|error| Error::LocalIo(format!("读取 {} 失败：{error}", path.display())))?;
+        let read = file.read(&mut buffer).await.map_err(|error| {
+            Error::LocalIo(i18n::format(
+                "client.read_failed",
+                &[&path.display().to_string(), &error.to_string()],
+            ))
+        })?;
         if read == 0 {
             break;
         }
@@ -717,13 +773,13 @@ mod tests {
     #[test]
     fn clipboard_round_trip_gzip() {
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all("测试".as_bytes()).unwrap();
+        encoder.write_all("sample".as_bytes()).unwrap();
         let entry = decode_clipboard(SspClipboard {
             content: Some(encoder.finish().unwrap()),
             mstimestamp: Some(42),
         })
         .unwrap();
-        assert_eq!(entry.text, "测试");
+        assert_eq!(entry.text, "sample");
         assert_eq!(entry.timestamp_ms, 42);
     }
 

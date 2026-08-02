@@ -13,6 +13,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{interval, timeout};
 
 use crate::error::{Error, Result};
+use crate::i18n;
 use crate::protocol::crypto::SessionKeys;
 use crate::protocol::frame::{WireDirection, WireLog, read_downstream, write_upstream};
 use crate::protocol::handshake::HandshakeStrategy;
@@ -57,7 +58,7 @@ impl OpenRequest {
     pub async fn receive_normal(&mut self) -> Result<Vec<u8>> {
         if self.phase == PHASE_DOWNLOAD_RAW {
             return Err(Error::Protocol(
-                "下载裸流开始后不能再按普通响应解码".to_string(),
+                i18n::text("session.raw_after_download").to_string(),
             ));
         }
         let result = receive_normal(&mut self.receiver, self.inner.request_timeout).await;
@@ -81,42 +82,52 @@ impl OpenRequest {
         let inner = Arc::clone(&self.inner);
         let result = async {
             let total = usize::try_from(total)
-                .map_err(|_| Error::Protocol("文件长度超出当前平台可处理范围".to_string()))?;
+                .map_err(|_| Error::Protocol(i18n::text("session.file_too_large").to_string()))?;
             let mut received = 0_usize;
             let mut digest = Md5::new();
             let mut discriminator = DownloadDiscriminator::default();
             while received < total {
                 let chunk = timeout(inner.request_timeout, self.receiver.recv())
                     .await
-                    .map_err(|_| Error::Timeout("接收文件数据块".to_string()))?
-                    .ok_or_else(|| Error::Transport("下载过程中连接已关闭".to_string()))??;
+                    .map_err(|_| {
+                        Error::Timeout(i18n::text("session.receive_file_chunk").to_string())
+                    })?
+                    .ok_or_else(|| {
+                        Error::Transport(i18n::text("session.download_closed").to_string())
+                    })??;
                 let remaining = total - received;
                 let Some(chunk) = discriminator.push(&chunk, remaining)? else {
                     continue;
                 };
-                let next_received = received
-                    .checked_add(chunk.len())
-                    .ok_or_else(|| Error::Protocol("下载计数溢出".to_string()))?;
+                let next_received = received.checked_add(chunk.len()).ok_or_else(|| {
+                    Error::Protocol(i18n::text("session.download_count_overflow").to_string())
+                })?;
                 if next_received > total {
-                    return Err(Error::Protocol(format!(
-                        "下载流超过声明长度：已收 {}，新块 {}，声明 {}",
-                        received,
-                        chunk.len(),
-                        total
+                    return Err(Error::Protocol(i18n::format(
+                        "session.download_too_long",
+                        &[
+                            &received.to_string(),
+                            &chunk.len().to_string(),
+                            &total.to_string(),
+                        ],
                     )));
                 }
-                writer
-                    .write_all(&chunk)
-                    .await
-                    .map_err(|error| Error::LocalIo(format!("写入下载文件失败：{error}")))?;
+                writer.write_all(&chunk).await.map_err(|error| {
+                    Error::LocalIo(i18n::format(
+                        "session.write_download_failed",
+                        &[&error.to_string()],
+                    ))
+                })?;
                 digest.update(&chunk);
                 received = next_received;
                 on_progress(received as u64);
             }
-            writer
-                .flush()
-                .await
-                .map_err(|error| Error::LocalIo(format!("刷新下载文件失败：{error}")))?;
+            writer.flush().await.map_err(|error| {
+                Error::LocalIo(i18n::format(
+                    "session.flush_download_failed",
+                    &[&error.to_string()],
+                ))
+            })?;
             Ok(format!("{:x}", digest.finalize()))
         }
         .await;
@@ -150,7 +161,7 @@ impl Drop for OpenRequest {
             runtime.spawn(async move {
                 inner.pending.lock().await.remove(&sid);
                 if let Err(error) = inner.cancel(sid).await {
-                    tracing::debug!(%error, sid = format_args!("{sid:#010x}"), "发送取消请求失败");
+                    tracing::debug!(%error, sid = format_args!("{sid:#010x}"), message = i18n::text("session.cancel_failed"));
                 }
             });
         }
@@ -262,7 +273,9 @@ impl SessionInner {
 
     async fn open_signed(self: &Arc<Self>, payload: &[u8]) -> Result<OpenRequest> {
         if self.closed.load(Ordering::SeqCst) {
-            return Err(Error::Transport("连接已经关闭".to_string()));
+            return Err(Error::Transport(
+                i18n::text("client.connection_closed").to_string(),
+            ));
         }
         let sid = self.next_sid();
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -302,10 +315,10 @@ impl SessionInner {
             self.writer
                 .send(command)
                 .await
-                .map_err(|_| Error::Transport("SSP 写任务已经关闭".to_string()))?;
+                .map_err(|_| Error::Transport(i18n::text("session.writer_closed").to_string()))?;
             response
                 .await
-                .map_err(|_| Error::Transport("SSP 写任务未返回结果".to_string()))?
+                .map_err(|_| Error::Transport(i18n::text("session.writer_no_result").to_string()))?
         };
         match timeout(self.request_timeout, send).await {
             Ok(Ok(_)) => {}
@@ -315,8 +328,9 @@ impl SessionInner {
             }
             Err(_) => {
                 self.fail_connection().await;
-                return Err(Error::Timeout(format!(
-                    "发送 SSP 帧 sid={sid:#010x} flag={flag}"
+                return Err(Error::Timeout(i18n::format(
+                    "session.send_frame",
+                    &[&format!("{sid:#010x}"), &flag.to_string()],
                 )));
             }
         };
@@ -352,7 +366,10 @@ fn spawn_writer(
             {
                 log.record(
                     WireDirection::Out,
-                    &format!("sid={:#010x} flag={}", command.sid, command.flag),
+                    &i18n::format(
+                        "wire.outgoing_frame",
+                        &[&format!("{:#010x}", command.sid), &command.flag.to_string()],
+                    ),
                     frame,
                 );
             }
@@ -382,7 +399,7 @@ fn spawn_reader(
                 Ok(value) => value,
                 Err(error) => {
                     if !inner.closed.load(Ordering::SeqCst) {
-                        tracing::debug!(%error, "SSP 读取任务结束");
+                        tracing::debug!(%error, message = i18n::text("session.reader_ended"));
                     }
                     inner.closed.store(true, Ordering::SeqCst);
                     inner.pending.lock().await.clear();
@@ -392,10 +409,14 @@ fn spawn_reader(
             if let Some(log) = &inner.wire_log {
                 log.record(
                     WireDirection::In,
-                    &format!("sid={sid:#010x} header"),
+                    &i18n::format("wire.incoming_header", &[&format!("{sid:#010x}")]),
                     &header,
                 );
-                log.record(WireDirection::In, &format!("sid={sid:#010x} chunk"), &chunk);
+                log.record(
+                    WireDirection::In,
+                    &i18n::format("wire.incoming_chunk", &[&format!("{sid:#010x}")]),
+                    &chunk,
+                );
             }
             let pending = inner.pending.lock().await.get(&sid).cloned();
             if let Some(pending) = pending {
@@ -408,7 +429,7 @@ fn spawn_reader(
                     Ok(Some(body)) => {
                         unmatched.remove(&sid);
                         if event_sender.try_send((sid, body)).is_err() {
-                            tracing::debug!("手机主动消息队列已满，关闭 SSP 连接");
+                            tracing::debug!(message = i18n::text("session.event_queue_full"));
                             inner.closed.store(true, Ordering::SeqCst);
                             inner.pending.lock().await.clear();
                             break;
@@ -416,7 +437,7 @@ fn spawn_reader(
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        tracing::debug!(sid = format_args!("{sid:#010x}"), %error, "手机主动消息无效");
+                        tracing::debug!(sid = format_args!("{sid:#010x}"), %error, message = i18n::text("session.event_invalid"));
                         unmatched.remove(&sid);
                     }
                 }
@@ -431,7 +452,7 @@ fn spawn_event_drain(mut receiver: mpsc::Receiver<(u32, Vec<u8>)>) -> JoinHandle
             tracing::debug!(
                 sid = format_args!("{sid:#010x}"),
                 length = body.len(),
-                "收到手机主动消息"
+                message = i18n::text("session.event_received")
             );
         }
     })
@@ -454,13 +475,13 @@ fn spawn_heartbeat(inner: Arc<SessionInner>, heartbeat_interval: Duration) -> Jo
             let mut request = match inner.open_signed(&payload).await {
                 Ok(request) => request,
                 Err(error) => {
-                    tracing::debug!(%error, "发送心跳失败");
+                    tracing::debug!(%error, message = i18n::text("session.heartbeat_send_failed"));
                     inner.closed.store(true, Ordering::SeqCst);
                     break;
                 }
             };
             if let Err(error) = request.receive_normal().await {
-                tracing::debug!(%error, "接收心跳失败");
+                tracing::debug!(%error, message = i18n::text("session.heartbeat_receive_failed"));
                 request.finish().await;
                 inner.closed.store(true, Ordering::SeqCst);
                 break;
@@ -481,22 +502,23 @@ impl NormalAccumulator {
         self.bytes.extend_from_slice(chunk);
         if self.total.is_none() && self.bytes.len() >= 8 {
             let total = u64::from_be_bytes(self.bytes[..8].try_into().expect("eight bytes"));
-            self.total = Some(
-                usize::try_from(total)
-                    .map_err(|_| Error::Protocol("主动消息长度超出平台范围".to_string()))?,
-            );
+            self.total = Some(usize::try_from(total).map_err(|_| {
+                Error::Protocol(i18n::text("session.event_length_too_large").to_string())
+            })?);
         }
         let Some(total) = self.total else {
             return Ok(None);
         };
-        let expected = total
-            .checked_add(8)
-            .ok_or_else(|| Error::Protocol("主动消息长度溢出".to_string()))?;
+        let expected = total.checked_add(8).ok_or_else(|| {
+            Error::Protocol(i18n::text("session.event_length_overflow").to_string())
+        })?;
         if self.bytes.len() == expected {
             return Ok(Some(self.bytes.split_off(8)));
         }
         if self.bytes.len() > expected {
-            return Err(Error::Protocol("主动消息超过声明长度".to_string()));
+            return Err(Error::Protocol(
+                i18n::text("session.event_too_long").to_string(),
+            ));
         }
         Ok(None)
     }
@@ -543,7 +565,7 @@ impl DownloadDiscriminator {
         }
 
         Err(Error::Protocol(
-            "下载裸流中出现普通消息长度包络，线路无法安全判别".to_string(),
+            i18n::text("session.download_ambiguous").to_string(),
         ))
     }
 
@@ -561,10 +583,9 @@ async fn receive_normal(
         let mut assembled = Vec::new();
         let mut total = None;
         loop {
-            let chunk = receiver
-                .recv()
-                .await
-                .ok_or_else(|| Error::Transport("响应到达前连接已关闭".to_string()))??;
+            let chunk = receiver.recv().await.ok_or_else(|| {
+                Error::Transport(i18n::text("session.response_closed").to_string())
+            })??;
             assembled.extend_from_slice(&chunk);
             if total.is_none() && assembled.len() >= 8 {
                 total = Some(u64::from_be_bytes(
@@ -572,23 +593,26 @@ async fn receive_normal(
                 ));
             }
             if let Some(total) = total {
-                let total = usize::try_from(total)
-                    .map_err(|_| Error::Protocol("响应长度超出平台范围".to_string()))?;
-                let expected = total
-                    .checked_add(8)
-                    .ok_or_else(|| Error::Protocol("响应长度溢出".to_string()))?;
+                let total = usize::try_from(total).map_err(|_| {
+                    Error::Protocol(i18n::text("session.response_length_too_large").to_string())
+                })?;
+                let expected = total.checked_add(8).ok_or_else(|| {
+                    Error::Protocol(i18n::text("session.response_length_overflow").to_string())
+                })?;
                 if assembled.len() == expected {
                     return Ok(assembled.split_off(8));
                 }
                 if assembled.len() > expected {
-                    return Err(Error::Protocol("普通响应超过声明长度".to_string()));
+                    return Err(Error::Protocol(
+                        i18n::text("session.response_too_long").to_string(),
+                    ));
                 }
             }
         }
     };
     timeout(request_timeout, future)
         .await
-        .map_err(|_| Error::Timeout("等待 SSP 响应".to_string()))?
+        .map_err(|_| Error::Timeout(i18n::text("session.wait_response").to_string()))?
 }
 
 fn unix_seconds() -> u64 {

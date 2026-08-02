@@ -1,5 +1,6 @@
 use serde::Serialize;
-use thiserror::Error;
+
+use crate::i18n;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -20,33 +21,47 @@ pub enum ErrorCode {
     Interrupted,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum Error {
-    #[error("参数错误：{0}")]
     Usage(String),
-    #[error("配置错误：{0}")]
     Configuration(String),
-    #[error("设备选择失败：{0}")]
     DeviceSelection(String),
-    #[error("无法运行 adb：{0}")]
     AdbUnavailable(String),
-    #[error("连接失败：{0}")]
     Transport(String),
-    #[error("握手失败：{0}")]
     Handshake(String),
-    #[error("操作超时：{0}")]
     Timeout(String),
-    #[error("协议错误：{0}")]
     Protocol(String),
-    #[error("手机端操作失败（代码 {code:?}）：{message}")]
     RemoteIo { code: Option<i32>, message: String },
-    #[error("本地 I/O 错误：{0}")]
     LocalIo(String),
-    #[error("此操作需要明确确认：{0}")]
     ConfirmationRequired(String),
-    #[error("操作已中断")]
     Interrupted,
 }
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = match self {
+            Self::Usage(message) => i18n::format("error.usage", &[message]),
+            Self::Configuration(message) => i18n::format("error.configuration", &[message]),
+            Self::DeviceSelection(message) => i18n::format("error.device_selection", &[message]),
+            Self::AdbUnavailable(message) => i18n::format("error.adb_unavailable", &[message]),
+            Self::Transport(message) => i18n::format("error.transport", &[message]),
+            Self::Handshake(message) => i18n::format("error.handshake", &[message]),
+            Self::Timeout(message) => i18n::format("error.timeout", &[message]),
+            Self::Protocol(message) => i18n::format("error.protocol", &[message]),
+            Self::RemoteIo { code, message } => {
+                i18n::format("error.remote_io", &[&format!("{code:?}"), message])
+            }
+            Self::LocalIo(message) => i18n::format("error.local_io", &[message]),
+            Self::ConfirmationRequired(message) => {
+                i18n::format("error.confirmation_required", &[message])
+            }
+            Self::Interrupted => i18n::text("error.interrupted").to_string(),
+        };
+        formatter.write_str(&message)
+    }
+}
+
+impl std::error::Error for Error {}
 
 impl Error {
     pub fn code(&self) -> ErrorCode {
@@ -88,6 +103,6 @@ impl From<std::io::Error> for Error {
 
 impl From<prost::DecodeError> for Error {
     fn from(value: prost::DecodeError) -> Self {
-        Self::Protocol(format!("protobuf 解码失败：{value}"))
+        Self::Protocol(i18n::format("error.protobuf_decode", &[&value.to_string()]))
     }
 }

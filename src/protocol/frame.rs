@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::error::{Error, Result};
+use crate::i18n;
 
 pub(crate) const MAX_UPSTREAM_PAYLOAD: usize = 0x40_0000;
 pub(crate) const MAX_DOWNSTREAM_CHUNK: usize = 32_761;
@@ -26,7 +27,10 @@ impl WireLog {
         options.create(true).truncate(true).write(true);
         set_mode(&mut options);
         let file = options.open(path).map_err(|error| {
-            Error::LocalIo(format!("创建线路日志 {} 失败：{error}", path.display()))
+            Error::LocalIo(i18n::format(
+                "frame.wire_log_create_failed",
+                &[&path.display().to_string(), &error.to_string()],
+            ))
         })?;
         set_file_permissions(&file, path)?;
         Ok(Self {
@@ -40,7 +44,14 @@ impl WireLog {
             WireDirection::In => "<<",
         };
         if let Ok(mut file) = self.file.lock() {
-            let _ = writeln!(file, "{direction} {note} len={}", data.len());
+            let _ = writeln!(
+                file,
+                "{}",
+                i18n::format(
+                    "wire.record_header",
+                    &[direction, note, &data.len().to_string()],
+                )
+            );
             for chunk in data.chunks(32) {
                 for byte in chunk {
                     let _ = write!(file, "{byte:02x} ");
@@ -66,7 +77,10 @@ fn set_file_permissions(file: &std::fs::File, path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     file.set_permissions(std::fs::Permissions::from_mode(0o600))
         .map_err(|error| {
-            Error::LocalIo(format!("设置线路日志 {} 权限失败：{error}", path.display()))
+            Error::LocalIo(i18n::format(
+                "frame.wire_log_permission_failed",
+                &[&path.display().to_string(), &error.to_string()],
+            ))
         })
 }
 
@@ -77,10 +91,12 @@ fn set_file_permissions(_file: &std::fs::File, _path: &Path) -> Result<()> {
 
 pub(crate) fn encode_upstream(sid: u32, flag: u8, payload: &[u8]) -> Result<Vec<u8>> {
     if payload.len() > MAX_UPSTREAM_PAYLOAD {
-        return Err(Error::Protocol(format!(
-            "上行 payload {} 字节，超过 {} 字节限制",
-            payload.len(),
-            MAX_UPSTREAM_PAYLOAD
+        return Err(Error::Protocol(i18n::format(
+            "frame.upstream_too_large",
+            &[
+                &payload.len().to_string(),
+                &MAX_UPSTREAM_PAYLOAD.to_string(),
+            ],
         )));
     }
     let mut frame = Vec::with_capacity(9 + payload.len());
@@ -98,14 +114,12 @@ pub(crate) async fn write_upstream<W: AsyncWrite + Unpin>(
     payload: &[u8],
 ) -> Result<Vec<u8>> {
     let frame = encode_upstream(sid, flag, payload)?;
-    writer
-        .write_all(&frame)
-        .await
-        .map_err(|error| Error::Transport(format!("写入 SSP 帧失败：{error}")))?;
-    writer
-        .flush()
-        .await
-        .map_err(|error| Error::Transport(format!("刷新 SSP 帧失败：{error}")))?;
+    writer.write_all(&frame).await.map_err(|error| {
+        Error::Transport(i18n::format("frame.write_failed", &[&error.to_string()]))
+    })?;
+    writer.flush().await.map_err(|error| {
+        Error::Transport(i18n::format("frame.flush_failed", &[&error.to_string()]))
+    })?;
     Ok(frame)
 }
 
@@ -113,23 +127,27 @@ pub(crate) async fn read_downstream<R: AsyncRead + Unpin>(
     reader: &mut R,
 ) -> Result<(u32, Vec<u8>, [u8; 6])> {
     let mut header = [0_u8; 6];
-    reader
-        .read_exact(&mut header)
-        .await
-        .map_err(|error| Error::Transport(format!("读取下行帧头失败：{error}")))?;
+    reader.read_exact(&mut header).await.map_err(|error| {
+        Error::Transport(i18n::format(
+            "frame.header_read_failed",
+            &[&error.to_string()],
+        ))
+    })?;
     let sid = u32::from_be_bytes(header[..4].try_into().expect("four bytes"));
     let chunk_len = u16::from_be_bytes(header[4..].try_into().expect("two bytes")) as usize;
     if chunk_len > MAX_DOWNSTREAM_CHUNK {
-        return Err(Error::Protocol(format!(
-            "下行分块 {} 字节，超过 {} 字节限制",
-            chunk_len, MAX_DOWNSTREAM_CHUNK
+        return Err(Error::Protocol(i18n::format(
+            "frame.downstream_too_large",
+            &[&chunk_len.to_string(), &MAX_DOWNSTREAM_CHUNK.to_string()],
         )));
     }
     let mut chunk = vec![0_u8; chunk_len];
-    reader
-        .read_exact(&mut chunk)
-        .await
-        .map_err(|error| Error::Transport(format!("读取下行数据失败：{error}")))?;
+    reader.read_exact(&mut chunk).await.map_err(|error| {
+        Error::Transport(i18n::format(
+            "frame.data_read_failed",
+            &[&error.to_string()],
+        ))
+    })?;
     Ok((sid, chunk, header))
 }
 

@@ -3,10 +3,12 @@ use std::io::{self, Write};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use handshaker_rust::{DeviceInfo, Error, Result, TransferDirection, TransferProgress};
+use handshaker_rust::{
+    DeviceInfo, Error, Result, TransferDirection, TransferProgress,
+    i18n::{self, Localizer, MessageKey, ZhCn},
+};
 
 use crate::cli::OutputFormat;
-use crate::messages::{Localizer, MessageKey, ZhCn};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct DeviceSummary {
@@ -27,8 +29,12 @@ impl Outcome {
         Ok(Self {
             command,
             device: None,
-            data: serde_json::to_value(data)
-                .map_err(|error| Error::Protocol(format!("序列化输出失败：{error}")))?,
+            data: serde_json::to_value(data).map_err(|error| {
+                Error::Protocol(i18n::format(
+                    "error.serialize_output",
+                    &[&error.to_string()],
+                ))
+            })?,
             human,
             warnings: Vec::new(),
         })
@@ -65,7 +71,7 @@ pub(crate) fn render(outcome: &Outcome, format: OutputFormat) -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string(&envelope).map_err(|error| {
-                    Error::Protocol(format!("序列化 JSON 输出失败：{error}"))
+                    Error::Protocol(i18n::format("error.serialize_json", &[&error.to_string()]))
                 })?
             );
         }

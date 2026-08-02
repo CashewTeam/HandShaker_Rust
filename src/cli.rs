@@ -4,15 +4,15 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use handshaker_rust::{
     ClientOptions, ConnectionTarget, DeleteOptions, Error, HandShakerClient, RemoteFile, Result,
     TransferOptions, TransferProgress,
+    i18n::{self, Localizer, MessageKey, ZhCn},
 };
 
-use crate::messages::{Localizer, MessageKey, ZhCn};
 use crate::output::{Outcome, progress_percent, render, render_progress};
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -23,13 +23,9 @@ pub(crate) enum OutputFormat {
 }
 
 #[derive(Debug, Parser)]
-#[command(
-    name = "handshaker",
-    version,
-    about = "兼容 Smartisan HandShaker 的命令行客户端"
-)]
+#[command(name = "handshaker", version)]
 pub(crate) struct Cli {
-    #[arg(long, global = true, help = "指定 ADB 设备序列号")]
+    #[arg(long, global = true)]
     pub serial: Option<String>,
 
     #[arg(long, global = true, value_enum, default_value_t = OutputFormat::Human)]
@@ -38,17 +34,201 @@ pub(crate) struct Cli {
     #[arg(long, global = true, default_value = "30s", value_parser = parse_duration)]
     pub timeout: Duration,
 
-    #[arg(long, global = true, help = "确认危险操作")]
+    #[arg(long, global = true)]
     pub yes: bool,
 
     #[arg(short = 'v', long, global = true, action = ArgAction::Count)]
     pub verbose: u8,
 
-    #[arg(long, global = true, help = "记录完整 SSP 字节流（可能包含敏感内容）")]
+    #[arg(long, global = true)]
     pub wire_log: Option<PathBuf>,
 
     #[command(subcommand)]
     pub command: Command,
+}
+
+impl Cli {
+    pub(crate) fn try_parse_localized() -> std::result::Result<Self, clap::Error> {
+        Self::try_parse_localized_from(env::args_os())
+    }
+
+    pub(crate) fn try_parse_localized_from<I, T>(
+        arguments: I,
+    ) -> std::result::Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        let mut command = localized_command();
+        let mut matches = command.try_get_matches_from_mut(arguments)?;
+        Self::from_arg_matches_mut(&mut matches)
+    }
+}
+
+fn localized_command() -> clap::Command {
+    let mut command = Cli::command()
+        .about(i18n::text("cli.about"))
+        .help_template(i18n::text("cli.help_template"))
+        .mut_arg("serial", |arg| arg.help(i18n::text("cli.serial")))
+        .mut_arg("output", |arg| {
+            arg.help(i18n::text("cli.output"))
+                .hide_default_value(true)
+                .hide_possible_values(true)
+        })
+        .mut_arg("timeout", |arg| {
+            arg.help(i18n::text("cli.timeout")).hide_default_value(true)
+        })
+        .mut_arg("yes", |arg| arg.help(i18n::text("cli.yes")))
+        .mut_arg("verbose", |arg| arg.help(i18n::text("cli.verbose")))
+        .mut_arg("wire_log", |arg| arg.help(i18n::text("cli.wire_log")));
+    command = add_localized_help(command, true);
+
+    localize_subcommand(&mut command, "device", "cli.command.device");
+    localize_subcommand(&mut command, "fs", "cli.command.fs");
+    localize_subcommand(&mut command, "clipboard", "cli.command.clipboard");
+    localize_subcommand(&mut command, "shell", "cli.command.shell");
+
+    if let Some(device) = command.find_subcommand_mut("device") {
+        localize_subcommand(device, "list", "cli.command.list");
+        localize_subcommand(device, "info", "cli.command.info");
+        localize_subcommand(device, "ping", "cli.command.ping");
+    }
+    if let Some(fs) = command.find_subcommand_mut("fs") {
+        for (name, key) in [
+            ("ls", "cli.command.ls"),
+            ("stat", "cli.command.stat"),
+            ("count", "cli.command.count"),
+            ("exists", "cli.command.exists"),
+            ("mkdir", "cli.command.mkdir"),
+            ("mv", "cli.command.mv"),
+            ("rm", "cli.command.rm"),
+            ("pull", "cli.command.pull"),
+            ("push", "cli.command.push"),
+        ] {
+            localize_subcommand(fs, name, key);
+        }
+    }
+    if let Some(clipboard) = command.find_subcommand_mut("clipboard") {
+        localize_subcommand(clipboard, "get", "cli.command.get");
+        localize_subcommand(clipboard, "set", "cli.command.set");
+        localize_subcommand(clipboard, "delete", "cli.command.delete");
+        localize_subcommand(clipboard, "clear", "cli.command.clear");
+    }
+    command
+}
+
+fn localize_subcommand(command: &mut clap::Command, name: &str, key: &str) {
+    if let Some(subcommand) = command.find_subcommand_mut(name) {
+        let mut localized = subcommand.clone().about(i18n::text(key));
+        let template = if localized.get_subcommands().next().is_some() {
+            "cli.help_template"
+        } else if localized.get_positionals().next().is_some() {
+            "cli.help_template_leaf"
+        } else {
+            "cli.help_template_options"
+        };
+        localized = localized.help_template(i18n::text(template));
+        localized = add_localized_help(localized, false);
+        localized = localize_arguments(localized);
+        localized = localize_command_arguments(localized, name);
+        *subcommand = localized;
+    }
+}
+
+fn localize_arguments(mut command: clap::Command) -> clap::Command {
+    if has_argument(&command, "serial") {
+        command = command.mut_arg("serial", |arg| arg.help(i18n::text("cli.serial")));
+    }
+    if has_argument(&command, "output") {
+        command = command.mut_arg("output", |arg| {
+            arg.help(i18n::text("cli.output"))
+                .hide_default_value(true)
+                .hide_possible_values(true)
+        });
+    }
+    if has_argument(&command, "timeout") {
+        command = command.mut_arg("timeout", |arg| {
+            arg.help(i18n::text("cli.timeout")).hide_default_value(true)
+        });
+    }
+    if has_argument(&command, "yes") {
+        command = command.mut_arg("yes", |arg| arg.help(i18n::text("cli.yes")));
+    }
+    if has_argument(&command, "verbose") {
+        command = command.mut_arg("verbose", |arg| arg.help(i18n::text("cli.verbose")));
+    }
+    if has_argument(&command, "wire_log") {
+        command = command.mut_arg("wire_log", |arg| arg.help(i18n::text("cli.wire_log")));
+    }
+    command
+}
+
+fn add_localized_help(mut command: clap::Command, include_version: bool) -> clap::Command {
+    command = command
+        .disable_help_flag(true)
+        .disable_help_subcommand(true)
+        .arg(
+            clap::Arg::new("help")
+                .short('h')
+                .long("help")
+                .help(i18n::text("cli.help"))
+                .action(ArgAction::Help),
+        );
+    if include_version {
+        command = command.disable_version_flag(true).arg(
+            clap::Arg::new("version")
+                .short('V')
+                .long("version")
+                .help(i18n::text("cli.version"))
+                .action(ArgAction::Version),
+        );
+    }
+    command
+}
+
+fn has_argument(command: &clap::Command, id: &str) -> bool {
+    command
+        .get_arguments()
+        .any(|argument| argument.get_id() == id)
+}
+
+fn localize_command_arguments(mut command: clap::Command, name: &str) -> clap::Command {
+    let arguments: &[(&str, &str)] = match name {
+        "ls" => &[("path", "cli.arg.path"), ("depth", "cli.arg.depth")],
+        "stat" | "exists" | "mkdir" => &[("path", "cli.arg.path")],
+        "count" => &[
+            ("path", "cli.arg.path"),
+            ("depth", "cli.arg.depth"),
+            ("exclusions", "cli.arg.exclusions"),
+        ],
+        "mv" => &[("source", "cli.arg.source"), ("target", "cli.arg.target")],
+        "rm" => &[
+            ("paths", "cli.arg.paths"),
+            ("recursive", "cli.arg.recursive"),
+            ("trash", "cli.arg.trash"),
+        ],
+        "pull" | "push" => &[
+            ("remote", "cli.arg.remote"),
+            ("local", "cli.arg.local"),
+            ("overwrite", "cli.arg.overwrite"),
+        ],
+        "set" => &[("text", "cli.arg.text"), ("stdin", "cli.arg.stdin")],
+        "delete" => &[("timestamp", "cli.arg.timestamp")],
+        _ => &[],
+    };
+    for (id, key) in arguments {
+        if has_argument(&command, id) {
+            command = command.mut_arg(*id, |arg| {
+                let arg = arg.help(i18n::text(key));
+                if *id == "depth" {
+                    arg.hide_default_value(true)
+                } else {
+                    arg
+                }
+            });
+        }
+    }
+    command
 }
 
 #[derive(Debug, Subcommand)]
@@ -599,10 +779,22 @@ async fn run_shell(cli: &Cli) -> Result<()> {
 
         let mut argv = vec!["handshaker".to_string()];
         argv.extend(words);
-        let parsed = match Cli::try_parse_from(argv) {
+        let parsed = match Cli::try_parse_localized_from(argv) {
             Ok(parsed) => parsed,
-            Err(error) => {
-                eprint!("{error}");
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                ) =>
+            {
+                let _ = error.print();
+                continue;
+            }
+            Err(_) => {
+                eprintln!(
+                    "{}",
+                    localizer.format(MessageKey::Error, &[i18n::text("cli.parse_error")],)
+                );
                 continue;
             }
         };
@@ -626,7 +818,9 @@ async fn run_shell(cli: &Cli) -> Result<()> {
                 OutputFormat::Human,
             ) => result,
             signal = tokio::signal::ctrl_c() => {
-                signal.map_err(|error| Error::LocalIo(format!("监听 Ctrl-C 失败：{error}")))?;
+                signal.map_err(|error| {
+                    Error::LocalIo(i18n::format("error.ctrl_c", &[&error.to_string()]))
+                })?;
                 if close_on_interrupt {
                     command_error = Some(Error::Interrupted);
                     break;
@@ -672,7 +866,7 @@ fn confirm(action: &str, yes: bool, format: OutputFormat) -> Result<()> {
         ));
     }
     let localizer = ZhCn;
-    print!("{action}。{}", localizer.text(MessageKey::ConfirmPrompt));
+    print!("{}", i18n::format("confirm.prompt_with_action", &[action]));
     io::stdout().flush()?;
     let mut answer = String::new();
     io::stdin().read_line(&mut answer)?;
@@ -884,8 +1078,23 @@ mod tests {
     }
 
     #[test]
+    fn localized_command_tree_parses_leaf_commands() {
+        let cli = Cli::try_parse_localized_from(["handshaker", "fs", "ls", "/sdcard"])
+            .expect("localized parse");
+        assert!(matches!(cli.command, Command::Fs(FsCommand::Ls { .. })));
+    }
+
+    #[test]
+    fn localized_leaf_help_uses_display_help() {
+        let error = Cli::try_parse_localized_from(["handshaker", "fs", "ls", "--help"])
+            .expect_err("help should stop parsing");
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp, "{error}");
+    }
+
+    #[test]
     fn json_dangerous_operation_requires_yes() {
-        let error = confirm("测试危险操作", false, OutputFormat::Json).expect_err("confirmation");
+        let error =
+            confirm("dangerous operation", false, OutputFormat::Json).expect_err("confirmation");
         assert_eq!(error.exit_code(), 8);
     }
 
