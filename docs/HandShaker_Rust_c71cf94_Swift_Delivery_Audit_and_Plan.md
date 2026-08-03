@@ -1247,7 +1247,7 @@ Swift wrapper 真机测试：
 29. **加入 fake-device FFI 成功路径测试**（未开始）
 30. **进行 Swift 真机验收**（未开始）
 
-## 后续跨平台
+## 后续跨平台（当前目标仅 macos）
 
 31. **Linux GTK Rust 示例直接依赖 Application**（未开始）
 32. **Windows cdylib 导出检查**（未开始）
