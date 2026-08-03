@@ -1,0 +1,6 @@
+// Module map so Swift can import the C ABI header.
+// Usage: swiftc -I crates/handshaker-ffi/include ...
+module HandShakerFFI {
+    header "handshaker_ffi.h"
+    export *
+}
