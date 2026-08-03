@@ -74,7 +74,10 @@ pub(crate) struct ActiveSession {
     /// `close_session`'s `Arc::try_unwrap` still succeeds.
     device_info: Arc<std::sync::RwLock<DeviceInfoDto>>,
     connected_at_ms: u64,
-    last_activity_at_ms: u64,
+    /// Completion time of the most recent request on this session (Phase D /
+    /// D5 §6.2): stored after every request finishes, so the snapshot value
+    /// reflects real activity instead of the connection time.
+    last_activity_at_ms: AtomicU64,
     /// `SessionState` discriminant (1=Connecting ..=5=Failed); transitions
     /// are atomic so disconnect/shutdown never race on it.
     state: AtomicU8,
@@ -96,7 +99,7 @@ impl ActiveSession {
                 .clone(),
             state,
             connected_at_ms: self.connected_at_ms,
-            last_activity_at_ms: Some(self.last_activity_at_ms),
+            last_activity_at_ms: Some(self.last_activity_at_ms.load(Ordering::Relaxed)),
         }
     }
 
@@ -106,6 +109,13 @@ impl ActiveSession {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    /// Record real activity on this session (Phase D / D5 §6.2): called
+    /// after every request finishes (success or failure) and when long
+    /// transfers start, so `last_activity_at_ms` reflects actual use.
+    pub(crate) fn record_activity(&self) {
+        self.last_activity_at_ms.store(now_ms(), Ordering::Relaxed);
     }
 }
 
@@ -429,7 +439,7 @@ impl HandShakerRuntime {
             device: reconciled_device,
             device_info: device_info_shared,
             connected_at_ms: now_ms(),
-            last_activity_at_ms: now_ms(),
+            last_activity_at_ms: AtomicU64::new(now_ms()),
             state: AtomicU8::new(SessionState::Ready as u8),
             event_task,
         });
@@ -905,7 +915,9 @@ impl HandShakerRuntime {
     /// directories -> `download_tree`/`upload_tree`, serial with the given
     /// concurrency; failures are aggregated, never aborting the rest).
     async fn start_batch_plan(&self, request: ExecuteFilePlanRequest) -> AppResult<TransferId> {
-        let client = self.session_client_arc(request.plan.session_id).await?;
+        let session = self.session_handle(request.plan.session_id).await?;
+        session.record_activity();
+        let client = session.client.clone();
         let direction = match request.plan.direction {
             FilePlanDirection::Download => TransferDirectionDto::Download,
             FilePlanDirection::Upload => TransferDirectionDto::Upload,
@@ -1189,7 +1201,9 @@ impl HandShakerRuntime {
     /// Start a background download; returns the transfer id immediately.
     pub async fn start_download(&self, request: DownloadRequest) -> AppResult<TransferId> {
         self.ensure_open()?;
-        let client = self.session_client(request.session_id).await?;
+        let session = self.session_handle(request.session_id).await?;
+        session.record_activity();
+        let client = session.client.clone();
         let remote = resolve_remote_path(client.root_path(), &request.remote_path);
         let snapshot = self.inner.transfers.snapshot_for(
             request.session_id,
@@ -1254,7 +1268,9 @@ impl HandShakerRuntime {
     /// Start a background upload; returns the transfer id immediately.
     pub async fn start_upload(&self, request: UploadRequest) -> AppResult<TransferId> {
         self.ensure_open()?;
-        let client = self.session_client(request.session_id).await?;
+        let session = self.session_handle(request.session_id).await?;
+        session.record_activity();
+        let client = session.client.clone();
         let remote = resolve_remote_path(client.root_path(), &request.remote_path);
         let snapshot = self.inner.transfers.snapshot_for(
             request.session_id,
@@ -1331,7 +1347,9 @@ impl HandShakerRuntime {
         request: BatchTransferRequest,
     ) -> AppResult<BatchTransferResultDto> {
         self.ensure_open()?;
-        let client = self.session_client(request.session_id).await?;
+        let session = self.session_handle(request.session_id).await?;
+        session.record_activity();
+        let client = session.client.clone();
         let root = client.root_path().to_string();
         let files: Vec<BatchTransferItemDto> = request
             .files
@@ -1379,7 +1397,9 @@ impl HandShakerRuntime {
         request: BatchTransferRequest,
     ) -> AppResult<BatchTransferResultDto> {
         self.ensure_open()?;
-        let client = self.session_client(request.session_id).await?;
+        let session = self.session_handle(request.session_id).await?;
+        session.record_activity();
+        let client = session.client.clone();
         let root = client.root_path().to_string();
         let files: Vec<BatchTransferItemDto> = request
             .files
@@ -1479,7 +1499,16 @@ impl HandShakerRuntime {
     {
         self.ensure_open()?;
         let client = self.session_client_arc(session_id).await?;
-        match call(client).await {
+        let outcome = call(client).await;
+        // Phase D / D5 §6.2: completion time is recorded for success and
+        // failure alike — a failed request is still session activity.
+        if let Some(session) = {
+            let guard = self.inner.sessions.lock().await;
+            guard.get(&session_id).cloned()
+        } {
+            session.record_activity();
+        }
+        match outcome {
             Ok(value) => Ok(value),
             Err(error) => {
                 let public = from_core_error(error, operation);

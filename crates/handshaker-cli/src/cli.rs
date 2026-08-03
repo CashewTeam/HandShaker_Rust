@@ -21,10 +21,11 @@ use handshaker_core::{
 
 use handshaker_application::{
     BatchTransferItemDto, BatchTransferRequest, ConnectRequest, CountFilesRequest,
-    CreateDirectoryRequest, DeletePathsRequest, DeviceDescriptor, DeviceId, FileEntryDto,
-    HandShakerRuntime, ListDevicesRequest, ListFilesRequest, MovePathRequest, PublicError,
-    RemoveTrustRequest, ResetWifiTrustRequest, RuntimeConfig, SessionId, StatFileRequest,
-    TransferFailureDto, TransportKind, TreeTransferDto, TrustRecordDto,
+    CreateDirectoryRequest, DeletePathsRequest, DeviceDescriptor, DeviceId, DeviceInfoDto,
+    FileConflictKind, FileEntryDto, HandShakerRuntime, ListDevicesRequest, ListFilesRequest,
+    MovePathRequest, PlanDownloadRequest, PlanUploadRequest, PublicError, RemoveTrustRequest,
+    ResetWifiTrustRequest, RuntimeConfig, SessionId, StatFileRequest, TransferFailureDto,
+    TransportKind, TreeTransferDto, TrustRecordDto,
 };
 
 use crate::output::{Outcome, render};
@@ -902,12 +903,52 @@ async fn select_device_descriptor(
     }
 }
 
-/// Map an application-layer error onto the CLI error taxonomy. Connect-class
-/// failures collapse into `Transport` (exit 4); device-selection errors are
-/// raised directly by the CLI selector, so this path only sees connect-class
-/// failures.
+/// Map an application-layer error onto the CLI error taxonomy so exit codes
+/// and JSON error codes keep their documented semantics (Phase D / D5): the
+/// mapping follows the PublicErrorCode partition, never the message text.
 fn app_error(error: PublicError) -> Error {
-    Error::Transport(error.to_string())
+    use handshaker_application::PublicErrorCode as Code;
+    match error.code {
+        Code::InvalidArgument | Code::InvalidState => Error::Usage(error.to_string()),
+        Code::RuntimeClosed | Code::DeviceNotFound | Code::DeviceUnavailable => {
+            Error::DeviceSelection(error.to_string())
+        }
+        Code::SessionNotFound
+        | Code::SessionClosed
+        | Code::ConnectFailed
+        | Code::ConnectionLost
+        | Code::AdbUnavailable
+        | Code::AdbUnauthorized
+        | Code::AdbOffline
+        | Code::WifiDiscoveryFailed
+        | Code::UsbUnavailable
+        | Code::TransferNotFound
+        | Code::Internal
+        | Code::NotFound => Error::Transport(error.to_string()),
+        Code::TrustRequired | Code::TrustRejected => Error::Handshake(error.to_string()),
+        Code::ProtocolError | Code::DecodeError => Error::Protocol(error.to_string()),
+        Code::RemotePathNotFound
+        | Code::RemotePermissionDenied
+        | Code::RemotePathExists
+        | Code::RemoteIo => Error::RemoteIo {
+            code: None,
+            message: error.to_string(),
+        },
+        Code::LocalPathNotFound | Code::LocalPermissionDenied | Code::LocalPathExists => {
+            Error::LocalIo(error.to_string())
+        }
+        Code::TransferCancelled => Error::Interrupted,
+        Code::RemoteCancelled => Error::RemoteIo {
+            code: None,
+            message: error.to_string(),
+        },
+        Code::MediaError | Code::ClipboardError | Code::SyncError => {
+            Error::Transport(error.to_string())
+        }
+        // Future codes fall back to the transport class until mapped
+        // explicitly; unknown codes must never panic or be dropped.
+        _ => Error::Transport(error.to_string()),
+    }
 }
 
 /// Unified close for an application session: drop the CLI's client handle so
@@ -1248,13 +1289,27 @@ async fn execute_connected(
         Command::Trust(_) => {
             unreachable!("trust commands are handled before connecting");
         }
-        Command::Device(DeviceCommand::Info) => Outcome::new(
-            "device.info",
-            client.device_info(),
-            human_device_info(client.device_info()),
-        )?,
+        Command::Device(DeviceCommand::Info) => {
+            // Phase D / D5: device info comes from the application session
+            // snapshot (DeviceInfoDto covers every core field).
+            let snapshot = session
+                .runtime
+                .get_session_snapshot(session.session_id)
+                .await
+                .map_err(app_error)?;
+            Outcome::new(
+                "device.info",
+                &snapshot.device_info,
+                human_device_info(&snapshot.device_info),
+            )?
+        }
         Command::Device(DeviceCommand::Ping) => {
-            let ping = client.ping().await?;
+            // Phase D / D5: ping routes through the application layer.
+            let ping = session
+                .runtime
+                .ping(session.session_id)
+                .await
+                .map_err(app_error)?;
             Outcome::new(
                 "device.ping",
                 &ping,
@@ -1453,67 +1508,87 @@ async fn execute_connected(
                     localizer.format(MessageKey::PullNeedsSeparator, &[]),
                 ));
             }
+            // Phase D / D5: preflight goes through the application plan.
+            let local_destination = match local {
+                Some(path) => resolve_local(&context.local_cwd, path),
+                None => context.local_cwd.clone(),
+            };
             let single_file_mode = remote.len() == 1 && !*recursive;
-            let mut items: Vec<BatchTransferItemDto> = Vec::new();
-            let mut trees: Vec<TreeTransferDto> = Vec::new();
+            if single_file_mode && local.is_none() && remote_name(&remote[0]).is_none() {
+                return Err(Error::Usage(
+                    localizer.format(MessageKey::RemoteNameMissing, &[&remote[0]]),
+                ));
+            }
+            let plan = session
+                .runtime
+                .plan_download(PlanDownloadRequest {
+                    session_id: session.session_id,
+                    remote_sources: remote.clone(),
+                    local_destination: local_destination.display().to_string(),
+                    recursive: *recursive,
+                    overwrite: *overwrite,
+                })
+                .await
+                .map_err(app_error)?;
+            // Translate plan conflicts back to the legacy CLI error classes
+            // (exit codes and JSON error codes stay stable).
             let mut existing_targets = 0_usize;
-            let mut total_bytes = 0_u64;
-            let mut seen_targets = std::collections::BTreeSet::new();
-            for remote_path in remote {
-                let remote_path = resolve_remote(&context.remote_cwd, remote_path);
-                let info = client.stat(&remote_path).await?;
-                if info.as_ref().is_some_and(|file| file.is_directory) {
-                    if !*recursive {
+            let mut first_existing = String::new();
+            for conflict in &plan.conflicts {
+                match conflict.kind {
+                    FileConflictKind::RecursiveRequired => {
                         return Err(Error::Usage(
-                            localizer.format(MessageKey::RecursiveRequired, &[&remote_path]),
+                            localizer.format(MessageKey::RecursiveRequired, &[&conflict.source]),
                         ));
                     }
-                    let local_dir = if let Some(local) = local {
-                        resolve_local(&context.local_cwd, local)
-                    } else {
-                        context.local_cwd.clone()
-                    };
-                    trees.push(TreeTransferDto {
-                        source: remote_path,
-                        target: local_dir.display().to_string(),
-                    });
-                } else {
-                    let local_target = if single_file_mode {
-                        resolve_local_pull(&context.local_cwd, local.as_deref(), &remote_path)?
-                    } else {
-                        let base = if let Some(local) = local {
-                            resolve_local(&context.local_cwd, local)
-                        } else {
-                            context.local_cwd.clone()
-                        };
-                        base.join(remote_name(&remote_path).ok_or_else(|| {
-                            Error::Usage(
-                                localizer.format(MessageKey::RemoteNameMissing, &[&remote_path]),
-                            )
-                        })?)
-                    };
-                    if local_target.exists() {
+                    FileConflictKind::DuplicateDestination => {
+                        return Err(Error::Usage(
+                            localizer.format(MessageKey::DuplicateTarget, &[&conflict.destination]),
+                        ));
+                    }
+                    FileConflictKind::SourceMissing => {
+                        return Err(Error::RemoteIo {
+                            code: None,
+                            message: localizer
+                                .format(MessageKey::RemoteMissing, &[&conflict.source]),
+                        });
+                    }
+                    FileConflictKind::DestinationTypeMismatch => {
+                        // The legacy CLI only hit this at execution time as a
+                        // local I/O failure; keep that error class.
+                        return Err(Error::LocalIo(conflict.message.clone()));
+                    }
+                    FileConflictKind::DestinationExists => {
                         existing_targets += 1;
+                        if first_existing.is_empty() {
+                            first_existing = conflict.destination.clone();
+                        }
                     }
-                    if !seen_targets.insert(local_target.display().to_string()) {
-                        return Err(Error::Usage(localizer.format(
-                            MessageKey::DuplicateTarget,
-                            &[&local_target.display().to_string()],
-                        )));
-                    }
-                    if let Some(file) = info.as_ref() {
-                        total_bytes += file.size;
-                    }
-                    items.push(BatchTransferItemDto {
-                        source: remote_path,
-                        target: local_target.display().to_string(),
-                    });
+                    FileConflictKind::LocalPermissionDenied => {}
                 }
             }
+            let files: Vec<BatchTransferItemDto> = plan
+                .items
+                .iter()
+                .filter(|item| !item.is_directory)
+                .map(|item| BatchTransferItemDto {
+                    source: item.source.clone(),
+                    target: item.destination.clone(),
+                })
+                .collect();
+            let trees: Vec<TreeTransferDto> = plan
+                .items
+                .iter()
+                .filter(|item| item.is_directory)
+                .map(|item| TreeTransferDto {
+                    source: item.source.clone(),
+                    target: item.destination.clone(),
+                })
+                .collect();
             if *dry_run {
-                let mut files = items.len();
+                let mut files_count = files.len();
                 let mut dirs = trees.len();
-                let mut bytes = total_bytes;
+                let mut bytes = plan.total_bytes.unwrap_or(0);
                 for tree in &trees {
                     let entries = session
                         .runtime
@@ -1528,13 +1603,13 @@ async fn execute_connected(
                         if entry.is_directory {
                             dirs += 1;
                         } else {
-                            files += 1;
+                            files_count += 1;
                             bytes += entry.size;
                         }
                     }
                 }
                 let report = DryRunReport {
-                    files,
+                    files: files_count,
                     dirs,
                     bytes,
                     dry_run: true,
@@ -1544,16 +1619,19 @@ async fn execute_connected(
                     &report,
                     localizer.format(
                         MessageKey::DryRunReport,
-                        &[&files.to_string(), &dirs.to_string(), &bytes.to_string()],
+                        &[
+                            &files_count.to_string(),
+                            &dirs.to_string(),
+                            &bytes.to_string(),
+                        ],
                     ),
                 );
             }
             if existing_targets > 0 {
                 if !overwrite {
-                    return Err(Error::LocalIo(localizer.format(
-                        MessageKey::LocalTargetExists,
-                        &[&items[0].target.clone()],
-                    )));
+                    return Err(Error::LocalIo(
+                        localizer.format(MessageKey::LocalTargetExists, &[&first_existing]),
+                    ));
                 }
                 confirm(
                     &localizer.format(
@@ -1568,7 +1646,7 @@ async fn execute_connected(
                 .runtime
                 .batch_download(BatchTransferRequest {
                     session_id: session.session_id,
-                    files: items,
+                    files,
                     trees,
                     overwrite: *overwrite,
                 })
@@ -1601,70 +1679,92 @@ async fn execute_connected(
             overwrite,
             dry_run,
         }) => {
-            let remote = resolve_remote(&context.remote_cwd, remote);
-            let single_file_mode = local.len() == 1 && !recursive && !remote.ends_with('/');
-            let mut items: Vec<BatchTransferItemDto> = Vec::new();
-            let mut trees: Vec<TreeTransferDto> = Vec::new();
-            let mut existing_targets = 0_usize;
+            let remote_path = resolve_remote(&context.remote_cwd, remote);
+            // Phase D / D5: preflight goes through the application plan.
+            let local_sources: Vec<String> = local
+                .iter()
+                .map(|path| {
+                    resolve_local(&context.local_cwd, path)
+                        .display()
+                        .to_string()
+                })
+                .collect();
+            let plan = session
+                .runtime
+                .plan_upload(PlanUploadRequest {
+                    session_id: session.session_id,
+                    local_sources,
+                    remote_destination: remote_path.clone(),
+                    recursive: *recursive,
+                    overwrite: *overwrite,
+                })
+                .await
+                .map_err(app_error)?;
+            // Translate plan conflicts back to the legacy CLI behavior:
+            // missing/unreadable local sources stay per-file failures (the
+            // legacy CLI collected them and continued), other hard conflicts
+            // keep their legacy error classes.
             let mut collected_failures: Vec<TransferFailureDto> = Vec::new();
-            let mut total_bytes = 0_u64;
-            let mut seen_targets = std::collections::BTreeSet::new();
-            for local_path in local {
-                let local_path = resolve_local(&context.local_cwd, local_path);
-                let metadata = match tokio::fs::metadata(&local_path).await {
-                    Ok(metadata) => metadata,
-                    Err(error) => {
-                        collected_failures.push(TransferFailureDto {
-                            source: local_path.display().to_string(),
-                            target: remote.clone(),
-                            message: error.to_string(),
-                        });
-                        continue;
-                    }
-                };
-                if metadata.is_dir() {
-                    if !recursive {
-                        return Err(Error::Usage(localizer.format(
-                            MessageKey::RecursiveRequired,
-                            &[&local_path.display().to_string()],
-                        )));
-                    }
-                    trees.push(TreeTransferDto {
-                        source: local_path.display().to_string(),
-                        target: remote.clone(),
-                    });
-                } else {
-                    let target = if single_file_mode {
-                        remote.clone()
-                    } else {
-                        format!(
-                            "{}/{}",
-                            remote.trim_end_matches('/'),
-                            local_path
-                                .file_name()
-                                .map(|name| name.to_string_lossy().into_owned())
-                                .unwrap_or_default()
-                        )
-                    };
-                    if client.file_exists(&target).await? {
-                        existing_targets += 1;
-                    }
-                    if !seen_targets.insert(target.clone()) {
+            let mut existing_targets = 0_usize;
+            let mut first_existing = String::new();
+            for conflict in &plan.conflicts {
+                match conflict.kind {
+                    FileConflictKind::RecursiveRequired => {
                         return Err(Error::Usage(
-                            localizer.format(MessageKey::DuplicateTarget, &[&target]),
+                            localizer.format(MessageKey::RecursiveRequired, &[&conflict.source]),
                         ));
                     }
-                    total_bytes += metadata.len();
-                    items.push(BatchTransferItemDto {
-                        source: local_path.display().to_string(),
-                        target,
-                    });
+                    FileConflictKind::DuplicateDestination => {
+                        return Err(Error::Usage(
+                            localizer.format(MessageKey::DuplicateTarget, &[&conflict.destination]),
+                        ));
+                    }
+                    FileConflictKind::SourceMissing | FileConflictKind::LocalPermissionDenied => {
+                        collected_failures.push(TransferFailureDto {
+                            source: conflict.source.clone(),
+                            target: remote_path.clone(),
+                            message: conflict.message.clone(),
+                        });
+                    }
+                    FileConflictKind::DestinationTypeMismatch => {
+                        return Err(Error::RemoteIo {
+                            code: None,
+                            message: conflict.message.clone(),
+                        });
+                    }
+                    FileConflictKind::DestinationExists => {
+                        existing_targets += 1;
+                        if first_existing.is_empty() {
+                            first_existing = conflict.destination.clone();
+                        }
+                    }
                 }
             }
+            let files: Vec<BatchTransferItemDto> = plan
+                .items
+                .iter()
+                .filter(|item| !item.is_directory)
+                .map(|item| BatchTransferItemDto {
+                    source: item.source.clone(),
+                    target: item.destination.clone(),
+                })
+                .collect();
+            // Directory trees keep the legacy mirror semantics: the tree is
+            // mirrored into `remote_path` itself (the plan appends the local
+            // basename when the remote directory already exists).
+            let trees: Vec<TreeTransferDto> = plan
+                .items
+                .iter()
+                .filter(|item| item.is_directory)
+                .map(|item| TreeTransferDto {
+                    source: item.source.clone(),
+                    target: remote_path.clone(),
+                })
+                .collect();
             if *dry_run {
-                let mut files = items.len();
+                let mut files_count = files.len();
                 let mut dirs = trees.len();
-                let mut bytes = total_bytes;
+                let mut bytes = plan.total_bytes.unwrap_or(0);
                 for tree in &trees {
                     let mut tree_items = Vec::new();
                     let mut tree_dirs = std::collections::BTreeSet::new();
@@ -1678,11 +1778,11 @@ async fn execute_connected(
                         &localizer,
                     )?;
                     dirs += tree_dirs.len();
-                    files += tree_items.len();
+                    files_count += tree_items.len();
                     bytes += tree_bytes;
                 }
                 let report = DryRunReport {
-                    files,
+                    files: files_count,
                     dirs,
                     bytes,
                     dry_run: true,
@@ -1692,7 +1792,11 @@ async fn execute_connected(
                     &report,
                     localizer.format(
                         MessageKey::DryRunReport,
-                        &[&files.to_string(), &dirs.to_string(), &bytes.to_string()],
+                        &[
+                            &files_count.to_string(),
+                            &dirs.to_string(),
+                            &bytes.to_string(),
+                        ],
                     ),
                 );
             }
@@ -1701,7 +1805,7 @@ async fn execute_connected(
                     return Err(Error::RemoteIo {
                         code: None,
                         message: localizer
-                            .format(MessageKey::RemoteTargetExists, &[&items[0].target.clone()]),
+                            .format(MessageKey::RemoteTargetExists, &[&first_existing]),
                     });
                 }
                 confirm(
@@ -1717,7 +1821,7 @@ async fn execute_connected(
                 .runtime
                 .batch_upload(BatchTransferRequest {
                     session_id: session.session_id,
-                    files: items,
+                    files,
                     trees,
                     overwrite: *overwrite,
                 })
@@ -2923,16 +3027,6 @@ fn resolve_local(base: &Path, input: &Path) -> PathBuf {
     }
 }
 
-fn resolve_local_pull(base: &Path, local: Option<&Path>, remote: &str) -> Result<PathBuf> {
-    if let Some(local) = local {
-        return Ok(resolve_local(base, local));
-    }
-    Ok(base.join(
-        remote_name(remote)
-            .ok_or_else(|| Error::Usage(ZhCn.format(MessageKey::RemoteNameMissing, &[remote])))?,
-    ))
-}
-
 /// Last path component of a remote path, if any.
 fn remote_name(remote: &str) -> Option<String> {
     remote
@@ -2958,7 +3052,7 @@ fn normalize_local(path: PathBuf) -> PathBuf {
     normalized
 }
 
-fn human_device_info(info: &handshaker_core::DeviceInfo) -> String {
+fn human_device_info(info: &DeviceInfoDto) -> String {
     let localizer = ZhCn;
     let battery = info
         .battery_percentage
@@ -3108,6 +3202,64 @@ mod tests {
         let targets: Vec<_> = items.iter().map(|item| item.target.clone()).collect();
         assert!(targets.contains(&"/remote/base/a.txt".to_string()));
         assert!(targets.contains(&"/remote/base/sub/b.bin".to_string()));
+    }
+
+    #[test]
+    fn app_error_maps_public_codes_to_cli_classes() {
+        use handshaker_application::PublicErrorCode;
+        let error = |code| PublicError::new(code, "mapped");
+        // Argument/state -> usage (exit 2).
+        assert_eq!(
+            app_error(error(PublicErrorCode::InvalidArgument)).exit_code(),
+            2
+        );
+        assert_eq!(
+            app_error(error(PublicErrorCode::InvalidState)).exit_code(),
+            2
+        );
+        // Runtime/device selection -> 3.
+        assert_eq!(
+            app_error(error(PublicErrorCode::DeviceNotFound)).exit_code(),
+            3
+        );
+        assert_eq!(
+            app_error(error(PublicErrorCode::RuntimeClosed)).exit_code(),
+            3
+        );
+        // Connect/trust/protocol classes keep 4/5.
+        assert_eq!(
+            app_error(error(PublicErrorCode::ConnectFailed)).exit_code(),
+            4
+        );
+        assert_eq!(
+            app_error(error(PublicErrorCode::TrustRejected)).exit_code(),
+            4
+        );
+        assert_eq!(
+            app_error(error(PublicErrorCode::ProtocolError)).exit_code(),
+            5
+        );
+        // Remote vs local I/O split 6/7.
+        assert_eq!(
+            app_error(error(PublicErrorCode::RemotePathNotFound)).exit_code(),
+            6
+        );
+        assert_eq!(app_error(error(PublicErrorCode::RemoteIo)).exit_code(), 6);
+        assert_eq!(
+            app_error(error(PublicErrorCode::LocalPathNotFound)).exit_code(),
+            7
+        );
+        assert_eq!(
+            app_error(error(PublicErrorCode::LocalPermissionDenied)).exit_code(),
+            7
+        );
+        // Cancellation keeps the user-interrupt class.
+        assert_eq!(
+            app_error(error(PublicErrorCode::TransferCancelled)).exit_code(),
+            130
+        );
+        // Unknown future codes never panic; they fall back to transport.
+        assert_eq!(app_error(error(PublicErrorCode::Internal)).exit_code(), 4);
     }
 
     #[test]
