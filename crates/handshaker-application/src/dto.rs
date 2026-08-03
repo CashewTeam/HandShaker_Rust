@@ -11,14 +11,21 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 /// Stable application-layer device identifier. Not the same as any low-level
 /// temporary address; ADB uses the serial, USB uses the accessory location,
 /// WiFi uses the device UUID when known (fallback: a stable temporary id).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DeviceId(pub String);
 
 /// Transport kind of a discovered device.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// Frozen v1 contract: the *name* (snake_case in JSON) is the stable wire
+/// value; the numeric discriminant is also fixed and never reused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum TransportKind {
     /// ADB over USB/TCP forward.
     Adb = 1,
@@ -29,7 +36,7 @@ pub enum TransportKind {
 }
 
 /// A discovered device, UI-ready.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceDescriptor {
     pub id: DeviceId,
     pub display_name: Option<String>,
@@ -40,11 +47,13 @@ pub struct DeviceDescriptor {
 }
 
 /// Application-layer session identifier (u64, no pointer handles).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub u64);
 
 /// Fixed session states (see M8 plan §5.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SessionState {
     Connecting = 1,
     Ready = 2,
@@ -54,7 +63,7 @@ pub enum SessionState {
 }
 
 /// UI-ready device information snapshot.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct DeviceInfoDto {
     pub serial: String,
     pub phone_id: Option<String>,
@@ -69,7 +78,7 @@ pub struct DeviceInfoDto {
 }
 
 /// One directory entry (mirrors `RemoteFile` without core types).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileEntryDto {
     pub path: String,
     pub size: u64,
@@ -82,7 +91,7 @@ pub struct FileEntryDto {
 }
 
 /// Snapshot of one open session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSnapshot {
     pub id: SessionId,
     pub device: DeviceDescriptor,

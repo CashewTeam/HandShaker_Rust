@@ -206,3 +206,61 @@ fn remote_file_maps_to_dto() {
     assert_eq!(dto.media_id, Some(9));
     assert!(!dto.is_directory);
 }
+
+// ---- v1 JSON contract fixtures (frozen; changes are breaking) ----
+
+#[test]
+fn device_descriptor_json_contract_is_stable() {
+    let device = DeviceDescriptor {
+        id: DeviceId("serial-1".into()),
+        display_name: Some("serial-1".into()),
+        model: None,
+        transport: TransportKind::Adb,
+        transport_address: "serial-1".into(),
+        available: true,
+    };
+    let json = serde_json::to_value(&device).expect("serialize");
+    // Field names and enum token are the frozen contract.
+    assert_eq!(json["id"], "serial-1");
+    assert_eq!(json["transport"], "adb");
+    assert_eq!(json["available"], true);
+    // Round-trip preserves the descriptor.
+    let decoded: DeviceDescriptor = serde_json::from_value(json).expect("deserialize");
+    assert_eq!(decoded, device);
+}
+
+#[test]
+fn session_state_json_contract_is_stable() {
+    let states = [
+        (crate::dto::SessionState::Connecting, "connecting"),
+        (crate::dto::SessionState::Ready, "ready"),
+        (crate::dto::SessionState::Closed, "closed"),
+    ];
+    for (state, token) in states {
+        let json = serde_json::to_value(state).expect("serialize");
+        assert_eq!(json, token);
+        let decoded: crate::dto::SessionState = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(decoded, state);
+    }
+}
+
+#[test]
+fn public_error_json_contract_is_stable() {
+    let error =
+        crate::error::PublicError::new(PublicErrorCode::SessionNotFound, "session not found")
+            .with_detail("no such id")
+            .operation("get_session");
+    let json = serde_json::to_value(&error).expect("serialize");
+    assert_eq!(json["code"], "session_not_found");
+    assert_eq!(json["retryable"], false);
+    assert_eq!(json["operation"], "get_session");
+    let decoded: crate::error::PublicError = serde_json::from_value(json).expect("deserialize");
+    assert_eq!(decoded, error);
+}
+
+#[test]
+fn unknown_enum_values_are_rejected_not_guessed() {
+    // A future transport value must fail to decode, never map silently.
+    let result: Result<TransportKind, _> = serde_json::from_str("\"bluetooth\"");
+    assert!(result.is_err());
+}

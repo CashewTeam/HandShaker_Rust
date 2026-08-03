@@ -3,8 +3,10 @@
 
 /// Stable public error codes (partitioned, see M8 plan §6.2). Values are
 /// frozen for v1: never reuse a released number.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[repr(i32)]
+#[non_exhaustive]
 pub enum PublicErrorCode {
     // 1000–1099 Runtime
     RuntimeClosed = 1001,
@@ -95,8 +97,10 @@ impl PublicErrorCode {
 
 /// Stable public error. `message` is for display only; programmatic decisions
 /// must use `code`. `retryable` is a hint, never a promise.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PublicError {
+    /// Stable token (`as_str`), not the numeric discriminant: numeric values
+    /// are frozen but names are the JSON contract.
     pub code: PublicErrorCode,
     pub message: String,
     pub detail: Option<String>,
