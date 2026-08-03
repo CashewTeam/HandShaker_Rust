@@ -49,7 +49,10 @@ typedef struct HsSubscription HsSubscription;
 - 短操作在 Runtime 的 tokio executor 上 `block_on`,阻塞调用线程;
   **调用方必须在后台线程调用**(Swift 主线程禁止);
 - 长任务(传输)用 ID + `get_transfer`/事件轮询,不在 v1 引入跨语言回调;
-- 事件订阅为队列拉取,固定缓冲,`Lagged` 显式上报。
+- 事件订阅为队列拉取,固定缓冲,`Lagged` 显式上报;
+- **单租户信任模型**:ABI 是进程内契约,调用方与库同权限。Session/Transfer 的
+  `u64` id 是顺序计数器(非不透明随机句柄),同进程调用方可枚举/猜测 id;库不
+  做调用方鉴权。多租户隔离需要宿主进程自行分区(或引入随机 id,破坏 v1 稳定性)。
 
 ## 4. Swift 接入
 

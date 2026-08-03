@@ -24,7 +24,7 @@ use crate::event::{BackendEvent, EventEnvelope, EventHub};
 use crate::transfer::{
     BatchTransferItemDto, BatchTransferRequest, BatchTransferResultDto, DownloadRequest,
     TransferDirectionDto, TransferFailureDto, TransferId, TransferRegistry, TransferSnapshot,
-    TransferState, UploadRequest, request_options, transfer_options,
+    TransferState, TreeTransferDto, UploadRequest, request_options, transfer_options,
 };
 
 use tokio::sync::broadcast;
@@ -514,16 +514,35 @@ impl HandShakerRuntime {
 
     /// Transfer a batch of resolved file pairs and directory trees (serial
     /// execution; per-file failures are aggregated, never aborting the
-    /// remaining files). Tree enumeration and path-escape hardening stay in
-    /// the core `download_tree` implementation.
+    /// remaining files). Remote sources (download) and remote targets
+    /// (upload) are resolved against the device root here, so the API is
+    /// consistent with the single-file methods; tree enumeration and
+    /// path-escape hardening stay in the core `download_tree` implementation.
     pub async fn batch_download(
         &self,
         request: BatchTransferRequest,
     ) -> AppResult<BatchTransferResultDto> {
         self.ensure_open()?;
         let client = self.session_client(request.session_id).await?;
+        let root = client.root_path().to_string();
+        let files: Vec<BatchTransferItemDto> = request
+            .files
+            .iter()
+            .map(|item| BatchTransferItemDto {
+                source: crate::resolve_remote_path(&root, &item.source),
+                target: item.target.clone(),
+            })
+            .collect();
+        let trees: Vec<TreeTransferDto> = request
+            .trees
+            .iter()
+            .map(|tree| TreeTransferDto {
+                source: crate::resolve_remote_path(&root, &tree.source),
+                target: tree.target.clone(),
+            })
+            .collect();
         let mut result = handshaker_core::BatchTransferResult::default();
-        for tree in &request.trees {
+        for tree in &trees {
             let partial = client
                 .download_tree(
                     &tree.source,
@@ -535,7 +554,7 @@ impl HandShakerRuntime {
             merge_core_batch(&mut result, partial);
         }
         let partial = client
-            .download_many(&core_batch_items(&request.files), batch_options(&request))
+            .download_many(&core_batch_items(&files), batch_options(&request))
             .await
             .map_err(|error| from_core_error(error, "batch_download"))?;
         merge_core_batch(&mut result, partial);
@@ -544,16 +563,34 @@ impl HandShakerRuntime {
 
     /// Upload a batch of resolved file pairs and directory trees (serial
     /// execution; per-file failures are aggregated, never aborting the
-    /// remaining files). Tree enumeration stays in the CLI (local filesystem)
-    /// and `upload_tree` handles the remote mirroring.
+    /// remaining files). Remote targets are resolved against the device
+    /// root; tree enumeration stays in the CLI (local filesystem) and
+    /// `upload_tree` handles the remote mirroring.
     pub async fn batch_upload(
         &self,
         request: BatchTransferRequest,
     ) -> AppResult<BatchTransferResultDto> {
         self.ensure_open()?;
         let client = self.session_client(request.session_id).await?;
+        let root = client.root_path().to_string();
+        let files: Vec<BatchTransferItemDto> = request
+            .files
+            .iter()
+            .map(|item| BatchTransferItemDto {
+                source: item.source.clone(),
+                target: crate::resolve_remote_path(&root, &item.target),
+            })
+            .collect();
+        let trees: Vec<TreeTransferDto> = request
+            .trees
+            .iter()
+            .map(|tree| TreeTransferDto {
+                source: tree.source.clone(),
+                target: crate::resolve_remote_path(&root, &tree.target),
+            })
+            .collect();
         let mut result = handshaker_core::BatchTransferResult::default();
-        for tree in &request.trees {
+        for tree in &trees {
             let partial = client
                 .upload_tree(
                     std::path::Path::new(&tree.source),
@@ -565,7 +602,7 @@ impl HandShakerRuntime {
             merge_core_batch(&mut result, partial);
         }
         let partial = client
-            .upload_many(&core_batch_items(&request.files), batch_options(&request))
+            .upload_many(&core_batch_items(&files), batch_options(&request))
             .await
             .map_err(|error| from_core_error(error, "batch_upload"))?;
         merge_core_batch(&mut result, partial);
