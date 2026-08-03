@@ -30,6 +30,7 @@ fn test_config() -> RuntimeConfig {
 fn fake_device() -> DeviceDescriptor {
     DeviceDescriptor {
         id: DeviceId("serial-1".to_string()),
+        stable_id: None,
         display_name: Some("serial-1".to_string()),
         model: None,
         transport: TransportKind::Adb,
@@ -338,16 +339,187 @@ fn device_info_maps_to_dto_without_core_leak() {
         apk_version: Some("201".into()),
         apk_version_name: Some("1.2.0".into()),
         root_path: "/storage/emulated/0".into(),
+        external_storage_path: Some("/storage/ABCD-1234".into()),
+        disk_size: Some(128_000_000_000),
+        used_disk_size: Some(64_000_000_000),
+        battery_percentage: Some(77),
+        phone_locked: Some(true),
+    };
+    let dto = crate::runtime::device_info_to_dto(&info);
+    assert_eq!(dto.serial, "s1");
+    assert_eq!(dto.model.as_deref(), Some("OD103"));
+    assert_eq!(dto.root_path, "/storage/emulated/0");
+    // Phase D / D2: every core field must survive the mapping.
+    assert_eq!(
+        dto.external_storage_path.as_deref(),
+        Some("/storage/ABCD-1234")
+    );
+    assert_eq!(dto.disk_size, Some(128_000_000_000));
+    assert_eq!(dto.used_disk_size, Some(64_000_000_000));
+    assert_eq!(dto.battery_percentage, Some(77));
+    assert_eq!(dto.phone_locked, Some(true));
+    // And a device without optional fields still maps cleanly.
+    let bare = DeviceInfo {
+        serial: "s2".into(),
+        phone_id: None,
+        name: None,
+        model: None,
+        brand: None,
+        manufacturer: None,
+        smartisan_version: None,
+        apk_version: None,
+        apk_version_name: None,
+        root_path: "/".into(),
         external_storage_path: None,
         disk_size: None,
         used_disk_size: None,
         battery_percentage: None,
         phone_locked: None,
     };
-    let dto = crate::runtime::device_info_to_dto(&info);
-    assert_eq!(dto.serial, "s1");
-    assert_eq!(dto.model.as_deref(), Some("OD103"));
-    assert_eq!(dto.root_path, "/storage/emulated/0");
+    let dto = crate::runtime::device_info_to_dto(&bare);
+    assert_eq!(dto.external_storage_path, None);
+    assert_eq!(dto.phone_locked, None);
+}
+
+// ---- Phase D / D2: stable device identity ----
+
+#[test]
+fn reconcile_phone_id_becomes_stable_device_id() {
+    let discovered = crate::discovery::wifi_device_to_descriptor(handshaker_core::WifiDevice {
+        instance: "handshaker_ssp_".to_string(),
+        host: "Android-2.local".to_string(),
+        addresses: vec!["192.168.2.47".to_string()],
+        port: 45656,
+        txt: Default::default(),
+    });
+    let info = crate::dto::DeviceInfoDto {
+        serial: "s1".to_string(),
+        phone_id: Some("9a3f-77ee".to_string()),
+        name: Some("我的手机".to_string()),
+        model: Some("OD103".to_string()),
+        brand: None,
+        manufacturer: None,
+        smartisan_version: None,
+        apk_version: None,
+        apk_version_name: None,
+        root_path: "/storage/emulated/0".to_string(),
+        external_storage_path: None,
+        disk_size: None,
+        used_disk_size: None,
+        battery_percentage: None,
+        phone_locked: None,
+    };
+    let reconciled = crate::runtime::reconcile_device_identity(&discovered, &info);
+    assert_eq!(
+        reconciled.stable_id,
+        Some(DeviceId("phone:9a3f-77ee".to_string()))
+    );
+    // Discovery id (endpoint) stays untouched; name/model are backfilled.
+    assert_eq!(reconciled.id, discovered.id);
+    assert_eq!(reconciled.display_name.as_deref(), Some("我的手机"));
+    assert_eq!(reconciled.model.as_deref(), Some("OD103"));
+    // The discovery endpoint id must not be confused with the stable id.
+    assert_ne!(reconciled.stable_id.as_ref(), Some(&reconciled.id));
+}
+
+#[test]
+fn reconcile_without_phone_id_keeps_discovery_identity() {
+    let discovered = fake_device();
+    let info = crate::dto::DeviceInfoDto {
+        serial: "s1".to_string(),
+        phone_id: None,
+        name: None,
+        model: None,
+        brand: None,
+        manufacturer: None,
+        smartisan_version: None,
+        apk_version: None,
+        apk_version_name: None,
+        root_path: "/".to_string(),
+        external_storage_path: None,
+        disk_size: None,
+        used_disk_size: None,
+        battery_percentage: None,
+        phone_locked: None,
+    };
+    let reconciled = crate::runtime::reconcile_device_identity(&discovered, &info);
+    assert_eq!(reconciled.stable_id, None);
+    // ADB/USB descriptors without a phone_id stay usable: display name and
+    // model keep whatever the discovery entry already had.
+    assert_eq!(reconciled.display_name.as_deref(), Some("serial-1"));
+}
+
+#[test]
+fn reconcile_ignores_empty_phone_id() {
+    let discovered = fake_device();
+    let mut info = crate::dto::DeviceInfoDto {
+        serial: "s1".to_string(),
+        phone_id: Some("".to_string()),
+        name: None,
+        model: None,
+        brand: None,
+        manufacturer: None,
+        smartisan_version: None,
+        apk_version: None,
+        apk_version_name: None,
+        root_path: "/".to_string(),
+        external_storage_path: None,
+        disk_size: None,
+        used_disk_size: None,
+        battery_percentage: None,
+        phone_locked: None,
+    };
+    let reconciled = crate::runtime::reconcile_device_identity(&discovered, &info);
+    assert_eq!(reconciled.stable_id, None);
+    info.phone_id = Some("   ".to_string());
+    let reconciled = crate::runtime::reconcile_device_identity(&discovered, &info);
+    assert_eq!(reconciled.stable_id, None);
+}
+
+#[test]
+fn device_info_dto_json_contract_is_stable_and_backward_compatible() {
+    let info = crate::dto::DeviceInfoDto {
+        serial: "s1".to_string(),
+        phone_id: Some("p1".to_string()),
+        name: Some("Phone".to_string()),
+        model: Some("OD103".to_string()),
+        brand: Some("SMARTISAN".to_string()),
+        manufacturer: Some("Smartisan".to_string()),
+        smartisan_version: Some("6.7.4".to_string()),
+        apk_version: Some("201".to_string()),
+        apk_version_name: Some("1.2.0".to_string()),
+        root_path: "/storage/emulated/0".to_string(),
+        external_storage_path: Some("/storage/ABCD-1234".to_string()),
+        disk_size: Some(128_000_000_000),
+        used_disk_size: Some(64_000_000_000),
+        battery_percentage: Some(77),
+        phone_locked: Some(true),
+    };
+    let json = serde_json::to_value(&info).expect("serialize");
+    assert_eq!(json["external_storage_path"], "/storage/ABCD-1234");
+    assert_eq!(json["disk_size"], 128_000_000_000u64);
+    assert_eq!(json["used_disk_size"], 64_000_000_000u64);
+    assert_eq!(json["battery_percentage"], 77);
+    assert_eq!(json["phone_locked"], true);
+    let decoded: crate::dto::DeviceInfoDto = serde_json::from_value(json).expect("deserialize");
+    assert_eq!(decoded, info);
+    // A v1-preview JSON without the new optional fields still decodes.
+    let legacy = serde_json::from_value::<crate::dto::DeviceInfoDto>(serde_json::json!({
+        "serial": "s1",
+        "phone_id": null,
+        "name": null,
+        "model": null,
+        "brand": null,
+        "manufacturer": null,
+        "smartisan_version": null,
+        "apk_version": null,
+        "apk_version_name": null,
+        "root_path": "/"
+    }))
+    .expect("legacy device info without new fields decodes");
+    assert_eq!(legacy.external_storage_path, None);
+    assert_eq!(legacy.disk_size, None);
+    assert_eq!(legacy.phone_locked, None);
 }
 
 #[test]
@@ -375,6 +547,7 @@ fn remote_file_maps_to_dto() {
 fn device_descriptor_json_contract_is_stable() {
     let device = DeviceDescriptor {
         id: DeviceId("serial-1".into()),
+        stable_id: Some(DeviceId("phone:p1".into())),
         display_name: Some("serial-1".into()),
         model: None,
         transport: TransportKind::Adb,
@@ -386,11 +559,25 @@ fn device_descriptor_json_contract_is_stable() {
     let json = serde_json::to_value(&device).expect("serialize");
     // Field names and enum token are the frozen contract.
     assert_eq!(json["id"], "serial-1");
+    assert_eq!(json["stable_id"], "phone:p1");
     assert_eq!(json["transport"], "adb");
     assert_eq!(json["available"], true);
     // Round-trip preserves the descriptor.
     let decoded: DeviceDescriptor = serde_json::from_value(json).expect("deserialize");
     assert_eq!(decoded, device);
+    // A descriptor serialized before stable_id existed still decodes.
+    let legacy = serde_json::from_value::<DeviceDescriptor>(serde_json::json!({
+        "id": "serial-1",
+        "display_name": "serial-1",
+        "model": null,
+        "transport": "adb",
+        "transport_address": "serial-1",
+        "available": true,
+        "adb": null,
+        "usb": null
+    }))
+    .expect("legacy descriptor without stable_id decodes");
+    assert_eq!(legacy.stable_id, None);
 }
 
 // ---- Phase D / D1: device discovery diagnostics ----
@@ -465,6 +652,7 @@ fn discovery_result_json_contract_is_stable() {
     let result = crate::discovery::DeviceDiscoveryResult {
         devices: vec![DeviceDescriptor {
             id: DeviceId("wifi-endpoint:handshaker_ssp_:192.168.2.47:45656".into()),
+            stable_id: None,
             display_name: Some("Android-2.local".into()),
             model: None,
             transport: TransportKind::Wifi,
@@ -884,6 +1072,7 @@ fn batch_request_json_round_trips() {
 fn sample_device() -> DeviceDescriptor {
     DeviceDescriptor {
         id: DeviceId("adb:3f13d4b4".to_string()),
+        stable_id: None,
         display_name: Some("test phone".to_string()),
         model: Some("OD103".to_string()),
         transport: TransportKind::Adb,
@@ -928,6 +1117,11 @@ fn bridge_client_event_maps_known_core_events() {
         apk_version: None,
         apk_version_name: None,
         root_path: "/storage/emulated/0".to_string(),
+        external_storage_path: None,
+        disk_size: None,
+        used_disk_size: None,
+        battery_percentage: None,
+        phone_locked: None,
     });
     let session_id = SessionId(7);
     let bridge =
@@ -1128,8 +1322,28 @@ fn bridge_client_event_maps_known_core_events() {
         } => {
             assert_eq!(source, session_id);
             assert_eq!(updated.id, device.id);
+            // Phase D / D2: the updated descriptor carries the stable
+            // identity reconciled from the pushed phone_id.
+            assert_eq!(
+                updated.stable_id,
+                Some(DeviceId("phone:phone-uuid".to_string()))
+            );
+            assert_eq!(updated.display_name.as_deref(), Some("U2 Pro"));
         }
         other => panic!("expected DeviceUpdated, got {other:?}"),
+    }
+    // The shared cached DTO was refreshed in place with the full payload.
+    {
+        let cached = device_info.read().expect("read lock");
+        assert_eq!(cached.phone_id.as_deref(), Some("phone-uuid"));
+        assert_eq!(
+            cached.external_storage_path.as_deref(),
+            Some("/storage/emulated/0")
+        );
+        assert_eq!(cached.disk_size, Some(64_000_000_000));
+        assert_eq!(cached.used_disk_size, Some(30_000_000_000));
+        assert_eq!(cached.battery_percentage, Some(88));
+        assert_eq!(cached.phone_locked, Some(false));
     }
     assert_eq!(
         device_info.read().unwrap().name.as_deref(),

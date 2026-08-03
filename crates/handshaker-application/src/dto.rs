@@ -59,7 +59,16 @@ pub struct UsbDetailDto {
 /// A discovered device, UI-ready.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceDescriptor {
+    /// Identity of this discovery entry. For Wi-Fi this is only a discovery
+    /// *endpoint* id (the mDNS SRV port is dynamic) and must never be used
+    /// as a long-lived device identity (Phase D / D2).
     pub id: DeviceId,
+    /// Stable identity reconciled from the connected phone's `phone_id`
+    /// (`phone:<uuid>`); `None` until a connection reports one (or for
+    /// transports that never report one). UI should prefer
+    /// `stable_id ?? id` for identity.
+    #[serde(default)]
+    pub stable_id: Option<DeviceId>,
     pub display_name: Option<String>,
     pub model: Option<String>,
     pub transport: TransportKind,
@@ -86,7 +95,7 @@ pub enum SessionState {
     Failed = 5,
 }
 
-/// UI-ready device information snapshot.
+/// UI-ready device information snapshot (Phase D / D2: full core coverage).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct DeviceInfoDto {
     pub serial: String,
@@ -99,6 +108,21 @@ pub struct DeviceInfoDto {
     pub apk_version: Option<String>,
     pub apk_version_name: Option<String>,
     pub root_path: String,
+    /// External storage path, when reported (e.g. `/storage/XXXX-XXXX`).
+    #[serde(default)]
+    pub external_storage_path: Option<String>,
+    /// Total internal storage size in bytes, when reported.
+    #[serde(default)]
+    pub disk_size: Option<u64>,
+    /// Used internal storage size in bytes, when reported.
+    #[serde(default)]
+    pub used_disk_size: Option<u64>,
+    /// Battery percentage, when reported.
+    #[serde(default)]
+    pub battery_percentage: Option<u32>,
+    /// Whether the phone reports a locked screen.
+    #[serde(default)]
+    pub phone_locked: Option<bool>,
 }
 
 /// One directory entry (mirrors `RemoteFile` without core types).

@@ -839,6 +839,7 @@ async fn select_device_descriptor(
         let location = cli.serial.clone().unwrap_or_default();
         return Ok(DeviceDescriptor {
             id: DeviceId(location.clone()),
+            stable_id: None,
             display_name: if location.is_empty() {
                 None
             } else {
@@ -855,6 +856,7 @@ async fn select_device_descriptor(
     if let Some(address) = cli.wifi {
         return Ok(DeviceDescriptor {
             id: DeviceId(format!("wifi:{address}")),
+            stable_id: None,
             display_name: Some(address.to_string()),
             model: None,
             transport: TransportKind::Wifi,

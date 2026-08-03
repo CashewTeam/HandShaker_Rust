@@ -49,13 +49,13 @@ FFI、UniFFI 或任何 UI 框架。
 
 | 类型 | 说明 |
 |---|---|
-| `DeviceId(pub String)` | 应用层稳定设备标识(ADB=serial, USB=location, WiFi=uuid 或临时 id) |
+| `DeviceId(pub String)` | 应用层设备标识:发现条目的 `id`(ADB=serial, USB=location, WiFi=endpoint)与连接后 reconcile 的 `stable_id`(`phone:<uuid>`);UI 优先 `stable_id ?? id` 作为身份 |
 | `TransportKind` | `Adb=1 / Wifi=2 / UsbAccessory=3` |
-| `DeviceDescriptor` | `id, display_name, model, transport, transport_address, available` |
+| `DeviceDescriptor` | `id, stable_id(可选), display_name, model, transport, transport_address, available`(Phase D/D2:Wi-Fi `id` 仅为动态 endpoint 标识,不可长期使用) |
 | `SessionId(pub u64)` | 会话标识 |
 | `SessionState` | `Connecting=1 / Ready=2 / Disconnecting=3 / Closed=4 / Failed=5` |
 | `SessionSnapshot` | `id, device, device_info, state, connected_at_ms, last_activity_at_ms` |
-| `DeviceInfoDto` | serial/phone_id/name/model/brand/manufacturer/smartisan_version/apk_version/apk_version_name/root_path |
+| `DeviceInfoDto` | serial/phone_id/name/model/brand/manufacturer/smartisan_version/apk_version/apk_version_name/root_path/external_storage_path/disk_size/used_disk_size/battery_percentage/phone_locked(后 5 字段可选,Phase D/D2 补全) |
 | `FileEntryDto` | path/size/created_at_ms/modified_at_ms/is_directory/checksum/is_trash/media_id |
 | `RuntimeConfig` | adb_path/default_timeout/heartbeat_interval/state_dir/wire_log/event_capacity |
 | `ListDevicesRequest` | include_adb/include_wifi/include_usb/wifi_browse_timeout |

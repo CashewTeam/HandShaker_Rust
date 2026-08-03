@@ -31,6 +31,7 @@ pub struct DeviceDiscoveryWarning {
 pub(crate) fn adb_device_to_descriptor(device: handshaker_core::AdbDevice) -> DeviceDescriptor {
     DeviceDescriptor {
         id: DeviceId(device.serial.clone()),
+        stable_id: None,
         display_name: Some(device.serial.clone()),
         model: device.model.clone(),
         transport: TransportKind::Adb,
@@ -62,6 +63,7 @@ pub(crate) fn wifi_device_to_descriptor(device: handshaker_core::WifiDevice) -> 
             "wifi-endpoint:{}:{}:{}",
             device.instance, address, device.port
         )),
+        stable_id: None,
         display_name: Some(device.host.clone()),
         model: None,
         transport: TransportKind::Wifi,
@@ -76,6 +78,7 @@ pub(crate) fn wifi_device_to_descriptor(device: handshaker_core::WifiDevice) -> 
 pub(crate) fn usb_device_to_descriptor(device: handshaker_core::UsbAccessory) -> DeviceDescriptor {
     DeviceDescriptor {
         id: DeviceId(device.location.clone()),
+        stable_id: None,
         display_name: device.serial.clone().or(Some(device.location.clone())),
         model: None,
         transport: TransportKind::UsbAccessory,

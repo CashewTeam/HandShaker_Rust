@@ -22,7 +22,7 @@ use crate::discovery::{
 };
 use crate::dto::{
     ClipboardEntryDto, ConnectRequest, CountFilesRequest, CreateDirectoryRequest,
-    DeletePathsRequest, DeleteResultDto, DeviceDescriptor, DeviceInfoDto, FileEntryDto,
+    DeletePathsRequest, DeleteResultDto, DeviceDescriptor, DeviceId, DeviceInfoDto, FileEntryDto,
     ListDevicesRequest, ListFilesRequest, MediaChangeDto, MediaChangeItemDto, MediaKindDto,
     MovePathRequest, PingResultDto, RemoteFileChangeDto, RemoteFileChangeKind, RuntimeConfig,
     SessionId, SessionSnapshot, SessionState, StatFileRequest, TransportKind,
@@ -318,7 +318,13 @@ impl HandShakerRuntime {
         .map_err(|error| from_core_error(error, "connect"))?;
         let device_info = client.device_info().clone();
         let id = SessionId(self.inner.next_session_id.fetch_add(1, Ordering::SeqCst));
-        let device_info_shared = Arc::new(std::sync::RwLock::new(device_info_to_dto(&device_info)));
+        // Reconcile the discovery entry with the connected phone's identity
+        // (Phase D / D2): phone_id becomes the stable id, name/model are
+        // backfilled. The session and every event it publishes carry the
+        // reconciled descriptor, so `stable_id` is present from the start.
+        let device_info_dto = device_info_to_dto(&device_info);
+        let device_info_shared = Arc::new(std::sync::RwLock::new(device_info_dto.clone()));
+        let reconciled_device = reconcile_device_identity(&request.device, &device_info_dto);
         // Forward core typed events to the runtime EventHub for the whole
         // session lifetime (M8.1 Phase C / C1). The task captures only the
         // descriptor + shared device-info DTO + a Weak RuntimeInner, never
@@ -328,14 +334,14 @@ impl HandShakerRuntime {
         let event_task = tokio::spawn(run_event_bridge(
             client.subscribe_events(EventFilter::all()),
             id,
-            request.device.clone(),
+            reconciled_device.clone(),
             device_info_shared.clone(),
             self.inner.event_hub.clone(),
             Arc::downgrade(&self.inner),
         ));
         let session = Arc::new(ActiveSession {
             client: Arc::new(client),
-            device: request.device.clone(),
+            device: reconciled_device,
             device_info: device_info_shared,
             connected_at_ms: now_ms(),
             last_activity_at_ms: now_ms(),
@@ -1143,11 +1149,14 @@ pub(crate) fn bridge_client_event(
         ClientEvent::DeviceInfoChanged(info) => {
             let dto = device_info_to_dto(&info);
             if let Ok(mut guard) = device_info.write() {
-                *guard = dto;
+                *guard = dto.clone();
             }
+            // Reconcile the descriptor so `DeviceUpdated` carries the stable
+            // identity and any name/model the push reported (Phase D / D2).
+            let updated = reconcile_device_identity(device, &dto);
             BackendEvent::DeviceUpdated {
                 session_id,
-                device: device.clone(),
+                device: updated,
             }
         }
         ClientEvent::ClipboardChanged(entries) => BackendEvent::ClipboardChanged {
@@ -1313,7 +1322,37 @@ pub(crate) fn device_info_to_dto(info: &DeviceInfo) -> DeviceInfoDto {
         apk_version: info.apk_version.clone(),
         apk_version_name: info.apk_version_name.clone(),
         root_path: info.root_path.clone(),
+        external_storage_path: info.external_storage_path.clone(),
+        disk_size: info.disk_size,
+        used_disk_size: info.used_disk_size,
+        battery_percentage: info.battery_percentage,
+        phone_locked: info.phone_locked,
     }
+}
+
+/// Reconcile a discovery entry with the connected phone's device info
+/// (Phase D / D2): the phone's `phone_id` becomes the stable identity
+/// (`phone:<uuid>`), and the phone-reported name/model win over whatever
+/// the discovery entry carried. Without a `phone_id` the descriptor
+/// keeps its discovery identity and `stable_id` stays `None` — ADB/USB
+/// connections remain fully usable that way.
+pub(crate) fn reconcile_device_identity(
+    discovered: &DeviceDescriptor,
+    info: &DeviceInfoDto,
+) -> DeviceDescriptor {
+    let mut device = discovered.clone();
+    device.stable_id = info
+        .phone_id
+        .as_ref()
+        .filter(|id| !id.trim().is_empty())
+        .map(|id| DeviceId(format!("phone:{id}")));
+    if let Some(name) = info.name.clone() {
+        device.display_name = Some(name);
+    }
+    if let Some(model) = info.model.clone() {
+        device.model = Some(model);
+    }
+    device
 }
 
 pub(crate) fn remote_file_to_dto(file: RemoteFile) -> FileEntryDto {
