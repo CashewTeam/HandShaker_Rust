@@ -2910,6 +2910,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn batch_transfer_stops_mid_batch_after_first_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let local_a = temp.path().join("a.bin");
+        let local_b = temp.path().join("b.bin");
+
+        let fake = FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        // Mid-batch cancellation (Phase D review follow-up): with concurrency
+        // 1 the progress callback runs after the first file completes and
+        // before the second file starts, so cancelling from the callback
+        // exercises the "skip not-yet-started files" path (the pre-cancelled
+        // test above only covers cancellation before the batch starts).
+        let token = crate::cancellation::CancellationToken::new();
+        let cancel_token = token.clone();
+        let done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let done_in_callback = done.clone();
+        let error = client
+            .download_many(
+                &[
+                    BatchTransferItem {
+                        source: "/storage/emulated/0/a.txt".to_string(),
+                        target: local_a.display().to_string(),
+                    },
+                    BatchTransferItem {
+                        source: "/storage/emulated/0/a.txt".to_string(),
+                        target: local_b.display().to_string(),
+                    },
+                ],
+                BatchTransferOptions {
+                    overwrite: false,
+                    progress: Some(Arc::new(move |progress| {
+                        done_in_callback.store(progress.done, std::sync::atomic::Ordering::Relaxed);
+                        cancel_token.cancel();
+                    })),
+                    offset: 0,
+                    concurrency: 1,
+                    cancel: Some(token.clone()),
+                },
+            )
+            .await
+            .expect_err("mid-batch cancellation must interrupt");
+        assert_eq!(error.code(), crate::error::ErrorCode::Interrupted);
+        assert_eq!(
+            done.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "callback ran after the first file completed"
+        );
+        // The first file finished before the cancellation; the second file
+        // never started and must not exist.
+        let content = tokio::fs::read(&local_a).await.expect("read target");
+        assert_eq!(content, b"download-data");
+        assert!(!local_b.exists());
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
     async fn upload_many_aggregates_per_file_results() {
         let temp = tempfile::tempdir().expect("tempdir");
         let first = temp.path().join("one.bin");
