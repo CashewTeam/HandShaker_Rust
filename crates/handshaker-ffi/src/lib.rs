@@ -18,7 +18,11 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 mod buffer;
+mod clipboard;
+mod files;
+mod monitor;
 mod result;
+mod trust;
 
 use std::ffi::c_void;
 use std::path::PathBuf;
@@ -37,13 +41,13 @@ use result::{HsCallResult, catch, err, free_result, input_str, ok, out_slot};
 
 /// ABI version (M8 §7.3), independent of Cargo versions.
 pub const ABI_VERSION_MAJOR: u32 = 1;
-pub const ABI_VERSION_MINOR: u32 = 2;
+pub const ABI_VERSION_MINOR: u32 = 3;
 pub const ABI_VERSION_PATCH: u32 = 0;
 
 /// Runtime handle: owns a tokio executor and the application runtime.
-pub struct HsRuntime {
-    _tokio: tokio::runtime::Runtime,
-    app: HandShakerRuntime,
+pub(crate) struct HsRuntime {
+    pub(crate) _tokio: tokio::runtime::Runtime,
+    pub(crate) app: HandShakerRuntime,
 }
 
 /// Event subscription handle: a broadcast receiver owned by the caller.
@@ -224,7 +228,10 @@ pub unsafe extern "C" fn hs_runtime_destroy(runtime: *mut c_void) {
 // ---------------------------------------------------------------------------
 
 /// Borrow a runtime handle; NULL returns a stable InvalidArgument error.
-fn runtime_ref<'a>(runtime: *mut c_void, operation: &str) -> Result<&'a HsRuntime, HsCallResult> {
+pub(crate) fn runtime_ref<'a>(
+    runtime: *mut c_void,
+    operation: &str,
+) -> Result<&'a HsRuntime, HsCallResult> {
     if runtime.is_null() {
         return Err(err(&PublicError::new(
             PublicErrorCode::InvalidArgument,
@@ -808,9 +815,9 @@ mod ffi_smoke_tests {
     }
 
     #[test]
-    fn abi_version_is_1_2_0() {
+    fn abi_version_is_1_3_0() {
         assert_eq!(hs_abi_version_major(), 1);
-        assert_eq!(hs_abi_version_minor(), 2);
+        assert_eq!(hs_abi_version_minor(), 3);
         assert_eq!(hs_abi_version_patch(), 0);
     }
 
@@ -901,5 +908,37 @@ mod ffi_smoke_tests {
         assert_eq!(decoded["code"], "invalid_argument");
         unsafe { free_result(HsCallResult::default()) };
         unsafe { hs_runtime_destroy(runtime) };
+    }
+}
+
+/// Shared test utilities for the FFI module tests (Phase E): runtime
+/// creation and error-JSON decoding, so each service module keeps its tests
+/// self-contained without repeating boilerplate.
+#[cfg(test)]
+pub(crate) mod ffi_test_util {
+    use std::ffi::c_void;
+
+    use crate::buffer;
+    use crate::hs_runtime_create;
+    use crate::result::{HsCallResult, free_result};
+
+    /// Create a runtime with the default config and return its handle.
+    /// The caller owns the handle and must `hs_runtime_destroy` it.
+    pub(crate) fn runtime_ptr() -> *mut c_void {
+        let mut out: *mut c_void = std::ptr::null_mut();
+        let result = unsafe { hs_runtime_create(b"{}".as_ptr(), 2, &mut out) };
+        assert_eq!(result.status, 0, "runtime create must succeed");
+        assert!(!out.is_null());
+        unsafe { free_result(result) };
+        out
+    }
+
+    /// Decode the `code` field of a failed call's error JSON (call only on
+    /// results with `status != 0`).
+    pub(crate) fn error_code_of(result: HsCallResult) -> String {
+        let bytes = unsafe { buffer::into_vec(result.error) };
+        let decoded: serde_json::Value = serde_json::from_slice(&bytes).expect("error json");
+        unsafe { free_result(HsCallResult::default()) };
+        decoded["code"].as_str().unwrap_or("").to_string()
     }
 }
