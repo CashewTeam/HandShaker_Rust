@@ -25,8 +25,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use handshaker_application::{
-    ConnectRequest, DeviceDescriptor, HandShakerRuntime, ListDevicesRequest, ListFilesRequest,
-    PublicError, PublicErrorCode, RuntimeConfig, SessionId,
+    ConnectRequest, DeviceDescriptor, DownloadRequest, HandShakerRuntime, ListDevicesRequest,
+    ListFilesRequest, PublicError, PublicErrorCode, RuntimeConfig, SessionId, TransferId,
+    UploadRequest,
 };
 use serde::Deserialize;
 use tokio::sync::broadcast;
@@ -36,7 +37,7 @@ use result::{HsCallResult, catch, err, free_result, input_str, ok, out_slot};
 
 /// ABI version (M8 §7.3), independent of Cargo versions.
 pub const ABI_VERSION_MAJOR: u32 = 1;
-pub const ABI_VERSION_MINOR: u32 = 0;
+pub const ABI_VERSION_MINOR: u32 = 1;
 pub const ABI_VERSION_PATCH: u32 = 0;
 
 /// Runtime handle: owns a tokio executor and the application runtime.
@@ -392,6 +393,158 @@ pub unsafe extern "C" fn hs_list_files(
 }
 
 // ---------------------------------------------------------------------------
+// Transfers (M8 Phase 6 suggested surface, ABI 1.1)
+// ---------------------------------------------------------------------------
+
+/// `hs_transfer_start_download` request JSON:
+/// `{"remote_path":"/sdcard/a.bin","local_path":"/tmp/a.bin","overwrite":false}`
+/// (overwrite optional, default false). Result JSON: `{"transfer_id": N}`.
+///
+/// # Safety
+/// `runtime` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hs_transfer_start_download(
+    runtime: *mut c_void,
+    session_id: u64,
+    request_ptr: *const u8,
+    request_len: usize,
+) -> HsCallResult {
+    catch("transfer_start_download", || {
+        let runtime = ffi_try!(runtime_ref(runtime, "transfer_start_download"));
+        let json = ffi_try!(input_str(
+            request_ptr,
+            request_len,
+            "transfer_start_download"
+        ));
+        let (remote_path, local_path, overwrite) = ffi_try!(ffi_transfer_paths(json));
+        let request = DownloadRequest {
+            session_id: SessionId(session_id),
+            remote_path,
+            local_path: PathBuf::from(local_path),
+            overwrite,
+        };
+        match runtime
+            ._tokio
+            .block_on(async { runtime.app.start_download(request).await })
+        {
+            Ok(id) => ok(&serde_json::json!({ "transfer_id": id.0 })),
+            Err(error) => err(&error),
+        }
+    })
+}
+
+/// `hs_transfer_start_upload` request JSON: same shape as
+/// `hs_transfer_start_download` (`remote_path` is the destination).
+///
+/// # Safety
+/// `runtime` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hs_transfer_start_upload(
+    runtime: *mut c_void,
+    session_id: u64,
+    request_ptr: *const u8,
+    request_len: usize,
+) -> HsCallResult {
+    catch("transfer_start_upload", || {
+        let runtime = ffi_try!(runtime_ref(runtime, "transfer_start_upload"));
+        let json = ffi_try!(input_str(request_ptr, request_len, "transfer_start_upload"));
+        let (remote_path, local_path, overwrite) = ffi_try!(ffi_transfer_paths(json));
+        let request = UploadRequest {
+            session_id: SessionId(session_id),
+            local_path: PathBuf::from(local_path),
+            remote_path,
+            overwrite,
+        };
+        match runtime
+            ._tokio
+            .block_on(async { runtime.app.start_upload(request).await })
+        {
+            Ok(id) => ok(&serde_json::json!({ "transfer_id": id.0 })),
+            Err(error) => err(&error),
+        }
+    })
+}
+
+/// Cancel a transfer. Result JSON: `{"cancelled": true}`.
+///
+/// # Safety
+/// `runtime` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hs_transfer_cancel(
+    runtime: *mut c_void,
+    transfer_id: u64,
+) -> HsCallResult {
+    catch("transfer_cancel", || {
+        let runtime = ffi_try!(runtime_ref(runtime, "transfer_cancel"));
+        match runtime
+            ._tokio
+            .block_on(async { runtime.app.cancel_transfer(TransferId(transfer_id)).await })
+        {
+            Ok(()) => ok(&serde_json::json!({ "cancelled": true })),
+            Err(error) => err(&error),
+        }
+    })
+}
+
+/// Get one transfer snapshot. Result JSON: `TransferSnapshot`.
+///
+/// # Safety
+/// `runtime` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hs_transfer_get(runtime: *mut c_void, transfer_id: u64) -> HsCallResult {
+    catch("transfer_get", || {
+        let runtime = ffi_try!(runtime_ref(runtime, "transfer_get"));
+        match runtime
+            ._tokio
+            .block_on(async { runtime.app.get_transfer(TransferId(transfer_id)).await })
+        {
+            Ok(snapshot) => ok(&snapshot),
+            Err(error) => err(&error),
+        }
+    })
+}
+
+/// List transfer snapshots (finished entries reaped). Result JSON: an array
+/// of `TransferSnapshot`.
+///
+/// # Safety
+/// `runtime` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hs_transfer_list(runtime: *mut c_void) -> HsCallResult {
+    catch("transfer_list", || {
+        let runtime = ffi_try!(runtime_ref(runtime, "transfer_list"));
+        match runtime
+            ._tokio
+            .block_on(async { runtime.app.list_transfers().await })
+        {
+            Ok(snapshots) => ok(&snapshots),
+            Err(error) => err(&error),
+        }
+    })
+}
+
+/// Shared parser for the transfer request JSON.
+fn ffi_transfer_paths(json: &str) -> std::result::Result<(String, String, bool), HsCallResult> {
+    #[derive(Deserialize)]
+    struct FfiTransferPaths {
+        remote_path: String,
+        local_path: String,
+        overwrite: Option<bool>,
+    }
+    let ffi: FfiTransferPaths = serde_json::from_str(json).map_err(|error| {
+        err(
+            &PublicError::new(PublicErrorCode::InvalidArgument, "invalid request JSON")
+                .with_detail(error.to_string()),
+        )
+    })?;
+    Ok((
+        ffi.remote_path,
+        ffi.local_path,
+        ffi.overwrite.unwrap_or(false),
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Event subscription (queue-pull model, M8 §7.10)
 // ---------------------------------------------------------------------------
 
@@ -538,9 +691,52 @@ mod ffi_smoke_tests {
     }
 
     #[test]
-    fn abi_version_is_1_0_0() {
+    fn abi_version_is_1_1_0() {
         assert_eq!(hs_abi_version_major(), 1);
-        assert_eq!(hs_abi_version_minor(), 0);
+        assert_eq!(hs_abi_version_minor(), 1);
         assert_eq!(hs_abi_version_patch(), 0);
+    }
+
+    #[test]
+    fn transfer_null_handle_returns_invalid_argument() {
+        let result = unsafe {
+            hs_transfer_start_download(
+                std::ptr::null_mut(),
+                1,
+                br#"{"remote_path":"/a","local_path":"/b"}"#.as_ptr(),
+                41,
+            )
+        };
+        assert_eq!(result.status, 1);
+        let bytes = unsafe { crate::buffer::into_vec(result.error) };
+        let decoded: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(decoded["code"], "invalid_argument");
+        unsafe { free_result(HsCallResult::default()) };
+    }
+
+    #[test]
+    fn transfer_missing_session_returns_session_not_found() {
+        let runtime = runtime_ptr();
+        let request = br#"{"remote_path":"/a.bin","local_path":"/tmp/a.bin","overwrite":false}"#;
+        let result =
+            unsafe { hs_transfer_start_download(runtime, 999, request.as_ptr(), request.len()) };
+        assert_eq!(result.status, 1);
+        let bytes = unsafe { crate::buffer::into_vec(result.error) };
+        let decoded: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(decoded["code"], "session_not_found");
+        unsafe { free_result(HsCallResult::default()) };
+        unsafe { hs_runtime_destroy(runtime) };
+    }
+
+    #[test]
+    fn transfer_bad_request_json_is_rejected() {
+        let runtime = runtime_ptr();
+        let result = unsafe { hs_transfer_start_upload(runtime, 1, b"{oops".as_ptr(), 6) };
+        assert_eq!(result.status, 1);
+        let bytes = unsafe { crate::buffer::into_vec(result.error) };
+        let decoded: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(decoded["code"], "invalid_argument");
+        unsafe { free_result(HsCallResult::default()) };
+        unsafe { hs_runtime_destroy(runtime) };
     }
 }

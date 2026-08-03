@@ -1,6 +1,7 @@
-/* handshaker_ffi.h — stable C ABI for handshaker-application (M8 v1).
+/* handshaker_ffi.h — stable C ABI for handshaker-application (M8 v1.1).
  *
- * ABI version: 1.0.0 (independent of the Rust crate version).
+ * ABI version: 1.1.0 (independent of the Rust crate version). 1.1 adds the
+ * transfer surface (hs_transfer_*); 1.0 symbols are unchanged.
  *
  * Ownership rules:
  *  - Rust allocates; Rust frees. Buffers returned in HsCallResult must be
@@ -80,6 +81,19 @@ HsCallResult hs_get_session(HsRuntime *runtime, uint64_t session_id);
  * Result: JSON array of FileEntryDto. */
 HsCallResult hs_list_files(HsRuntime *runtime, uint64_t session_id,
                            const uint8_t *request_json, size_t request_len);
+
+/* Transfers (ABI 1.1). request_json (start_*):
+ * {"remote_path":"/sdcard/a.bin","local_path":"/tmp/a.bin","overwrite":false}
+ * (overwrite optional, default false). Result: {"transfer_id": N}.
+ * hs_transfer_get/list result JSON: TransferSnapshot (array for list).
+ * hs_transfer_cancel result: {"cancelled": true}. */
+HsCallResult hs_transfer_start_download(HsRuntime *runtime, uint64_t session_id,
+                                        const uint8_t *request_json, size_t request_len);
+HsCallResult hs_transfer_start_upload(HsRuntime *runtime, uint64_t session_id,
+                                      const uint8_t *request_json, size_t request_len);
+HsCallResult hs_transfer_cancel(HsRuntime *runtime, uint64_t transfer_id);
+HsCallResult hs_transfer_get(HsRuntime *runtime, uint64_t transfer_id);
+HsCallResult hs_transfer_list(HsRuntime *runtime);
 
 /* Events (queue-pull). hs_subscription_next returns EventEnvelope JSON;
  * on timeout: {"timeout":true}; after runtime shutdown: {"closed":true}.

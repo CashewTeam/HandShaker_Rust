@@ -64,6 +64,25 @@ func main() throws {
     // No value buffer to free here (consumed by stringAndFree).
 
     try runtime.shutdown()
+
+    // Transfer surface (ABI 1.1): a missing session yields a stable
+    // session_not_found error (no device in this environment), proving the
+    // symbols link and the error JSON round-trips.
+    let transfer = try RuntimeHandle()
+    let start = "{\"remote_path\":\"/a.bin\",\"local_path\":\"/tmp/a.bin\"}"
+    let tresult = start.withCString { cstr in
+        hs_transfer_start_download(
+            transfer.ptrForTest, 999, UnsafePointer<UInt8>(OpaquePointer(cstr)), start.utf8.count)
+    }
+    guard tresult.status != 0 else { throw NSError(domain: "ffi", code: 6) }
+    guard let terror = stringAndFree(tresult.error),
+          terror.contains("session_not_found") else { throw NSError(domain: "ffi", code: 7) }
+    // transfer list on an empty runtime is a valid empty array.
+    let lresult = hs_transfer_list(transfer.ptrForTest)
+    guard lresult.status == 0 else { throw NSError(domain: "ffi", code: 8) }
+    guard let ljson = stringAndFree(lresult.value), ljson == "[]" else { throw NSError(domain: "ffi", code: 9) }
+    try transfer.shutdown()
+
     print("swift ffi smoke ok")
 }
 
