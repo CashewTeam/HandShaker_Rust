@@ -485,12 +485,12 @@ fn cache_path_for(cache_dir: &Path, kind: &str, device_key: &str, remote_path: &
 
 /// Write one thumbnail to the cache (or reuse the existing file) and return
 /// its absolute path as a string. The file name is
-/// `<device_key>-<kind>-<fnv1a64(remote_path) hex>.thumb`; the hash is a
-/// simple stable 64-bit FNV-1a (no new dependencies) and the device key
-/// keeps distinct phones from colliding on equal remote paths. Writes are
-/// atomic (temp file + rename) with a unique temp suffix so concurrent
-/// callers never observe a half-written cache entry or clobber each
-/// other's temp file.
+/// `<device_key>-<kind>-<fnv1a64(device_key + NUL + remote_path) hex>.thumb`;
+/// the digest covers the full pair (a truncated device prefix alone could
+/// collide across devices) and the hash is a simple stable 64-bit FNV-1a
+/// (no new dependencies). Writes are atomic (temp file + rename) with a
+/// unique temp suffix so concurrent callers never observe a half-written
+/// cache entry or clobber each other's temp file.
 fn cache_thumbnail(
     cache_dir: &Path,
     kind: &str,
