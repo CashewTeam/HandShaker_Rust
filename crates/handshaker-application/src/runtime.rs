@@ -14,8 +14,9 @@ use handshaker_core::{
 };
 
 use crate::dto::{
-    ConnectRequest, DeviceDescriptor, DeviceId, DeviceInfoDto, FileEntryDto, ListDevicesRequest,
-    ListFilesRequest, RuntimeConfig, SessionId, SessionSnapshot, SessionState, TransportKind,
+    ConnectRequest, CreateDirectoryRequest, DeletePathsRequest, DeleteResultDto, DeviceDescriptor,
+    DeviceId, DeviceInfoDto, FileEntryDto, ListDevicesRequest, ListFilesRequest, MovePathRequest,
+    RuntimeConfig, SessionId, SessionSnapshot, SessionState, StatFileRequest, TransportKind,
 };
 use crate::error::{AppResult, PublicError, PublicErrorCode, from_core_error};
 use crate::event::{BackendEvent, EventEnvelope, EventHub};
@@ -311,6 +312,83 @@ impl HandShakerRuntime {
             .await
             .map_err(|error| from_core_error(error, "list_files"))?;
         Ok(files.into_iter().map(remote_file_to_dto).collect())
+    }
+
+    // ---- file service (M8 §5.5) ----
+
+    /// Stat one remote path; `None` when the phone reports it missing.
+    pub async fn stat_file(&self, request: StatFileRequest) -> AppResult<Option<FileEntryDto>> {
+        self.ensure_open()?;
+        let guard = self.inner.sessions.lock().await;
+        let session = guard.get(&request.session_id).ok_or_else(|| {
+            PublicError::new(PublicErrorCode::SessionNotFound, "session not found")
+        })?;
+        let root = session.client.root_path().to_string();
+        let path = resolve_remote_path(&root, &request.path);
+        session
+            .client
+            .stat(&path)
+            .await
+            .map(|file| file.map(remote_file_to_dto))
+            .map_err(|error| from_core_error(error, "stat_file"))
+    }
+
+    pub async fn create_directory(&self, request: CreateDirectoryRequest) -> AppResult<()> {
+        self.ensure_open()?;
+        let guard = self.inner.sessions.lock().await;
+        let session = guard.get(&request.session_id).ok_or_else(|| {
+            PublicError::new(PublicErrorCode::SessionNotFound, "session not found")
+        })?;
+        let root = session.client.root_path().to_string();
+        let path = resolve_remote_path(&root, &request.path);
+        session
+            .client
+            .create_dir(&path)
+            .await
+            .map(|_| ())
+            .map_err(|error| from_core_error(error, "create_directory"))
+    }
+
+    pub async fn move_path(&self, request: MovePathRequest) -> AppResult<()> {
+        self.ensure_open()?;
+        let guard = self.inner.sessions.lock().await;
+        let session = guard.get(&request.session_id).ok_or_else(|| {
+            PublicError::new(PublicErrorCode::SessionNotFound, "session not found")
+        })?;
+        let root = session.client.root_path().to_string();
+        let source = resolve_remote_path(&root, &request.source);
+        let target = resolve_remote_path(&root, &request.target);
+        session
+            .client
+            .rename(&source, &target)
+            .await
+            .map_err(|error| from_core_error(error, "move_path"))
+    }
+
+    pub async fn delete_paths(&self, request: DeletePathsRequest) -> AppResult<DeleteResultDto> {
+        self.ensure_open()?;
+        let guard = self.inner.sessions.lock().await;
+        let session = guard.get(&request.session_id).ok_or_else(|| {
+            PublicError::new(PublicErrorCode::SessionNotFound, "session not found")
+        })?;
+        let root = session.client.root_path().to_string();
+        let paths: Vec<String> = request
+            .paths
+            .iter()
+            .map(|path| resolve_remote_path(&root, path))
+            .collect();
+        let options = handshaker_core::DeleteOptions {
+            trash: request.trash,
+            sync: request.sync,
+        };
+        let deleted = session
+            .client
+            .delete(&paths, options)
+            .await
+            .map_err(|error| from_core_error(error, "delete_paths"))?;
+        Ok(DeleteResultDto {
+            deleted: deleted.into_iter().map(|file| file.path).collect(),
+        })
     }
 
     // ---- transfers ----

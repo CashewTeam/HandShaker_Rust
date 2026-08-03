@@ -13,8 +13,9 @@ mod runtime;
 mod transfer;
 
 pub use dto::{
-    AdbDetailDto, ConnectRequest, DeviceDescriptor, DeviceId, DeviceInfoDto, FileEntryDto,
-    ListDevicesRequest, ListFilesRequest, RuntimeConfig, SessionId, SessionSnapshot, SessionState,
+    AdbDetailDto, ConnectRequest, CreateDirectoryRequest, DeletePathsRequest, DeleteResultDto,
+    DeviceDescriptor, DeviceId, DeviceInfoDto, FileEntryDto, ListDevicesRequest, ListFilesRequest,
+    MovePathRequest, RuntimeConfig, SessionId, SessionSnapshot, SessionState, StatFileRequest,
     TransportKind, UsbDetailDto,
 };
 pub use error::{AppResult, PublicError, PublicErrorCode, from_core_error};

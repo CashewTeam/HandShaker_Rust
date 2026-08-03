@@ -186,3 +186,42 @@ pub struct ListFilesRequest {
     /// Recursion depth (0 = one level).
     pub depth: u32,
 }
+
+/// Stat one remote path (M8 §5.5).
+#[derive(Debug, Clone)]
+pub struct StatFileRequest {
+    pub session_id: SessionId,
+    pub path: String,
+}
+
+/// Create one remote directory (M8 §5.5).
+#[derive(Debug, Clone)]
+pub struct CreateDirectoryRequest {
+    pub session_id: SessionId,
+    pub path: String,
+}
+
+/// Move/rename a remote path (M8 §5.5).
+#[derive(Debug, Clone)]
+pub struct MovePathRequest {
+    pub session_id: SessionId,
+    pub source: String,
+    pub target: String,
+}
+
+/// Delete remote paths (M8 §5.5). `trash` moves to trash when the phone
+/// supports it; `sync` marks the request as part of synchronization.
+#[derive(Debug, Clone)]
+pub struct DeletePathsRequest {
+    pub session_id: SessionId,
+    pub paths: Vec<String>,
+    pub trash: bool,
+    pub sync: bool,
+}
+
+/// Result of a delete request.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DeleteResultDto {
+    /// Paths the phone confirmed deleted.
+    pub deleted: Vec<String>,
+}
