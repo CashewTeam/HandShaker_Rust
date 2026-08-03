@@ -269,7 +269,10 @@ impl HandShakerClient {
         Self::connect_with_state(target, options, StateStore::discover()?, callbacks).await
     }
 
-    async fn connect_with_state(
+    /// Connect with an explicit state store, which controls where trust
+    /// records and the host UUID live (M8.1 Phase B / B4). Callers that want
+    /// the default config directory keep using [`Self::connect_with_event_callbacks`].
+    pub async fn connect_with_state(
         target: ConnectionTarget,
         options: ClientOptions,
         state: StateStore,

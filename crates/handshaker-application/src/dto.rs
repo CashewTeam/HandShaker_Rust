@@ -140,6 +140,13 @@ pub struct RuntimeConfig {
     pub state_dir: Option<PathBuf>,
     pub wire_log: Option<PathBuf>,
     pub event_capacity: usize,
+    /// Bounded transfer history (M8.1 Phase C / C4): keep at most this many
+    /// finished transfers (oldest evicted first; live transfers are never
+    /// evicted to make room).
+    pub transfer_history_capacity: usize,
+    /// Optional TTL for finished transfer entries; `None` keeps finished
+    /// entries until capacity eviction.
+    pub transfer_history_ttl: Option<Duration>,
 }
 
 impl Default for RuntimeConfig {
@@ -151,6 +158,8 @@ impl Default for RuntimeConfig {
             state_dir: None,
             wire_log: None,
             event_capacity: 1024,
+            transfer_history_capacity: 64,
+            transfer_history_ttl: None,
         }
     }
 }

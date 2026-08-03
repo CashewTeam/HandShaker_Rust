@@ -76,6 +76,21 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
   `scripts/check-ffi-abi.py` 校验符号/签名/ABI 版本注释/snapshot 一致性，
   CI 新增 ABI 检查与 C/Swift smoke；`APPLICATION_API_VERSION` 改为
   `1.0.0-preview.1`（v1 契约收口前允许破坏性修改，见 `docs/application-api-v1.md`）。
+- **M8.1 Phase B Runtime 并发修复（进行中）**：`state_dir`/`wire_log` 配置
+  真实生效（Core 公开 `StateStore::from_dir` 与 `connect_with_state`，FFI
+  `wire_log_utf8` 落地）；Session Registry 不再有锁跨网络 await（短临界区
+  clone client）；`disconnect` 重构为确定性关闭（Disconnecting → 取消传输
+  并等待 → 显式 QUIT → Closed 事件，异常发 Warning）；`shutdown` 单次执行、
+  join 全部任务、EventHub 显式关闭（订阅者收 `{"closed":true}`），删除固定
+  sleep（详见 `docs/m8-migration.md` §9）。
+- **M8.1 Phase C 传输事件与取消（进行中）**：进度事件携带 `total_bytes`
+  并按 100ms/256KiB 节流发布（30MB 真机实测 108 个事件）；取消立即终态
+  （`finished_at_ms` + 事件，不等待后台任务）；本地/手机端取消经
+  `TransferCancelled`/`RemoteCancelled` 区分；下载取消或传输丢失同步
+  Session `Failed` 事件；Transfer history 有容量（默认 64）/TTL 边界；
+  修复 macOS 14 provenance 文件上 `fchmodat` EPERM 导致的状态文件权限
+  失败（`docs/m8-migration.md` §10）；真机 ADB 验收通过（传输 MD5、进度、
+  传输中取消、清理无残留）。
 - 剪贴板/目录监控之外的推送发送侧仍属于后续里程碑。
 
 ## 命令行教程

@@ -40,14 +40,18 @@ handshaker-core(协议、传输、会话)
 
 ## 3. 应用服务模型(preview v1)
 
-- `HandShakerRuntime`(非单例,可多实例):create/shutdown(幂等)、
+- `HandShakerRuntime`(非单例,可多实例):create/shutdown(幂等,单次执行,
+  确定性关闭:取消传输 → 有界 join → 并行关闭 Session → 关闭 EventHub)、
   list_devices、connect/disconnect/get_session_snapshot、list_files、
   stat_file/create_directory/move_path/delete_paths、start_download/
   start_upload/cancel_transfer/get_transfer/list_transfers、subscribe_events;
 - `SessionId(u64)`/`TransferId(u64)` 单调分配;长任务后台执行 + 事件轮询;
+- 配置真实生效:`state_dir` 控制信任记录/host UUID 位置(缺省 Core 默认
+  目录),`wire_log` 真实开启线路日志;Registry 锁不跨网络 await(短临界区
+  clone client);
 - 事件:`EventEnvelope { sequence, timestamp_ms, event }`,broadcast,
-  Lagged 显式上报;v1 完整实现 Runtime/Session/Transfer 事件,
-  Clipboard/Media/RemoteFile 预留;
+  Lagged 显式上报;Runtime shutdown 后订阅流以 `Closed` 结束;
+  v1 完整实现 Runtime/Session/Transfer 事件,Clipboard/Media/RemoteFile 预留;
 - 错误:`PublicError { code, message, detail, retryable, operation }`,
   分区码 1001–9001,`code` 是唯一程序判断依据。
 

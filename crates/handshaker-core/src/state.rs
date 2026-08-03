@@ -42,6 +42,16 @@ impl StateStore {
         })
     }
 
+    /// Build a store rooted at an explicit config directory (the state file
+    /// lives at `config_dir/state.json`). Caller-provided state directories
+    /// let GUI containers, tests and multiple runtimes control where trust
+    /// records live (M8.1 Phase B / B4).
+    pub fn from_dir(config_dir: &Path) -> Self {
+        Self {
+            path: config_dir.join("state.json"),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn at(path: PathBuf) -> Self {
         Self { path }
@@ -166,13 +176,7 @@ fn set_file_mode(_options: &mut OpenOptions) {}
 
 #[cfg(unix)]
 fn set_directory_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
-        Error::Configuration(i18n::format(
-            "state.permission_failed",
-            &[&path.display().to_string(), &error.to_string()],
-        ))
-    })
+    ensure_permissions(path, 0o700)
 }
 
 #[cfg(not(unix))]
@@ -182,18 +186,42 @@ fn set_directory_permissions(_path: &Path) -> Result<()> {
 
 #[cfg(unix)]
 fn set_path_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|error| {
-        Error::Configuration(i18n::format(
-            "state.permission_failed",
-            &[&path.display().to_string(), &error.to_string()],
-        ))
-    })
+    ensure_permissions(path, 0o600)
 }
 
 #[cfg(not(unix))]
 fn set_path_permissions(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+/// Ensure `path` has exactly `mode` permission bits (0600 for files, 0700
+/// for directories). When the mode is already correct this is a no-op:
+/// macOS 14+ refuses `fchmodat` with EPERM on files carrying the
+/// `com.apple.provenance` attribute even when the target mode is unchanged,
+/// which would otherwise break every load/save of a provenance-marked
+/// state file.
+#[cfg(unix)]
+fn ensure_permissions(path: &Path, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let current = fs::metadata(path)
+        .map_err(|error| {
+            Error::Configuration(i18n::format(
+                "state.permission_failed",
+                &[&path.display().to_string(), &error.to_string()],
+            ))
+        })?
+        .permissions()
+        .mode()
+        & 0o777;
+    if current == mode {
+        return Ok(());
+    }
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|error| {
+        Error::Configuration(i18n::format(
+            "state.permission_failed",
+            &[&path.display().to_string(), &error.to_string()],
+        ))
+    })
 }
 
 fn unix_seconds() -> u64 {
@@ -256,5 +284,29 @@ mod tests {
         assert!(store.remove_trust("device-1").expect("remove"));
         let state = store.load_or_create().expect("load");
         assert!(state.trust.is_empty());
+    }
+
+    #[test]
+    fn from_dir_roots_state_file_in_config_dir() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let store = StateStore::from_dir(temp.path());
+        let state = store.load_or_create().expect("load or create");
+        assert_eq!(state.trust.len(), 0);
+        assert!(
+            temp.path().join("state.json").exists(),
+            "state.json must live under the configured config dir"
+        );
+    }
+
+    #[test]
+    fn ensure_permissions_skips_when_mode_already_matches() {
+        // macOS 14+ provenance-marked files reject fchmodat with EPERM even
+        // for the same mode; already-correct permissions must be a no-op.
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let file = temp.path().join("state.json");
+        std::fs::write(&file, b"{}").expect("write");
+        set_path_permissions(&file).expect("no-op must succeed");
+        let dir = temp.path();
+        set_directory_permissions(dir).expect("no-op must succeed");
     }
 }

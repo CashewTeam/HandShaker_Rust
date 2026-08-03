@@ -107,9 +107,10 @@ struct FfiRuntimeConfig {
     default_timeout_ms: Option<u64>,
     heartbeat_interval_ms: Option<u64>,
     state_dir_utf8: Option<String>,
-    #[allow(dead_code)]
     wire_log_utf8: Option<String>,
     event_capacity: Option<u32>,
+    transfer_history_capacity: Option<usize>,
+    transfer_history_ttl_ms: Option<u64>,
 }
 
 fn config_from_json(json: &str) -> Result<RuntimeConfig, HsCallResult> {
@@ -127,11 +128,13 @@ fn config_from_json(json: &str) -> Result<RuntimeConfig, HsCallResult> {
         default_timeout: Duration::from_millis(ffi.default_timeout_ms.unwrap_or(30_000)),
         heartbeat_interval: Duration::from_millis(ffi.heartbeat_interval_ms.unwrap_or(10_000)),
         state_dir: ffi.state_dir_utf8.map(PathBuf::from),
-        wire_log: None,
+        wire_log: ffi.wire_log_utf8.map(PathBuf::from),
         event_capacity: ffi
             .event_capacity
             .map(|value| value as usize)
             .unwrap_or(1024),
+        transfer_history_capacity: ffi.transfer_history_capacity.unwrap_or(64),
+        transfer_history_ttl: ffi.transfer_history_ttl_ms.map(Duration::from_millis),
     })
 }
 
@@ -751,6 +754,57 @@ mod ffi_smoke_tests {
         assert_eq!(decoded["code"], "invalid_argument");
         assert!(out.is_null(), "out_runtime must not be written on failure");
         unsafe { free_result(HsCallResult::default()) };
+    }
+
+    #[test]
+    fn runtime_config_state_dir_and_wire_log_are_applied() {
+        // M8.1 Phase B / B4+B5: state_dir_utf8 and wire_log_utf8 must reach
+        // the application RuntimeConfig (they used to be parsed and dropped).
+        let mut out: *mut c_void = std::ptr::null_mut();
+        let cfg = br#"{"state_dir_utf8":"/tmp/hs-state","wire_log_utf8":"/tmp/hs-wire.log"}"#;
+        let result = unsafe { hs_runtime_create(cfg.as_ptr(), cfg.len(), &mut out) };
+        assert_eq!(result.status, 0, "runtime create must succeed");
+        unsafe { free_result(result) };
+        let runtime = unsafe { &*(out as *const HsRuntime) };
+        assert_eq!(
+            runtime.app.config().state_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/hs-state"))
+        );
+        assert_eq!(
+            runtime.app.config().wire_log.as_deref(),
+            Some(std::path::Path::new("/tmp/hs-wire.log"))
+        );
+        unsafe { hs_runtime_destroy(out) };
+    }
+
+    #[test]
+    fn subscription_observes_closed_after_runtime_shutdown() {
+        // B3: after runtime shutdown the event stream must end with
+        // {"closed":true} instead of timing out forever.
+        let mut out: *mut c_void = std::ptr::null_mut();
+        let result = unsafe { hs_runtime_create(b"{}".as_ptr(), 2, &mut out) };
+        assert_eq!(result.status, 0, "runtime create must succeed");
+        unsafe { free_result(result) };
+        let mut sub: *mut c_void = std::ptr::null_mut();
+        let result = unsafe { hs_subscribe_events(out, &mut sub) };
+        assert_eq!(result.status, 0, "subscribe must succeed");
+        unsafe { free_result(result) };
+        let result = unsafe { hs_runtime_shutdown(out) };
+        assert_eq!(result.status, 0, "shutdown must succeed");
+        unsafe { free_result(result) };
+        // Drain until the stream reports closed (buffered events may precede).
+        loop {
+            let result = unsafe { hs_subscription_next(sub, 100) };
+            assert_eq!(result.status, 0);
+            let bytes = unsafe { crate::buffer::into_vec(result.value) };
+            let decoded: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+            if decoded == serde_json::json!({ "closed": true }) {
+                break;
+            }
+        }
+        unsafe { free_result(HsCallResult::default()) };
+        unsafe { hs_subscription_destroy(sub) };
+        unsafe { hs_runtime_destroy(out) };
     }
 
     #[test]

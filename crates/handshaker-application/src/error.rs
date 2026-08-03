@@ -156,7 +156,17 @@ pub type AppResult<T> = Result<T, PublicError>;
 pub fn from_core_error(error: handshaker_core::Error, operation: &str) -> PublicError {
     use handshaker_core::Error;
     let (code, retryable) = match &error {
-        Error::Interrupted | Error::Cancelled(_) => (PublicErrorCode::TransferCancelled, false),
+        Error::Interrupted => (PublicErrorCode::TransferCancelled, false),
+        // M8.1 Phase C / C3: distinguish local cancellation from a phone-side
+        // (remote) cancel so GUI can tell "I cancelled" from "the phone did".
+        Error::Cancelled(info) => match info.origin {
+            handshaker_core::CancellationOrigin::Local { .. } => {
+                (PublicErrorCode::TransferCancelled, false)
+            }
+            handshaker_core::CancellationOrigin::Remote { .. } => {
+                (PublicErrorCode::RemoteCancelled, false)
+            }
+        },
         Error::Timeout(_) => (PublicErrorCode::ConnectionLost, true),
         Error::Transport(_) => (PublicErrorCode::ConnectFailed, true),
         Error::Handshake(_) => (PublicErrorCode::TrustRejected, false),

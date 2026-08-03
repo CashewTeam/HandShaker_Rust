@@ -4,14 +4,14 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::Mutex;
 
 use handshaker_core::{
-    BatchTransferOptions, ClientOptions, ConnectionTarget, DeviceInfo, ErrorCode, HandShakerClient,
-    RemoteFile,
+    BatchTransferOptions, ClientOptions, ConnectionTarget, DeviceInfo, ErrorCode, EventCallbacks,
+    HandShakerClient, RemoteFile,
 };
 
 use crate::dto::{
@@ -41,20 +41,52 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Bounded wait for transfer tasks to release the session client during a
+/// deterministic close (M8.1 Phase B / B2). A fixed constant on purpose:
+/// adding a config knob would require real configuration plumbing.
+const SESSION_CLOSE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// One open session: the core client (shared with transfer tasks) plus its
-/// stable descriptors.
+/// stable descriptors. Kept behind an `Arc` so short registry critical
+/// sections can hand out the session (or its client) and drop the registry
+/// lock before any network await (M8.1 Phase B / B1).
 struct ActiveSession {
     client: Arc<HandShakerClient>,
     device: DeviceDescriptor,
     device_info: DeviceInfoDto,
     connected_at_ms: u64,
     last_activity_at_ms: u64,
-    state: SessionState,
+    /// `SessionState` discriminant (1=Connecting ..=5=Failed); transitions
+    /// are atomic so disconnect/shutdown never race on it.
+    state: AtomicU8,
+}
+
+impl ActiveSession {
+    fn snapshot(&self, id: SessionId, state: SessionState) -> SessionSnapshot {
+        SessionSnapshot {
+            id,
+            device: self.device.clone(),
+            device_info: self.device_info.clone(),
+            state,
+            connected_at_ms: self.connected_at_ms,
+            last_activity_at_ms: Some(self.last_activity_at_ms),
+        }
+    }
+}
+
+fn session_state_from_u8(value: u8) -> SessionState {
+    match value {
+        1 => SessionState::Connecting,
+        2 => SessionState::Ready,
+        3 => SessionState::Disconnecting,
+        4 => SessionState::Closed,
+        _ => SessionState::Failed,
+    }
 }
 
 struct RuntimeInner {
     config: RuntimeConfig,
-    sessions: Mutex<HashMap<SessionId, ActiveSession>>,
+    sessions: Mutex<HashMap<SessionId, Arc<ActiveSession>>>,
     next_session_id: AtomicU64,
     shutting_down: AtomicBool,
     event_hub: EventHub,
@@ -76,10 +108,21 @@ impl HandShakerRuntime {
                 "event_capacity must be positive",
             ));
         }
+        if config.transfer_history_capacity == 0 {
+            return Err(PublicError::new(
+                PublicErrorCode::InvalidArgument,
+                "transfer_history_capacity must be positive",
+            ));
+        }
+        let event_hub = EventHub::new(config.event_capacity);
         Ok(Self {
             inner: Arc::new(RuntimeInner {
-                event_hub: EventHub::new(config.event_capacity),
-                transfers: Arc::new(TransferRegistry::new()),
+                event_hub: event_hub.clone(),
+                transfers: Arc::new(TransferRegistry::new(
+                    event_hub,
+                    config.transfer_history_capacity,
+                    config.transfer_history_ttl,
+                )),
                 config,
                 sessions: Mutex::new(HashMap::new()),
                 next_session_id: AtomicU64::new(1),
@@ -88,10 +131,26 @@ impl HandShakerRuntime {
         })
     }
 
-    /// Idempotent: cancels transfers, closes all sessions, marks closed.
-    /// New operations after shutdown return `RuntimeClosed`.
+    /// Idempotent shutdown (M8.1 Phase B / B3): runs the deterministic close
+    /// path exactly once, in order:
+    /// 1. atomically mark shutting down (racing/duplicate calls return Ok);
+    /// 2. publish `RuntimeStopping`;
+    /// 3. cancel all transfers so their tasks release session clients;
+    /// 4. close every session in parallel via the deterministic close path
+    ///    (cancel session transfers, bounded join, explicit core close);
+    /// 5. close the event hub so subscribers observe `Closed`;
+    /// 6. no fixed sleeps — task completion is proven by joining, not by
+    ///    waiting. New operations after shutdown return `RuntimeClosed`.
     pub async fn shutdown(&self) -> AppResult<()> {
-        self.inner.shutting_down.store(true, Ordering::SeqCst);
+        if self
+            .inner
+            .shutting_down
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            // Already shutting down (or shut down): idempotent no-op.
+            return Ok(());
+        }
         self.inner.event_hub.publish(BackendEvent::RuntimeStopping);
         // Cancel all transfers first so their tasks release session clients.
         for id in self
@@ -103,13 +162,22 @@ impl HandShakerRuntime {
         {
             let _ = self.inner.transfers.cancel(id);
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Deterministically close every session in parallel (bounded joins
+        // inside close_session prove the tasks finished).
         let sessions = std::mem::take(&mut *self.inner.sessions.lock().await);
-        for (_, session) in sessions {
-            if let Ok(client) = Arc::try_unwrap(session.client) {
-                let _ = client.close().await;
-            }
+        let mut close_tasks = Vec::new();
+        for (id, session) in sessions {
+            let this = self.clone();
+            close_tasks.push(tokio::spawn(async move {
+                let _ = this.close_session(session, id).await;
+            }));
         }
+        for task in close_tasks {
+            let _ = task.await;
+        }
+        // Close the hub last: subscribers drain remaining events, then recv
+        // returns Closed.
+        self.inner.event_hub.close();
         Ok(())
     }
 
@@ -236,19 +304,32 @@ impl HandShakerRuntime {
             wire_log: self.inner.config.wire_log.clone(),
             adb_path: self.inner.config.adb_path.clone(),
         };
-        let client = HandShakerClient::connect(target, options)
-            .await
-            .map_err(|error| from_core_error(error, "connect"))?;
+        // state_dir must really control where trust records and the host
+        // UUID live (M8.1 Phase B / B4): explicit dir when configured,
+        // otherwise the core default config directory.
+        let state_store = match &self.inner.config.state_dir {
+            Some(dir) => handshaker_core::StateStore::from_dir(dir),
+            None => handshaker_core::StateStore::discover()
+                .map_err(|error| from_core_error(error, "connect"))?,
+        };
+        let client = HandShakerClient::connect_with_state(
+            target,
+            options,
+            state_store,
+            EventCallbacks::default(),
+        )
+        .await
+        .map_err(|error| from_core_error(error, "connect"))?;
         let device_info = client.device_info().clone();
         let id = SessionId(self.inner.next_session_id.fetch_add(1, Ordering::SeqCst));
-        let session = ActiveSession {
+        let session = Arc::new(ActiveSession {
             client: Arc::new(client),
             device: request.device.clone(),
             device_info: device_info_to_dto(&device_info),
             connected_at_ms: now_ms(),
             last_activity_at_ms: now_ms(),
-            state: SessionState::Ready,
-        };
+            state: AtomicU8::new(SessionState::Ready as u8),
+        });
         // Insert under the session lock and re-check shutdown so a racing
         // shutdown cannot leave this session orphaned (shutdown takes the
         // same lock after flipping the flag).
@@ -271,33 +352,99 @@ impl HandShakerRuntime {
 
     pub async fn disconnect(&self, session_id: SessionId) -> AppResult<()> {
         self.ensure_open()?;
-        let mut guard = self.inner.sessions.lock().await;
-        let session = guard.remove(&session_id).ok_or_else(|| {
-            PublicError::new(PublicErrorCode::SessionNotFound, "session not found")
-        })?;
-        drop(guard);
-        let result = match Arc::try_unwrap(session.client) {
-            Ok(client) => client
-                .close()
-                .await
-                .map_err(|error| from_core_error(error, "disconnect")),
-            // A transfer task still borrows the client; the connection is torn
-            // down when the last Arc drops (transport stream close).
-            Err(_) => Ok(()),
+        let session = {
+            let mut guard = self.inner.sessions.lock().await;
+            guard.remove(&session_id).ok_or_else(|| {
+                PublicError::new(PublicErrorCode::SessionNotFound, "session not found")
+            })?
         };
+        self.close_session(session, session_id).await
+    }
+
+    /// Deterministic session close (M8.1 Phase B / B2), shared by
+    /// `disconnect` and `shutdown`:
+    /// 1. atomically enter `Disconnecting` (terminal states are idempotent);
+    /// 2. reject new work — the session is already out of the registry, so
+    ///    new requests fail with `SessionNotFound`;
+    /// 3. cancel the session's transfers and wait (bounded) for their tasks
+    ///    to release the shared client;
+    /// 4. close the core client explicitly when this caller is the last
+    ///    owner (sends QUIT); otherwise surface a `Warning` — the connection
+    ///    is torn down by the last `Arc` drop (transport abort, no QUIT);
+    /// 5. publish the final `Closed` event.
+    async fn close_session(
+        &self,
+        session: Arc<ActiveSession>,
+        session_id: SessionId,
+    ) -> AppResult<()> {
+        // Terminal states are final: no second close, no state regression.
+        let mut observed = session.state.load(Ordering::SeqCst);
+        loop {
+            if observed == SessionState::Closed as u8 || observed == SessionState::Failed as u8 {
+                return Ok(());
+            }
+            match session.state.compare_exchange(
+                observed,
+                SessionState::Disconnecting as u8,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(actual) => observed = actual,
+            }
+        }
+
+        // Cancel the session's transfers; wait bounded for the tasks so they
+        // release their client Arcs before the explicit close below.
+        let joins = self.inner.transfers.cancel_for_session(session_id);
+        for join in joins {
+            let _ = tokio::time::timeout(SESSION_CLOSE_DEADLINE, join).await;
+        }
+
+        // Snapshot fields before consuming the session for the explicit close.
+        let closed_snapshot = session.snapshot(session_id, SessionState::Closed);
+        let mut warning: Option<PublicError> = None;
+        let mut close_error: Option<PublicError> = None;
+        match Arc::try_unwrap(session) {
+            Ok(active) => match Arc::try_unwrap(active.client) {
+                Ok(client) => {
+                    if let Err(error) = client.close().await {
+                        // The transport is already aborted by core close;
+                        // QUIT delivery failure is a best-effort warning.
+                        close_error = Some(from_core_error(error, "disconnect"));
+                    }
+                }
+                Err(_) => {
+                    // Another owner (e.g. the CLI migration's session_client
+                    // handle) still borrows the client. The connection is
+                    // torn down by the last Arc drop (transport abort; no
+                    // QUIT). This is observable, not silent.
+                    warning = Some(PublicError::new(
+                        PublicErrorCode::Internal,
+                        "session client still borrowed; connection closed by last owner",
+                    ));
+                }
+            },
+            Err(_) => {
+                // Unreachable in practice: the session was removed from the
+                // registry under the lock, so this caller is the only
+                // ActiveSession owner. Kept observable instead of silent.
+                warning = Some(PublicError::new(
+                    PublicErrorCode::Internal,
+                    "session close raced with another closer; connection closed by last owner",
+                ));
+            }
+        }
         self.inner
             .event_hub
-            .publish(BackendEvent::SessionStateChanged(Box::new(
-                SessionSnapshot {
-                    id: session_id,
-                    device: session.device,
-                    device_info: session.device_info,
-                    state: SessionState::Closed,
-                    connected_at_ms: session.connected_at_ms,
-                    last_activity_at_ms: Some(session.last_activity_at_ms),
-                },
-            )));
-        result
+            .publish(BackendEvent::SessionStateChanged(Box::new(closed_snapshot)));
+        if let Some(error) = close_error {
+            warning = Some(error);
+        }
+        if let Some(warning) = warning {
+            self.inner.event_hub.publish(BackendEvent::Warning(warning));
+        }
+        Ok(())
     }
 
     pub async fn get_session_snapshot(&self, session_id: SessionId) -> AppResult<SessionSnapshot> {
@@ -306,14 +453,10 @@ impl HandShakerRuntime {
         let session = guard.get(&session_id).ok_or_else(|| {
             PublicError::new(PublicErrorCode::SessionNotFound, "session not found")
         })?;
-        Ok(SessionSnapshot {
-            id: session_id,
-            device: session.device.clone(),
-            device_info: session.device_info.clone(),
-            state: session.state,
-            connected_at_ms: session.connected_at_ms,
-            last_activity_at_ms: Some(session.last_activity_at_ms),
-        })
+        Ok(session.snapshot(
+            session_id,
+            session_state_from_u8(session.state.load(Ordering::SeqCst)),
+        ))
     }
 
     /// Ping an open session; returns round-trip latency in milliseconds.
@@ -332,14 +475,10 @@ impl HandShakerRuntime {
     /// List one directory level (or `depth` levels) for an open session.
     pub async fn list_files(&self, request: ListFilesRequest) -> AppResult<Vec<FileEntryDto>> {
         self.ensure_open()?;
-        let guard = self.inner.sessions.lock().await;
-        let session = guard.get(&request.session_id).ok_or_else(|| {
-            PublicError::new(PublicErrorCode::SessionNotFound, "session not found")
-        })?;
-        let root = session.client.root_path().to_string();
+        let client = self.session_client_arc(request.session_id).await?;
+        let root = client.root_path().to_string();
         let path = resolve_remote_path(&root, &request.path);
-        let files = session
-            .client
+        let files = client
             .list_dir(&path, request.depth)
             .await
             .map_err(|error| from_core_error(error, "list_files"))?;
@@ -349,14 +488,10 @@ impl HandShakerRuntime {
     /// Count files under a remote directory (protocol exclusions passthrough).
     pub async fn count_files(&self, request: CountFilesRequest) -> AppResult<u64> {
         self.ensure_open()?;
-        let guard = self.inner.sessions.lock().await;
-        let session = guard.get(&request.session_id).ok_or_else(|| {
-            PublicError::new(PublicErrorCode::SessionNotFound, "session not found")
-        })?;
-        let root = session.client.root_path().to_string();
+        let client = self.session_client_arc(request.session_id).await?;
+        let root = client.root_path().to_string();
         let path = resolve_remote_path(&root, &request.path);
-        session
-            .client
+        client
             .file_count(&path, request.depth, request.exclusions)
             .await
             .map_err(|error| from_core_error(error, "count_files"))
@@ -367,14 +502,10 @@ impl HandShakerRuntime {
     /// Stat one remote path; `None` when the phone reports it missing.
     pub async fn stat_file(&self, request: StatFileRequest) -> AppResult<Option<FileEntryDto>> {
         self.ensure_open()?;
-        let guard = self.inner.sessions.lock().await;
-        let session = guard.get(&request.session_id).ok_or_else(|| {
-            PublicError::new(PublicErrorCode::SessionNotFound, "session not found")
-        })?;
-        let root = session.client.root_path().to_string();
+        let client = self.session_client_arc(request.session_id).await?;
+        let root = client.root_path().to_string();
         let path = resolve_remote_path(&root, &request.path);
-        session
-            .client
+        client
             .stat(&path)
             .await
             .map(|file| file.map(remote_file_to_dto))
@@ -383,14 +514,10 @@ impl HandShakerRuntime {
 
     pub async fn create_directory(&self, request: CreateDirectoryRequest) -> AppResult<()> {
         self.ensure_open()?;
-        let guard = self.inner.sessions.lock().await;
-        let session = guard.get(&request.session_id).ok_or_else(|| {
-            PublicError::new(PublicErrorCode::SessionNotFound, "session not found")
-        })?;
-        let root = session.client.root_path().to_string();
+        let client = self.session_client_arc(request.session_id).await?;
+        let root = client.root_path().to_string();
         let path = resolve_remote_path(&root, &request.path);
-        session
-            .client
+        client
             .create_dir(&path)
             .await
             .map(|_| ())
@@ -399,15 +526,11 @@ impl HandShakerRuntime {
 
     pub async fn move_path(&self, request: MovePathRequest) -> AppResult<()> {
         self.ensure_open()?;
-        let guard = self.inner.sessions.lock().await;
-        let session = guard.get(&request.session_id).ok_or_else(|| {
-            PublicError::new(PublicErrorCode::SessionNotFound, "session not found")
-        })?;
-        let root = session.client.root_path().to_string();
+        let client = self.session_client_arc(request.session_id).await?;
+        let root = client.root_path().to_string();
         let source = resolve_remote_path(&root, &request.source);
         let target = resolve_remote_path(&root, &request.target);
-        session
-            .client
+        client
             .rename(&source, &target)
             .await
             .map_err(|error| from_core_error(error, "move_path"))
@@ -415,11 +538,8 @@ impl HandShakerRuntime {
 
     pub async fn delete_paths(&self, request: DeletePathsRequest) -> AppResult<DeleteResultDto> {
         self.ensure_open()?;
-        let guard = self.inner.sessions.lock().await;
-        let session = guard.get(&request.session_id).ok_or_else(|| {
-            PublicError::new(PublicErrorCode::SessionNotFound, "session not found")
-        })?;
-        let root = session.client.root_path().to_string();
+        let client = self.session_client_arc(request.session_id).await?;
+        let root = client.root_path().to_string();
         let paths: Vec<String> = request
             .paths
             .iter()
@@ -429,8 +549,7 @@ impl HandShakerRuntime {
             trash: request.trash,
             sync: request.sync,
         };
-        let deleted = session
-            .client
+        let deleted = client
             .delete(&paths, options)
             .await
             .map_err(|error| from_core_error(error, "delete_paths"))?;
@@ -584,6 +703,8 @@ impl HandShakerRuntime {
         let entry = self.inner.transfers.register(snapshot);
         let registry = self.inner.transfers.clone();
         let event_hub = self.event_hub();
+        let inner = self.inner.clone();
+        let session_id = request.session_id;
         let options = transfer_options(registry.clone(), id, request.overwrite);
         let token = request_options(entry.cancel.clone());
         let local = request.local_path;
@@ -594,12 +715,13 @@ impl HandShakerRuntime {
                 .await;
             match result {
                 Ok(bytes) => {
-                    registry.set_progress(id, bytes);
+                    registry.set_progress(id, bytes, bytes);
                     if let Some(snapshot) = registry.transition(id, TransferState::Completed) {
                         event_hub.publish(BackendEvent::TransferUpdated(snapshot));
                     }
                 }
                 Err(error) => {
+                    let connection_closed = transfer_closed_the_session(&error);
                     if matches!(error.code(), ErrorCode::Cancelled | ErrorCode::Interrupted) {
                         registry.transition(id, TransferState::Cancelled);
                     } else {
@@ -608,6 +730,12 @@ impl HandShakerRuntime {
                     }
                     if let Ok(snapshot) = registry.get(id) {
                         event_hub.publish(BackendEvent::TransferUpdated(snapshot));
+                    }
+                    // Download cancellation (and transport loss) closes the
+                    // core session; reflect that in the application state so
+                    // GUI stops using a dead session (M8.1 Phase C / C3).
+                    if connection_closed {
+                        mark_session_failed(&inner.sessions, session_id, &event_hub).await;
                     }
                 }
             }
@@ -634,6 +762,8 @@ impl HandShakerRuntime {
         let entry = self.inner.transfers.register(snapshot);
         let registry = self.inner.transfers.clone();
         let event_hub = self.event_hub();
+        let inner = self.inner.clone();
+        let session_id = request.session_id;
         let options = transfer_options(registry.clone(), id, request.overwrite);
         let token = request_options(entry.cancel.clone());
         let local = request.local_path;
@@ -644,12 +774,13 @@ impl HandShakerRuntime {
                 .await;
             match result {
                 Ok(bytes) => {
-                    registry.set_progress(id, bytes);
+                    registry.set_progress(id, bytes, bytes);
                     if let Some(snapshot) = registry.transition(id, TransferState::Completed) {
                         event_hub.publish(BackendEvent::TransferUpdated(snapshot));
                     }
                 }
                 Err(error) => {
+                    let connection_closed = transfer_closed_the_session(&error);
                     if matches!(error.code(), ErrorCode::Cancelled | ErrorCode::Interrupted) {
                         registry.transition(id, TransferState::Cancelled);
                     } else {
@@ -658,6 +789,11 @@ impl HandShakerRuntime {
                     }
                     if let Ok(snapshot) = registry.get(id) {
                         event_hub.publish(BackendEvent::TransferUpdated(snapshot));
+                    }
+                    // A transport-level failure means the connection is gone;
+                    // reflect it in the application session state.
+                    if connection_closed {
+                        mark_session_failed(&inner.sessions, session_id, &event_hub).await;
                     }
                 }
             }
@@ -788,6 +924,12 @@ impl HandShakerRuntime {
     /// purpose and is removed once the CLI migration is complete (before the
     /// v1 freeze is lifted).
     pub async fn session_client(&self, session_id: SessionId) -> AppResult<Arc<HandShakerClient>> {
+        self.session_client_arc(session_id).await
+    }
+
+    /// Short critical section: clone the session's client Arc, then drop the
+    /// registry lock before any network await (M8.1 Phase B / B1).
+    async fn session_client_arc(&self, session_id: SessionId) -> AppResult<Arc<HandShakerClient>> {
         let guard = self.inner.sessions.lock().await;
         guard
             .get(&session_id)
@@ -798,6 +940,43 @@ impl HandShakerRuntime {
     fn event_hub(&self) -> EventHub {
         self.inner.event_hub.clone()
     }
+}
+
+/// Does this transfer error imply the underlying core session is dead?
+/// Download cancellation explicitly closes the session (bare-stream
+/// receive); transport errors mean the connection is gone (M8.1 Phase C/C3).
+fn transfer_closed_the_session(error: &handshaker_core::Error) -> bool {
+    use handshaker_core::Error;
+    match error {
+        Error::Cancelled(info) => info.connection_closed,
+        other => matches!(other.code(), ErrorCode::Transport),
+    }
+}
+
+/// Reflect a core session that died underneath a transfer (download
+/// cancellation or transport loss) in the application session state:
+/// `Ready` → `Failed`, published as an event. No-op when the session is
+/// already closing/closed or gone.
+async fn mark_session_failed(
+    sessions: &tokio::sync::Mutex<HashMap<SessionId, Arc<ActiveSession>>>,
+    session_id: SessionId,
+    event_hub: &EventHub,
+) {
+    let snapshot = {
+        let guard = sessions.lock().await;
+        let Some(session) = guard.get(&session_id) else {
+            return;
+        };
+        let state = session_state_from_u8(session.state.load(Ordering::SeqCst));
+        if state != SessionState::Ready {
+            return;
+        }
+        session
+            .state
+            .store(SessionState::Failed as u8, Ordering::SeqCst);
+        session.snapshot(session_id, SessionState::Failed)
+    };
+    event_hub.publish(BackendEvent::SessionStateChanged(Box::new(snapshot)));
 }
 
 /// Resolve a possibly-relative remote path against the device root, exactly

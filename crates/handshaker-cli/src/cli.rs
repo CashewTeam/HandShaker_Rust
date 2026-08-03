@@ -821,6 +821,8 @@ fn runtime_config(cli: &Cli) -> RuntimeConfig {
         state_dir: None,
         wire_log: cli.wire_log.clone(),
         event_capacity: 1024,
+        transfer_history_capacity: 64,
+        transfer_history_ttl: None,
     }
 }
 

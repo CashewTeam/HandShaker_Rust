@@ -80,8 +80,16 @@ impl HandShakerRuntime {
 
 语义:
 
-- `shutdown()` 幂等:取消活动任务、关闭全部 Session、之后新操作返回
-  `RuntimeClosed(1001)`;Drop 只做保守清理。
+- `shutdown()` 幂等且只执行一次:取消全部传输任务并**有界 join**(不依赖
+  固定 sleep),并行走确定性 Session 关闭路径,关闭 EventHub(订阅者收
+  `Closed`);之后新操作返回 `RuntimeClosed(1001)`;Drop 只做保守兜底。
+- `disconnect(session_id)` 确定性关闭:原子进入 `Disconnecting`(终态幂等)
+  → 取消该 Session 的传输任务并等待结束(有界 deadline)→ 显式关闭 Core
+  client(发送 QUIT,仅当调用方是最后持有者)→ 无条件发布
+  `SessionStateChanged(Closed)`;清理异常(超时/QUIT 发送失败/仍有持有者)
+  通过 `Warning` 事件可观察,调用仍返回成功。
+- `state_dir` 真实生效:连接时信任记录与 host UUID 写入 `state_dir`
+  (缺省为 Core 默认配置目录);`wire_log` 真实开启线路日志(默认关闭)。
 - 未知/已关闭 Session:`SessionNotFound(2103)`。
 - 相对远端路径由 Application 集中解析(`resolve_remote_path`/`normalize_remote_path`),
   `..` 不越过根目录。

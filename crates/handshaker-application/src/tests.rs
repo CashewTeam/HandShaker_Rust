@@ -1,6 +1,7 @@
 //! Application-layer unit tests: DTO semantics, error mapping, path rules,
 //! and runtime lifecycle that does not require a real device.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use handshaker_core::{DeviceInfo, RemoteFile};
@@ -19,6 +20,8 @@ fn test_config() -> RuntimeConfig {
         state_dir: None,
         wire_log: None,
         event_capacity: 16,
+        transfer_history_capacity: 8,
+        transfer_history_ttl: None,
     }
 }
 
@@ -74,6 +77,109 @@ async fn operations_after_shutdown_return_runtime_closed() {
         .await
         .expect_err("must be closed");
     assert_eq!(error.code, PublicErrorCode::RuntimeClosed);
+}
+
+#[tokio::test]
+async fn state_dir_controls_state_store_location() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = test_config();
+    config.state_dir = Some(temp.path().to_path_buf());
+    let runtime = HandShakerRuntime::create(config).await.expect("create");
+    // The configured adb binary is missing, so connect fails — but the
+    // state store must be loaded/created under state_dir before the
+    // transport attempt, proving the config field is really used
+    // (M8.1 Phase B / B4).
+    let error = runtime
+        .connect(crate::dto::ConnectRequest {
+            device: fake_device(),
+        })
+        .await
+        .expect_err("connect must fail without adb");
+    assert!(matches!(
+        error.code,
+        PublicErrorCode::AdbUnavailable
+            | PublicErrorCode::ConnectFailed
+            | PublicErrorCode::InvalidState
+    ));
+    assert!(
+        temp.path().join("state.json").exists(),
+        "state.json must be created under state_dir"
+    );
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn concurrent_requests_do_not_hold_the_registry_lock_across_await() {
+    // B1: file methods must clone the client in a short critical section and
+    // release the registry lock before awaiting; concurrent requests against
+    // a missing session must all fail fast with SessionNotFound instead of
+    // serializing on (or deadlocking through) the registry lock.
+    let runtime = Arc::new(
+        HandShakerRuntime::create(test_config())
+            .await
+            .expect("create"),
+    );
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let runtime = runtime.clone();
+        handles.push(tokio::spawn(async move {
+            let error = runtime
+                .list_files(crate::dto::ListFilesRequest {
+                    session_id: SessionId(42),
+                    path: "/".into(),
+                    depth: 1,
+                })
+                .await
+                .expect_err("missing session must error");
+            assert_eq!(error.code, PublicErrorCode::SessionNotFound);
+        }));
+    }
+    for handle in handles {
+        handle.await.expect("concurrent task panicked");
+    }
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn subscription_receives_closed_after_shutdown() {
+    // B3: after shutdown the event stream must end with `Closed` (previously
+    // the broadcast sender lived as long as the runtime, so subscribers only
+    // ever timed out).
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    let mut receiver = runtime.subscribe_events();
+    runtime.shutdown().await.expect("shutdown");
+    // Drain until the stream reports Closed.
+    while let Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) =
+        receiver.recv().await
+    {}
+}
+
+#[tokio::test]
+async fn concurrent_shutdown_runs_once_and_closes_events() {
+    // B3: racing shutdown calls must all return Ok; the hub ends up closed.
+    let runtime = Arc::new(
+        HandShakerRuntime::create(test_config())
+            .await
+            .expect("create"),
+    );
+    let mut handles = Vec::new();
+    for _ in 0..4 {
+        let runtime = runtime.clone();
+        handles.push(tokio::spawn(async move { runtime.shutdown().await }));
+    }
+    for handle in handles {
+        handle
+            .await
+            .expect("shutdown task panicked")
+            .expect("shutdown ok");
+    }
+    let mut receiver = runtime.subscribe_events();
+    assert!(matches!(
+        receiver.recv().await,
+        Err(tokio::sync::broadcast::error::RecvError::Closed)
+    ));
 }
 
 #[tokio::test]
@@ -325,9 +431,10 @@ fn unknown_enum_values_are_rejected_not_guessed() {
 
 #[test]
 fn transfer_state_transitions_are_one_way() {
+    use crate::event::EventHub;
     use crate::transfer::{TransferDirectionDto, TransferRegistry, TransferState};
 
-    let registry = TransferRegistry::new();
+    let registry = TransferRegistry::new(EventHub::new(8), 64, None);
     let snapshot = registry.snapshot_for(
         SessionId(1),
         TransferDirectionDto::Download,
@@ -360,9 +467,10 @@ fn transfer_state_transitions_are_one_way() {
 
 #[test]
 fn cancel_transfer_is_idempotent_and_missing_is_stable() {
+    use crate::event::EventHub;
     use crate::transfer::{TransferDirectionDto, TransferRegistry, TransferState};
 
-    let registry = TransferRegistry::new();
+    let registry = TransferRegistry::new(EventHub::new(8), 64, None);
     let snapshot = registry.snapshot_for(
         SessionId(1),
         TransferDirectionDto::Download,
@@ -382,6 +490,180 @@ fn cancel_transfer_is_idempotent_and_missing_is_stable() {
         .cancel(crate::transfer::TransferId(999))
         .expect_err("missing");
     assert_eq!(missing.code, PublicErrorCode::TransferNotFound);
+}
+
+#[test]
+fn transfer_progress_events_are_throttled_and_carry_total() {
+    // M8.1 Phase C / C2: progress updates carry total_bytes and the event
+    // stream is throttled (time + 256 KiB thresholds), never one event per
+    // chunk.
+    use crate::event::{BackendEvent, EventHub};
+    use crate::transfer::{TransferDirectionDto, TransferRegistry};
+
+    let hub = EventHub::new(64);
+    let mut receiver = hub.subscribe();
+    let registry = TransferRegistry::new(hub, 64, None);
+    let entry = registry.register(registry.snapshot_for(
+        SessionId(1),
+        TransferDirectionDto::Download,
+        "/remote/a.bin".into(),
+        "/local/a.bin".into(),
+    ));
+    let id = entry.snapshot.lock().unwrap().id;
+
+    // First update always emits; a tiny same-millisecond update is normally
+    // throttled, but on a slow machine the two calls can straddle the 100 ms
+    // window — allow either, never more than two.
+    registry.set_progress(id, 1024, 1_000_000);
+    registry.set_progress(id, 2048, 1_000_000);
+    let snapshot = registry.get(id).unwrap();
+    assert_eq!(snapshot.transferred_bytes, 2048);
+    assert_eq!(snapshot.total_bytes, Some(1_000_000));
+
+    let mut updated = 0;
+    while let Ok(envelope) = receiver.try_recv() {
+        if matches!(envelope.event, BackendEvent::TransferUpdated(_)) {
+            updated += 1;
+        }
+    }
+    assert!(
+        (1..=2).contains(&updated),
+        "small update must be throttled (got {updated} events)"
+    );
+
+    // Crossing the 256 KiB byte threshold emits regardless of time.
+    registry.set_progress(id, 300_000, 1_000_000);
+    let mut updated = 0;
+    while let Ok(envelope) = receiver.try_recv() {
+        if matches!(envelope.event, BackendEvent::TransferUpdated(_)) {
+            updated += 1;
+        }
+    }
+    assert_eq!(updated, 1, "byte threshold must emit");
+}
+
+#[test]
+fn cancel_sets_finished_at_and_publishes_immediately() {
+    // M8.1 Phase C / C3: cancel sets the terminal state with finished_at_ms
+    // and publishes the event right away — GUI must not wait for the
+    // background task to notice.
+    use crate::event::{BackendEvent, EventHub};
+    use crate::transfer::{TransferDirectionDto, TransferRegistry, TransferState};
+
+    let hub = EventHub::new(8);
+    let mut receiver = hub.subscribe();
+    let registry = TransferRegistry::new(hub, 64, None);
+    let entry = registry.register(registry.snapshot_for(
+        SessionId(1),
+        TransferDirectionDto::Upload,
+        "/local/c.bin".into(),
+        "/remote/c.bin".into(),
+    ));
+    let id = entry.snapshot.lock().unwrap().id;
+
+    registry.cancel(id).expect("cancel");
+    let snapshot = registry.get(id).unwrap();
+    assert_eq!(snapshot.state, TransferState::Cancelled);
+    assert!(
+        snapshot.finished_at_ms.is_some(),
+        "cancel must set finished_at_ms"
+    );
+    let mut saw_terminal = false;
+    while let Ok(envelope) = receiver.try_recv() {
+        if let BackendEvent::TransferUpdated(s) = envelope.event
+            && s.state == TransferState::Cancelled
+        {
+            saw_terminal = true;
+        }
+    }
+    assert!(
+        saw_terminal,
+        "cancel must publish the terminal event immediately"
+    );
+}
+
+#[test]
+fn transfer_history_is_bounded_by_capacity_and_ttl() {
+    // M8.1 Phase C / C4: finished entries are evicted oldest-first while
+    // over capacity; TTL-expired finished entries are reaped on register.
+    use crate::transfer::{TransferDirectionDto, TransferRegistry, TransferState};
+
+    let register = |registry: &TransferRegistry, n: u64| {
+        let entry = registry.register(registry.snapshot_for(
+            SessionId(1),
+            TransferDirectionDto::Download,
+            format!("/remote/{n}.bin"),
+            format!("/local/{n}.bin"),
+        ));
+        entry.snapshot.lock().unwrap().id
+    };
+
+    // Capacity 2: finishing the two oldest and registering a third evicts
+    // the oldest finished entry (live entries are never evicted).
+    let hub = crate::event::EventHub::new(8);
+    let registry = TransferRegistry::new(hub, 2, None);
+    let id1 = register(&registry, 1);
+    let id2 = register(&registry, 2);
+    let id3 = register(&registry, 3);
+    registry.transition(id1, TransferState::Completed);
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    registry.transition(id2, TransferState::Completed);
+    let id4 = register(&registry, 4);
+    assert!(
+        registry.get(id1).is_err(),
+        "oldest finished must be evicted"
+    );
+    assert!(
+        registry.get(id2).is_err(),
+        "capacity 2 keeps at most two entries: second-oldest finished evicted too"
+    );
+    assert!(registry.get(id3).is_ok());
+    assert!(registry.get(id4).is_ok());
+
+    // TTL 1 ms: a finished entry older than the TTL is reaped on the next
+    // register (live entries are kept).
+    let hub = crate::event::EventHub::new(8);
+    let registry = TransferRegistry::new(hub, 64, Some(std::time::Duration::from_millis(1)));
+    let old = register(&registry, 10);
+    registry.transition(old, TransferState::Completed);
+    let live = register(&registry, 11);
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let fresh = register(&registry, 12);
+    assert!(
+        registry.get(old).is_err(),
+        "TTL-expired entry must be reaped"
+    );
+    assert!(registry.get(live).is_ok(), "live entry must be kept");
+    assert!(registry.get(fresh).is_ok());
+}
+
+#[test]
+fn cancelled_error_maps_by_origin() {
+    // M8.1 Phase C / C3: local vs phone-side cancellation is distinguishable
+    // through stable error codes.
+    use handshaker_core::{CancellationInfo, CancellationOrigin};
+
+    let local = from_core_error(
+        handshaker_core::Error::Cancelled(CancellationInfo {
+            sid: 1,
+            origin: CancellationOrigin::Local { flag_sent: true },
+            connection_closed: false,
+        }),
+        "download",
+    );
+    assert_eq!(local.code, PublicErrorCode::TransferCancelled);
+
+    let remote = from_core_error(
+        handshaker_core::Error::Cancelled(CancellationInfo {
+            sid: 1,
+            origin: CancellationOrigin::Remote {
+                error_code: Some(1),
+            },
+            connection_closed: true,
+        }),
+        "download",
+    );
+    assert_eq!(remote.code, PublicErrorCode::RemoteCancelled);
 }
 
 #[tokio::test]

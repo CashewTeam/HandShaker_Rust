@@ -251,3 +251,125 @@ connect/disconnect/get session、list files、subscribe/next/destroy。
 - Phase C/D/E:事件桥接、传输进度、FFI 功能扩展;
 - 本记录仅覆盖 Phase A 契约与文档止血,不改变任何 Rust 行为代码
   (除 `APPLICATION_API_VERSION` 常量字符串)。
+## 9. M8.1 Phase B 记录(Runtime 与并发模型修复)
+
+> 依据审计文档 Phase B(B1–B5);全部为 Application/Core 行为代码变更。
+
+### 9.1 配置真实生效(B4 state_dir / B5 wire_log)
+
+- Core:`StateStore::from_dir(&Path)` 公开(状态文件位于 `config_dir/state.json`,
+  `discover()` 保留);`HandShakerClient::connect_with_state` 公开为稳定入口;
+- Application `connect()`:按 `RuntimeConfig.state_dir` 构造 StateStore
+  (`Some` → `from_dir`,`None` → `discover()`,错误映射 `Configuration → InvalidState`);
+- FFI `config_from_json`:`wire_log_utf8` 真正映射到 `RuntimeConfig.wire_log`
+  (原解析后丢弃,固定 `None`);ABI 不变;
+- 测试:`state_dir_controls_state_store_location`(connect 失败但 state.json
+  落在指定 tempdir)、FFI `runtime_config_state_dir_and_wire_log_are_applied`、
+  Core `from_dir_roots_state_file_in_config_dir`。
+
+### 9.2 Registry 并发模型(B1)
+
+- `ActiveSession` 改为 `Arc<ActiveSession>`(state 用 `AtomicU8` 存
+  `SessionState` 判别值,`closing: CancellationToken`);Registry 存
+  `HashMap<SessionId, Arc<ActiveSession>>`;
+- 全部网络方法统一"短临界区 clone client Arc → 释放 Registry 锁 → await":
+  `list_files/count_files/stat_file/create_directory/move_path/delete_paths`
+  (clipboard/media 原本已合规);`get_session_snapshot`/`session_client` 保持短锁;
+- 私有 `session_client_arc` 为内部标准路径,公共 `session_client`(过渡 API)
+  委托之;
+- 测试:`concurrent_requests_do_not_hold_the_registry_lock_across_await`。
+
+### 9.3 确定性 Session 关闭(B2)
+
+- `TransferRegistry::cancel_for_session(session_id)`:取消该 Session 全部
+  transfer 并收集 join handle(按 snapshot.session_id 过滤,不维护易漂移的
+  集合);
+- `Runtime::disconnect` 重写,共享私有 `close_session`:
+  原子进入 `Disconnecting`(Closed/Failed 终态幂等)→ `closing.cancel()` →
+  取消 transfers → 有界等待 join(`SESSION_CLOSE_DEADLINE = 5s` 常量,
+  不新增配置字段)→ `Arc::try_unwrap` 成功则显式 `close()`(发 QUIT)→
+  无条件发布 `SessionStateChanged(Closed)` → 清理异常(close 失败/仍有
+  持有者)发布 `Warning` 事件并返回 Ok(partial success 可观察,不吞错);
+- CLI `close_session`(drop client + disconnect)保持不变,与新路径兼容;
+- 测试:`cancel_for_session_only_cancels_that_sessions_transfers`、
+  `cancel_is_idempotent`。
+
+### 9.4 确定性 shutdown 与 EventHub close(B3)
+
+- `EventHub`:sender 改 `Mutex<Option<Sender>>`;`close()` drop sender 后
+  全部 receiver 收 `Closed`(此前 sender 随 `Arc<RuntimeInner>` 永存,
+  订阅者永远收不到 Closed);关闭后 `publish` 静默、`subscribe` 返回
+  立即 Closed 的 receiver;
+- `Runtime::shutdown` 重写:`compare_exchange` 保证只执行一次(并发/重复
+  调用返回 Ok)→ `RuntimeStopping` → 取消全部 transfers → 并行执行
+  `close_session`(join 证明任务结束)→ `EventHub::close()`;删除固定 50ms
+  sleep;
+- FFI `hs_subscription_next` 在 shutdown 后返回 `{"closed":true}`;
+- 测试:`subscription_receives_closed_after_shutdown`、
+  `concurrent_shutdown_runs_once_and_closes_events`(app)、
+  `subscription_observes_closed_after_runtime_shutdown`(ffi)。
+
+### 9.5 遗留与后续
+
+- 下载取消导致 Session 失效的 `Failed` 状态发布、transfer 进度事件、
+  transfer history 容量边界属 Phase C,未在本阶段处理;
+- `session_client()` 过渡 API 仍在(移除属冻结前收口,见 §8.2 条件);
+- trust list/remove/reset 的 state_dir 注入属 Phase D TrustService,
+  CLI 仍走 `StateStore::discover()`。
+## 10. M8.1 Phase C 记录(事件与传输模型,传输侧)
+
+> 依据审计文档 Phase C(C2/C3/C4);C1(Core 事件桥接)与 C5(通用连接丢失
+> 事件)未完成,见 §10.3。
+
+### 10.1 传输进度事件(C2)
+
+- progress 回调携带 `TransferProgress.total`,`set_progress` 同时写入
+  `transferred_bytes` 与 `total_bytes`(此前 total 被丢弃,进度条无法确定);
+- 事件节流:每条目 `ProgressThrottle`(100ms / 256KiB 阈值),
+  `TransferUpdated` 事件流有界(~10-20/s),终态无条件发布;
+- `TransferRegistry` 持有 Runtime 的 `EventHub` 克隆(同一事件序列)。
+
+### 10.2 取消语义(C3)与有界历史(C4)
+
+- `cancel()` 立即置 `Cancelled` + `finished_at_ms` 并发布 `TransferUpdated`
+  事件(不等待后台任务);`transition` 对 Cancelled 同样记录 finished_at;
+  终态单向不可覆盖(既有 guard);
+- `from_core_error` 按 `CancellationOrigin` 区分:
+  `Local → TransferCancelled(4202)` / `Remote → RemoteCancelled(4203)`;
+- 任务闭包检测 `transfer_closed_the_session`(`Cancelled.connection_closed`
+  或 `Transport` 错误)后 `mark_session_failed`:Session `Ready → Failed`
+  并发布 `SessionStateChanged`,GUI 不再使用已失效会话;
+- `RuntimeConfig` 新增 `transfer_history_capacity`(默认 64,淘汰最老
+  finished,live 任务永不淘汰)与 `transfer_history_ttl`;
+  `TransferRegistry::new(event_hub, capacity, ttl)`;FFI 配置新增
+  `transfer_history_capacity`/`transfer_history_ttl_ms`(ABI 不变);
+- CLI/tests 构造点补齐新字段。
+
+### 10.3 遗留
+
+- C1(Core typed event 桥接:clipboard/media/remote-file/device 主动推送)
+  与 C5(请求级连接丢失统一检测)仍为后续阶段;
+- batch 传输仍无逐文件进度事件(CLI 批量面设计如此,任务面 start_* 有)。
+
+### 10.4 真机发现并修复:macOS provenance 权限
+
+- 现象:`state.json` 上 `fs::set_permissions` 返回 EPERM,所有连接失败;
+- 根因:macOS 14+ 的 `com.apple.provenance` xattr 使 `fchmodat`(Rust std
+  `fs::set_permissions` 所用)即使权限相同也返回 EPERM(`/bin/chmod` 的
+  `chmod(2)` 不受限;python os.chmod 同样失败);
+- 修复:`ensure_permissions` 先比对当前 mode,已符合(0600/0700)时跳过
+  chmod;权限不符时仍显式设置并如实报错;新文件由 `OpenOptions.mode`
+  直接以 0600 创建;
+- 测试:`ensure_permissions_skips_when_mode_already_matches`。
+
+### 10.5 真机验收(ADB,Smartisan U2 Pro / OD103,2026-08-03)
+
+- 基础:device info/ping(3ms)/fs ls 正常;唯一测试目录
+  `HandShakerTest_PhaseC_<ts>` 创建、3MB+24B 上传、下载 MD5 一致
+  (`0b63945931d22d284d080356ff945dce`)、mv/rm、剪贴板 set/get;
+- 传输进度:30MB 下载 `total_bytes=31457280`,节流事件 108 个
+  (< 256KiB 阈值上限),终态 Completed 无条件发布;
+- 传输中取消:立即 `Cancelled` + `finished_at_ms`,随后
+  `SessionStateChanged(Failed)`(下载取消关闭 Core 会话);
+- 确定性关闭:Failed 会话 disconnect 幂等清理,无残留 adb forward;
+- 测试目录与本地临时文件全部清理。
