@@ -1,11 +1,13 @@
-//! Photo-sync FFI surface (ABI 1.4, planned post-Phase E minor).
+//! Photo-sync FFI surface (ABI 1.4).
 //!
-//! All calls are short: `hs_sync_start` launches the background run and
-//! returns immediately with the profile id — progress is polled with
-//! `hs_sync_status` and/or observed through the event subscription
-//! (`SyncWatchApplied`, `TransferUpdated`, `Warning`). The caller
-//! orchestrates: plan → start → poll/events → (optionally) start_watch →
-//! stop_watch/stop.
+//! No call blocks on a full sync run: `hs_sync_start` registers the job
+//! and spawns the background run, returning immediately with the profile
+//! id — progress is polled with `hs_sync_status` and/or observed through
+//! the event subscription (`SyncWatchApplied`, `TransferUpdated`,
+//! `Warning`). The caller orchestrates: plan → start → poll/events →
+//! (optionally) start_watch → stop_watch/stop. (`hs_sync_plan` performs
+//! one bounded device round-trip for the photo listing; the phone-side
+//! reject retry is capped at 3 × 1.5 s.)
 
 use std::ffi::c_void;
 

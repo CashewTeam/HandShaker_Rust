@@ -26,9 +26,8 @@ use crate::runtime_ref;
 ///   "adb_version":"Android Debug Bridge version 1.0.41"|null,
 ///   "state_dir":"/path"|null,"wire_log_enabled":true|false,
 ///   "active_sessions":N,"active_transfers":N,
-///   "capabilities":["files","clipboard","trust","media","batch",
-///    "monitor","events","discovery","diagnostics"]}` (the sync backend
-///    exists but its FFI wrapper is intentionally not shipped yet).
+///   "capabilities":["files","clipboard","trust","media","batch","sync",
+///    "monitor","events","discovery","diagnostics"]}`.
 /// `adb_available`/`adb_version` probe the configured adb binary with
 /// `adb version` (first output line); `active_transfers` counts snapshots
 /// that are not in a terminal state (Queued or Running).
@@ -81,7 +80,7 @@ pub unsafe extern "C" fn hs_runtime_diagnostics(runtime: *mut c_void) -> HsCallR
             "active_sessions": active_sessions,
             "active_transfers": active_transfers,
             "capabilities": [
-                "files", "clipboard", "trust", "media", "batch",
+                "files", "clipboard", "trust", "media", "batch", "sync",
                 "monitor", "events", "discovery", "diagnostics",
             ],
         }))
@@ -205,6 +204,7 @@ mod tests {
             "trust",
             "media",
             "batch",
+            "sync",
             "monitor",
             "events",
             "discovery",
@@ -215,12 +215,11 @@ mod tests {
                 "missing {expected}"
             );
         }
-        // Negative guard (review follow-up): the sync backend exists but its
-        // FFI wrapper is intentionally not shipped, so the capability must
-        // stay absent — a regression re-adding it must fail this test.
+        // The photo-sync FFI ships since ABI 1.4.0: the capability must be
+        // present so feature discovery via hs_runtime_diagnostics sees it.
         assert!(
-            !capabilities.iter().any(|capability| capability == "sync"),
-            "unexpected sync capability"
+            capabilities.contains(&"sync".to_string()),
+            "missing sync capability"
         );
         unsafe { hs_runtime_destroy(runtime) };
     }
