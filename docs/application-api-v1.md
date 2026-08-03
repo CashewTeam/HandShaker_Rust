@@ -57,10 +57,17 @@ FFI、UniFFI 或任何 UI 框架。
 | `SessionSnapshot` | `id, device, device_info, state, connected_at_ms, last_activity_at_ms` |
 | `DeviceInfoDto` | serial/phone_id/name/model/brand/manufacturer/smartisan_version/apk_version/apk_version_name/root_path/external_storage_path/disk_size/used_disk_size/battery_percentage/phone_locked(后 5 字段可选,Phase D/D2 补全) |
 | `FileEntryDto` | path/size/created_at_ms/modified_at_ms/is_directory/checksum/is_trash/media_id |
-| `RuntimeConfig` | adb_path/default_timeout/heartbeat_interval/state_dir/wire_log/event_capacity |
+| `RuntimeConfig` | adb_path/default_timeout/heartbeat_interval/state_dir/wire_log/event_capacity/transfer_history_capacity/transfer_history_ttl |
 | `ListDevicesRequest` | include_adb/include_wifi/include_usb/wifi_browse_timeout |
 | `ConnectRequest` | device(来自 `list_devices` 或同形构造) |
 | `ListFilesRequest` | session_id/path/depth |
+| `DeviceDiscoveryResult` | devices + warnings(Phase D/D1;单传输失败不吞错) |
+| `DeviceDiscoveryWarning` | transport + error(稳定 JSON:`{"transport":"adb","error":{...}}`) |
+| `TrustRecordDto` | device_id(`phone:<uuid>`)/device_name/updated_at_ms(Phase D/D3;不含 derived key) |
+| `RemoveTrustRequest/Result`、`ResetWifiTrustRequest` | 信任服务请求/响应(Phase D/D3) |
+| `FileOperationPlan` | direction/session_id/items/conflicts/file_count/directory_count/total_bytes/requires_recursive/executable(Phase D/D4) |
+| `FilePlanItem/FilePlanConflict/FileConflictKind` | 计划条目与冲突(`destination_exists`/`destination_type_mismatch`/`recursive_required`/`duplicate_destination`/`source_missing`/`local_permission_denied`) |
+| `PlanDownloadRequest/PlanUploadRequest/ExecuteFilePlanRequest` | 预检与执行请求(Phase D/D4) |
 
 ## 4. Runtime 接口(preview,未冻结)
 
@@ -70,11 +77,22 @@ FFI、UniFFI 或任何 UI 框架。
 impl HandShakerRuntime {
     pub async fn create(config: RuntimeConfig) -> AppResult<Self>;
     pub async fn shutdown(&self) -> AppResult<()>;   // 幂等
+    // 发现（Phase D/D1）:带 per-transport 诊断;list_devices 为 preview 兼容包装
+    pub async fn discover_devices(&self, request: ListDevicesRequest) -> AppResult<DeviceDiscoveryResult>;
     pub async fn list_devices(&self, request: ListDevicesRequest) -> AppResult<Vec<DeviceDescriptor>>;
     pub async fn connect(&self, request: ConnectRequest) -> AppResult<SessionId>;
     pub async fn disconnect(&self, session_id: SessionId) -> AppResult<()>;
     pub async fn get_session_snapshot(&self, session_id: SessionId) -> AppResult<SessionSnapshot>;
+    pub async fn ping(&self, session_id: SessionId) -> AppResult<PingResultDto>;
     pub async fn list_files(&self, request: ListFilesRequest) -> AppResult<Vec<FileEntryDto>>;
+    // 信任（Phase D/D3）:始终使用 Runtime 的 state_dir
+    pub async fn list_trust_records(&self) -> AppResult<Vec<TrustRecordDto>>;
+    pub async fn remove_trust_record(&self, request: RemoveTrustRequest) -> AppResult<RemoveTrustResult>;
+    pub async fn reset_wifi_trust(&self, request: ResetWifiTrustRequest) -> AppResult<()>;
+    // 文件预检与执行（Phase D/D4）
+    pub async fn plan_download(&self, request: PlanDownloadRequest) -> AppResult<FileOperationPlan>;
+    pub async fn plan_upload(&self, request: PlanUploadRequest) -> AppResult<FileOperationPlan>;
+    pub async fn execute_file_plan(&self, request: ExecuteFilePlanRequest) -> AppResult<TransferId>;
 }
 ```
 
@@ -88,13 +106,25 @@ impl HandShakerRuntime {
   client(发送 QUIT,仅当调用方是最后持有者)→ 无条件发布
   `SessionStateChanged(Closed)`;清理异常(超时/QUIT 发送失败/仍有持有者)
   通过 `Warning` 事件可观察,调用仍返回成功。
-- `state_dir` 真实生效:连接时信任记录与 host UUID 写入 `state_dir`
-  (缺省为 Core 默认配置目录);`wire_log` 真实开启线路日志(默认关闭)。
-- 未知/已关闭 Session:`SessionNotFound(2103)`。
+- `state_dir` 真实生效:连接、信任(Phase D/D3)记录与 host UUID 写入
+  `state_dir`(缺省为 Core 默认配置目录);`wire_log` 真实开启线路日志
+  (默认关闭)。
+- 未知/已关闭 Session:`SessionNotFound(2103)`/`SessionClosed(2104)`。
 - 相对远端路径由 Application 集中解析(`resolve_remote_path`/`normalize_remote_path`),
   `..` 不越过根目录。
-- `list_devices` 单传输失败不整批失败(如 ADB 未装时仍返回 WiFi/USB);
-  全部失败时返回空列表或对应错误。
+- `discover_devices`(Phase D/D1):单传输失败不整批失败——失败以
+  `DeviceDiscoveryWarning { transport, error }` 呈现,其余传输的设备保留;
+  整体错误(Runtime 已关闭、请求非法)仍返回 `Err`。`list_devices` 为
+  preview 兼容包装,仅返回 devices。
+- 稳定身份(Phase D/D2):Wi-Fi 发现的 `DeviceDescriptor.id` 是动态
+  endpoint 标识;连接成功后 `stable_id`(`phone:<uuid>`)由
+  `phone_id` reconcile,`DeviceUpdated` 事件携带 `stable_id`;
+  UI 身份判断使用 `stable_id ?? id`。
+- 文件计划(Phase D/D4):`plan_download`/`plan_upload` 统一决定源类型、
+  recursive 要求、目标解析与 overwrite/类型/重复冲突;
+  `FileOperationPlan.executable` 只由不可覆盖冲突和调用方 `overwrite`
+  决定;`execute_file_plan` 校验后以后台传输执行并返回统一 `TransferId`
+  (进度/终态经 `TransferUpdated` 事件,取消经 `cancel_transfer`)。
 
 ## 5. 错误模型
 
@@ -103,7 +133,8 @@ retryable: bool, operation: Option<String> }`
 
 - `code` 是唯一程序判断依据;`message` 仅展示;`detail` 不含密钥与 wire payload。
 - 分区:1000–1099 Runtime / 1100–1199 参数状态 / 2000–2099 设备发现 /
-  2100–2199 连接 / 2200–2299 信任握手 / 3000–3099 远端文件系统 /
+  2100–2199 连接 / 2200–2299 信任握手 / 3000–3099 远端文件系统
+  (3004 `remote_io` 为聚合批量失败,Phase D/D4 新增)/
   3100–3199 本地文件系统 / 4200–4299 传输任务 / 5000–5199 协议编解码 /
   6000–6299 传输后端 / 7000–7299 媒体剪贴板 / 9000–9099 内部。
 - 核心错误映射 `from_core_error`:未知 → `Internal(9001)`;取消 → 传输取消;

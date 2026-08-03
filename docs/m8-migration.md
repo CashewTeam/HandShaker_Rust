@@ -37,13 +37,16 @@
 ## 4. 已知迁移遗留(非回归)
 
 - CLI 其余命令(clipboard/media/sync/watch/batch/shell)仍直连 core,
-  按文档 Phase 3 渐进迁移(下一阶段:clipboard/media → watch/sync/shell);
+  按文档 Phase 3 渐进迁移(下一阶段:clipboard/media → sync/watch/shell);
 - `handshaker-test-support` crate 尚未拆分(当前 core 内部 `#[cfg(test)]`),预留;
 - Application 的 Clipboard/Media/RemoteFile 事件为预留变体,未桥接;
 - `fs.rm`/`fs.count` 暂留 core:rm 的 JSON 契约是 `RemoteFile` 数组(Application
   `DeleteResultDto` 返回路径字符串数组),count 携带 CLI 专用 exclusions 语义;
-- CLI fs pull/push 的 human 实时进度降级为完成后汇总(JSONL 本就无每文件进度),
-  `render_batch_progress` 已删除。
+- `session_client()` 过渡接口仍存在(watch/sync/shell 使用),Phase D/D5 后
+  剩余调用点:watch/sync/shell;冻结前移除;
+- Phase D 完成状态:设备发现诊断(D1)、稳定身份(D2)、TrustService(D3)、
+  文件预检计划(D4)、CLI 迁移(D5)已交付;SyncService(D6)按计划为可选,
+  未实施(需真机验收)。
 
 ## 5. 0.7.1 迁移记录(提交 6bd6abf / 8bb89c5 / d7e516d / fd8b96b)
 
@@ -82,15 +85,15 @@
 | 命令 | 路径 | 状态 |
 |---|---|---|
 | `device list` | 独立 `device_list`(不连接,走 Application) | ✅ 已迁移(M8) |
-| `device info/ping` | `session.client`(core) | ⏳ 未迁移 |
-| `device discover` / `trust.*` | 连接前处理,直连 core | ⏳ 未迁移 |
+| `device info/ping` | `runtime.get_session_snapshot` / `runtime.ping` | ✅ 已迁移(Phase D/D5) |
+| `device discover` / `trust.*` | 走 Application `discover_devices` / TrustService | ✅ 已迁移(Phase D/D1/D3) |
 | `fs ls/stat/exists/mkdir/mv` | `session.runtime.*` | ✅ 已迁移(8bb89c5) |
 | `fs count` | `client.file_count`(CLI 专用 exclusions 语义) | ⏳ 暂留 core(§4) |
 | `fs rm` | 编排 `client.stat` 检查 + `client.delete`(JSON 契约是 RemoteFile 数组) | ⏳ 暂留 core(§4) |
-| `fs pull/push` | 编排在 CLI,批量交 `runtime.batch_download/upload` | ✅ 已迁移(d7e516d),编排残留 `client.stat`/`file_exists` 仅作目标存在性判断 |
+| `fs pull/push` | 预检走 `runtime.plan_download/plan_upload`,执行交 `batch_download/upload` | ✅ 已迁移(Phase D/D5) |
 | `clipboard.*` | `session.client` | ⏳ 未迁移 |
 | `media.*` | `session.client` | ⏳ 未迁移 |
-| `sync.*` | `session.client` | ⏳ 未迁移 |
+| `sync.*` | `session.client` | ⏳ 未迁移(Phase D/D6 可选) |
 | `shell` / `batch` / `watch` | 独立路径,core(REPL/长连接交互留在 CLI) | ⏳ 按设计保留 |
 
 核对结论:§5 记录与代码一致;未迁移命令的列表与 §4 完全吻合,无文档超前/滞后差异。
@@ -99,7 +102,7 @@
 
 | 条款 | 状态 | 证据 |
 |---|---|---|
-| `APPLICATION_API_VERSION` | ✅ | `crates/handshaker-application/src/lib.rs:35` = `"1.0.0"` |
+| `APPLICATION_API_VERSION` | ✅ | `crates/handshaker-application/src/lib.rs` = `"1.0.0-preview.1"`(preview 冻结前允许破坏性源码级修改) |
 | DTO serde 契约 | ✅ | `dto.rs` 全部 `Serialize/Deserialize`,snake_case |
 | enum 判别值不复用 | ✅ | `TransportKind{1,2,3}`/`SessionState{1..5}` 固定 |
 | 错误码分区 | ✅ | `PublicErrorCode` 1001–9001(见 `docs/application-api-v1.md`) |
