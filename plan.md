@@ -182,7 +182,7 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 | 9 | GET_FILE_EXIST | ✅ 已实现 |
 | 10 | GET_CREATE_FOLDER | ✅ 已实现 |
 | 11 | GET_RENAME_FILE | ✅ 已实现 |
-| 12–14 | DOWNLOAD 请求、响应头、数据面 | ✅ 单文件全量下载；⬜ range/resume 未实现 |
+| 12–14 | DOWNLOAD 请求、响应头、数据面 | ✅ 单文件全量下载；✅ range 一次性定位下载（`TransferOptions.offset`，M5 0.4.1）；⬜ 断点续传/恢复未实现（协议无续传状态） |
 | 15–18 | UPLOAD 请求头、ready、数据面、完成 | ✅ 单文件上传 |
 | 19 | DELETE_FILE | ✅ 已实现 |
 | 20 | PHOTO_LIB_CHANGE | ✅ library 强类型事件；CLI `watch` 已接入（M3/M4 真机验证） |
@@ -197,10 +197,10 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 | 31–34 | WiFi REQUEST_01/02 握手与信任 | ✅ `WifiTrustHandshake` + `--wifi`（M2，真机验证） |
 | 35 | QUIT | ✅ 已实现 |
 | 36 | CANCEL | ✅ 公共本地/远端取消模型和 flag 2 路由 |
-| 37 | PHOTO_SYNC | ✅ library 事件解码；同步请求 API 未实现 |
-| 38 | FILE_CHANGE | ✅ library 事件解码；同步状态机未实现 |
-| 39 | SYNC_MONITOR | ✅ library 事件解码；同步 API 未实现 |
-| 40–41 | UPDATE_FILE_INFO 请求/响应 | ⬜ 未实现 |
+| 37 | PHOTO_SYNC | ✅ `photo_sync` 发送侧 + 初始 diff（M6 0.5.0，真机验证） |
+| 38 | FILE_CHANGE | ✅ 增量同步状态机（M6 0.5.0，真机验证） |
+| 39 | SYNC_MONITOR | ✅ `sync_monitor` + 实时同步（M6 0.5.0，真机验证） |
+| 40–41 | UPDATE_FILE_INFO 请求/响应 | ✅ `update_files_info`（M5 0.4.1，仅 library API + 测试） |
 
 ### 4.2 连接与信任
 
@@ -213,8 +213,8 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 - ✅ `TRUST_ALWAYS`、`TRUST_REMOVE` 生命周期；`TRUST_ONCE`/`TRUST_UNKNOW`/`TRUST_NO` 仅协议枚举。
 - ✅ 查看、删除、重置信任记录的 library API 和 CLI（`trust list/remove/reset`）。
 - 🔬 WiFi 主机地址变化、手机重启和错误 derived key 的恢复流程已明确（显式重建），真机验证待补。
-- ⬜ USB AOA 枚举、Accessory 切换、接口 claim、端点读写和断开监听。
-- ⬜ macOS/Linux 的 USB 后端实现与权限说明。
+- ✅ USB AOA 枚举、identification、Accessory 切换、接口 claim、端点读写和断开监听（M7 0.6.0，macOS ARM64 真机验证）。
+- 🟡 macOS ARM64 USB 后端已实现（M7）；Linux udev 权限评估待做。
 - ⬜ 二维码或手工地址连接流程。
 - ⬜ 原版音频相关 `tcp:19999` HTTP 辅助通道。
 
@@ -232,20 +232,21 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
   `--limit`/`--all` 覆盖，json 带 `total`/`truncated`）与 `media thumbnail --output-dir`；
   `fetch_exif` 预留接口（M5 实现，见 docs/20 §4）。
 - ✅ 事件 JSON `kind` tag 与 watch jsonl 信封为 0.2.0 兼容契约（docs/19 §4）。
+- ✅ **M6（0.5.0）**：照片同步 `sync plan/run/watch/status`（`photo_sync` 37 初始 diff + FILE_CHANGE 38 增量 + `sync_monitor` 39 实时，单向下载；真机验证，见 docs/22）。
 - ⬜ 断线后的显式重新订阅策略由后续 watch/API 里程碑定义；当前不自动重连。
 
 ### 4.4 文件与传输扩展
 
-- ⬜ 多文件上传、下载。
-- ⬜ 递归目录上传、下载。
-- ⬜ 批量任务并发控制、汇总进度和逐项错误报告。
-- ⬜ 下载 range、断点续传和临时文件恢复。
+- ✅ 多文件上传、下载（M5 0.4.1：`upload_many`/`download_many`，串行、失败聚合）。
+- ✅ 递归目录上传、下载（M5 0.4.1：`upload_tree`/`download_tree`，镜像目录结构，路径逃逸防护）。
+- ✅ 批量任务并发控制（默认 1 保序、上限 8，`futures-util` buffer_unordered）、汇总进度和逐项错误报告。
+- ✅ 下载 range 一次性定位（`TransferOptions.offset`，`FileInputStream.skip` 语义）；⬜ 断点续传/临时文件恢复（协议无续传状态，需先验证，不允许伪造）。
 - ⬜ 上传恢复或重试语义；协议是否支持需先验证，不允许伪造断点续传。
-- ⬜ gzip 文件传输模式。
-- ⬜ `UPDATE_FILE_INFO` 文件元数据更新。
+- ⬜ gzip 文件传输模式（M3 遗留；4 MiB 炸弹内存上限待定）。
+- ✅ `UPDATE_FILE_INFO` 文件元数据更新（M5 0.4.1：type 40/41，仅 library API + 测试）。
 - ⬜ 完整文件权限/类型能力映射。
-- ⬜ `is_sync=true` 对同步台账的正式支持。
-- ⬜ 目录监控的启动、确认、停止与事件流。
+- ✅ `is_sync=true` 对同步台账的正式支持（M6 单向下载方向）。
+- ✅ 目录监控的启动、确认、停止与事件流（M3 0.2.0，真机验证）。
 
 ### 4.5 媒体库
 
@@ -255,22 +256,21 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 - ✅ 图片、视频和音频缩略图请求（`get_thumbnails`，JPEG、失败条目不整批失败）。
 - ✅ CLI `media photo|video|audio`（默认预览上限 50、`--limit`/`--all`）与 `media thumbnail --output-dir`。
 - ✅ EXIF 方向/经纬度/date_taken 随查询返回；独立 EXIF 拉取为 `fetch_exif` 预留接口（M5）。
-- ⬜ 媒体库变更增量合并（当前 watch 输出原始 added/deleted/updated 列表）。
-- ⬜ 媒体库分页（协议请求无分页参数，当前 CLI 层预览截断；需协议确认后实现服务端分页）。
-- ⬜ EXIF、方向、经纬度、收藏状态和媒体 ID 的领域模型。
-- ⬜ 媒体库变更增量合并。
-- ⬜ 大型媒体库的流式/分页输出和内存上限。
+- ✅ 媒体库变更增量合并（M5 0.4.1：`media_merge::apply_photo/video/audio`，key=media_id 优先、path 兜底）。
+- 🟡 媒体库分页（协议请求无分页参数，当前 CLI 层预览截断 `--limit`/`--all`；服务端分页需协议确认）。
+- ✅ EXIF 方向/经纬度/date_taken/收藏/媒体 ID 领域模型（M4）；独立 EXIF 拉取（M5 0.4.1，`kamadak-exif`）。
+- 🟡 大型媒体库内存上限：session 线级 + 媒体解码 64 MiB 双上限；流式/分页输出待后续。
 
 ### 4.6 照片同步
 
-- ⬜ `PHOTO_SYNC_REQUEST` 初始状态机。
-- ⬜ 本地与手机同步台账。
-- ⬜ checksum 计算与增量 diff。
-- ⬜ `FILE_CHANGE` 上传、删除、移动事件处理。
-- ⬜ `SYNC_MONITOR_REQUEST` 实时同步。
-- ⬜ 冲突检测、覆盖策略、失败恢复和幂等重放。
-- ⬜ 同步状态持久化、schema 迁移和损坏恢复。
-- ⬜ 同步 dry-run、计划预览和安全确认。
+- ✅ `PHOTO_SYNC_REQUEST`（37）初始状态机与初始 diff（M6 0.5.0，真机验证）。
+- ✅ 独立同步台账（`sync_store`，原子提交、损坏时停止并给出恢复操作）。
+- ✅ checksum 计算与增量 diff（`plan_diff`，`SyncSnapshot`）。
+- ✅ `FILE_CHANGE`（38）增量事件处理（M6，单向下载方向）；⬜ 上传/移动方向未做（M6 范围决策）。
+- ✅ `SYNC_MONITOR_REQUEST`（39）实时同步（M6，真机验证）。
+- ✅ 冲突检测（`check_conflicts`）、失败聚合与幂等重跑；⬜ 跨设备冲突合并未做（M6 范围决策）。
+- ✅ 同步状态持久化、schema 版本与损坏恢复（不静默重建）。
+- ✅ 同步 dry-run、计划预览（`sync plan`）与安全确认（`sync run --yes`）。
 
 ### 4.7 产品化和跨平台
 
@@ -284,15 +284,16 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ## 5. 当前部分实现与已知限制
 
-1. **事件只在 library 可消费**：CLI 尚未提供目录、媒体或同步 watch 命令；事件总线本身不隐式开启手机 callback。
+1. **事件订阅已接入 CLI**：目录/媒体/剪贴板/同步 watch 均已提供；普通 `connect()` 仍默认不开启手机 callback，需 `connect_with_event_callbacks()`/`connect_with_all_callbacks()`。
 2. **取消不是远端强中断**：flag 2 不会停止手机已经开始的下载流；下载取消必须关闭当前连接。
-3. **传输仅限单文件全量模式**：没有目录、多文件、range、resume 或任务恢复。
+3. **无断点续传/上传恢复**：协议无续传状态，range 仅一次性定位（`TransferOptions.offset`）；批量传输默认串行（并发上限 8）。
 4. **`stat` 不是独立协议命令**：通过根目录信息或父目录 `list_dir` 查找，性能和边界依赖目录列表。
-5. **信任状态只是数据结构预留**：`state.json` 的 trust map 尚未接入任何连接流程。
-6. **媒体 callback 默认关闭**：普通 `connect()` 保持旧行为；只有显式 `connect_with_event_callbacks()` 才会开启指定 callback。
-7. **删除的 `sync` 选项未形成同步功能**：公开 `DeleteOptions.sync` 只是映射协议字段。
+5. **USB accessory 会话单次性**：手机端 QUIT 后不再监听（Android 生命周期），重连需物理拔插；`batch` 长连接在同一会话内规避（0.6.1）。
+6. **USB identification 仅 macOS ARM64 验证**：Linux udev 权限与热插拔未实现；Windows 未评估。
+7. **删除的 `sync` 选项**：公开 `DeleteOptions.sync` 映射协议字段；M6 同步删除走独立台账。
 8. **JSON schema 仍是 v1 首版**：新增事件和批量任务前必须先设计兼容扩展，不能临时改变 envelope。
-9. **没有后台 daemon**：所有连接和任务随当前 CLI/library 进程结束，这是当前设计约束而非缺陷。
+9. **没有后台 daemon**：所有连接和任务随当前 CLI/library 进程结束（除 `batch` 单进程多命令），这是当前设计约束而非缺陷。
+10. **EXIF/gzip 等大响应内存上限**：session 线级 + 媒体解码 64 MiB 双上限；gzip 传输模式未实现（M3 遗留）。
 
 ## 6. 后续开发原则与依赖关系
 
@@ -306,7 +307,8 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
   -> 媒体查询与媒体变更
   -> 批量和递归传输
   -> 照片同步状态机
-  -> USB AOA 与跨平台发布
+  -> USB AOA
+  -> 内部分层整理、应用服务模型冻结与 handshaker-ffi（Swift UniFFI）
 ```
 
 核心原则：
@@ -422,7 +424,7 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 任务（原始规划，供对照）：
 
-- ⬜ 媒体库变更增量合并（当前 watch 输出原始 added/deleted/updated 列表，M5 候选）。
+- ✅ 媒体库变更增量合并（M5 0.4.1 实现，见上；`media_merge::apply_photo/video/audio`）。
 - ⬜ 媒体库分页（协议请求无分页参数，当前 CLI 层预览截断；需协议确认后实现服务端分页）。
 - ⬜ 大型媒体库的流式输出（当前 session 64 MiB 响应上限保护）。
 
@@ -444,70 +446,88 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 任务（原始规划，供对照）：
 
-- ⬜ dry-run（任务计划预览）。
-- ⬜ range 下载断点续传（协议需先调研验证）。
-- ⬜ `UPDATE_FILE_INFO`（40–41）与可确认的文件元数据字段。
-- ⬜ 受控并发（当前按用户决策串行）。
+- ✅ dry-run（`fs push/pull --dry-run`，计划预览；0.4.1 真机验证）。
+- ✅ range 下载一次性定位（`TransferOptions.offset`；协议无续传状态，不做断点续传）。
+- ✅ `UPDATE_FILE_INFO`（40–41）library API + 测试（0.4.1）。
+- ✅ 受控并发（默认 1 保序，上限 8，`futures-util` buffer_unordered）。
 
-### M6：照片同步与实时同步
+### M6：照片同步与实时同步（已完成，2026-08，0.5.0）
 
-目标：实现协议定义的增量照片同步，而不是简单复制目录。
+目标：实现协议定义的增量照片同步，而不是简单复制目录。实现记录见 `docs/22-m6-photo-sync.md`。
 
-任务：
+完成情况（含用户范围决策：单向下载、独立台账、不做上传/跨设备冲突合并）：
 
-- 设计同步 profile、根目录、方向、冲突策略和持久化 schema。
-- 实现手机端 checksum 算法和本地台账。
-- 实现 `PHOTO_SYNC_REQUEST` 初始 diff。
-- 实现 `FILE_CHANGE` 增量上传、删除和移动。
-- 实现 `SYNC_MONITOR_REQUEST` 实时阶段。
-- 定义幂等操作、重放、崩溃恢复和台账原子提交。
-- 提供 dry-run、计划预览、空间检查和危险操作确认。
-- CLI 增加 `sync plan`、`sync run`、`sync watch`、`sync status`。
+- ✅ `PHOTO_SYNC_REQUEST`（37）发送侧与初始 diff（`photo_sync`，pc_id = host_uuid 原文，三端交叉确认）。
+- ✅ 独立同步台账（`sync_store`：原子提交 0600、损坏停止不静默重建、device_uuid 路径净化）。
+- ✅ checksum 与增量 diff（`plan_diff`/`SyncSnapshot`/`SyncDiff`）。
+- ✅ `FILE_CHANGE`（38）增量事件处理（新增/删除/信息变更；下载方向）。
+- ✅ `SYNC_MONITOR_REQUEST`（39）实时同步（`sync_monitor`；idle 拒绝不是协议错）。
+- ✅ 冲突检测（`check_conflicts`）、失败聚合、幂等重跑（重复 37 被拒的修复：每次连接仅一次 37）。
+- ✅ CLI `sync plan/run/watch/status`（dry-run 计划预览、`--yes` 确认、watch 补确认）。
+- ✅ 真机验收（2026-08，OD103）：41 added、幂等重跑空 diff、单边删除、清理无残留；原始 1.2.0 smali
+  交叉验证 37=PHOTO_SYNC 与 bucket 排除根因。
 
-验收：
+原始任务对照：
 
-- 首次同步、无变化重跑、单边新增、删除、移动和冲突都有确定结果。
-- 中断后恢复不会重复删除或损坏文件。
-- 台账损坏时停止并给出可恢复操作，不自动猜测。
-
-### M7：USB AOA 连接
-
-目标：新增 USB 传输通道，并复用现有裸握手、Session 和业务 API。
-
-任务：
-
-- 定义可测试的 USB backend 接口。
-- macOS ARM64 优先实现设备枚举、AOA identification、Accessory 切换和端点读写。
-- 处理热插拔、权限、claim/release、短读写和设备消失。
-- 实现 `ConnectionTarget::Usb` 与 `UsbConnector`。
-- 复用 `UsbRawKeyExchange`，但用抓包向量验证线路细节。
-- 评估 Linux udev 规则和权限安装。
-- 增加传输层通用测试，确保 TCP 与 USB 对 Session 上层语义一致。
+- ✅ 设计同步 profile、根目录、方向、冲突策略和持久化 schema。
+- ✅ 实现手机端 checksum 算法和本地台账。
+- ✅ 实现 `PHOTO_SYNC_REQUEST` 初始 diff。
+- ✅ 实现 `FILE_CHANGE` 增量上传、删除和移动（上传/移动方向按范围决策未做）。
+- ✅ 实现 `SYNC_MONITOR_REQUEST` 实时阶段。
+- ✅ 定义幂等操作、重放、崩溃恢复和台账原子提交。
+- ✅ 提供 dry-run、计划预览、空间检查和危险操作确认。
+- ✅ CLI 增加 `sync plan`、`sync run`、`sync watch`、`sync status`。
 
 验收：
 
-- USB 下完成与 ADB 相同的设备、文件、传输和剪贴板验收。
-- 拔线能立即结束任务并给出明确错误，不残留资源。
+- ✅ 首次同步、无变化重跑、单边新增、删除、移动和冲突都有确定结果（真机验证首跑/重跑/删除）。
+- ✅ 中断后恢复不会重复删除或损坏文件（台账原子提交、幂等）。
+- ✅ 台账损坏时停止并给出可恢复操作，不自动猜测。
 
-### M8：跨平台发布与 GUI-ready 稳定化
+### M7：USB AOA 连接（已完成，2026-08，0.6.0/0.6.1）
 
-目标：形成可分发、可被 GUI 长期依赖的后端版本。
+目标：新增 USB 传输通道，并复用现有裸握手、Session 和业务 API。实现记录见 `docs/23-m7-usb-aoa.md`。
 
-任务：
+完成情况：
 
-- 为 macOS ARM64 和 Linux 建立 CI、release 产物和安装说明。
-- 评估 Windows 的 adb、mDNS、USB 和路径差异。
-- 稳定 public API、错误模型、事件模型和序列化 schema。
-- 增加 API 文档、示例程序和兼容性策略。
-- 增加配置迁移、语言选择和 shell 补全。
-- 建立性能基准：大目录、大媒体库、大文件传输和长时间事件连接。
-- 完成安全审计：日志、信任密钥、路径处理、权限和临时文件。
+- ✅ rusb（libusb）传输后端（`src/transport/usb.rs`：枚举/模式判定/identification/claim/bulk 读写）。
+- ✅ AOA identification 对照 mac 版反汇编：请求码 0x33/0x34/0x35（GET_PROTOCOL/SEND_STRING/START）、
+  UTF-8、index 0..=4、0x29A9 常驻 accessory 接口恒走 identification + 2s 等待 App openAccessory。
+- ✅ `ConnectionTarget::Usb` + `UsbConnector`；复用 `UsbRawKeyExchange` 裸握手（Session 上层语义与 TCP 一致）。
+- ✅ 热插拔/claim/release/短读写/设备消失；reader 线程独占 release+reset（恰好一次）。
+- ✅ CLI `--usb [--serial locationId]`；0.6.1 新增 `batch` 长连接批量会话（stdin 单连接、心跳保活、
+  失败聚合/致命中止、嵌套拒绝）。
+- ✅ 真机完整业务验收（2026-08，OD103）：连接/文件/传输 MD5 一致/剪贴板/重命名/清理全 PASS；
+  identification 三修复（请求码/编码/索引）实测验证。
+- ✅ macOS ARM64 后端与权限说明；Linux udev 待评估。
 
 验收：
 
-- 下游示例 GUI 可以只通过公开 library 完成连接、浏览、传输和事件订阅。
-- 发布包可在干净环境安装运行，不依赖系统 protoc。
-- 文档明确各平台支持矩阵和仍未实现功能。
+- ✅ USB 下完成与 ADB 相同的设备、文件、传输和剪贴板验收。
+- ✅ 拔线能立即结束任务并给出明确错误，不残留资源。
+
+### M8：内部分层整理、应用服务模型冻结与 handshaker-ffi（Swift UniFFI 接入）
+
+目标：把 0.6.1 之后的后端整理成可被 GUI 长期依赖的分层结构，并建立 FFI 边界。
+
+任务：
+
+- 整理 Rust 内部分层：审计并固化 transport/protocol/session/client/domain/cli 边界，
+  收敛 `pub` 面（domain/公开 API 不泄露 Prost 与传输类型），消除跨层直接访问。
+- 冻结应用服务模型：定义稳定的应用服务接口（连接生命周期、设备/文件/媒体/同步/事件订阅、
+  错误与取消语义），作为 CLI 与 FFI 的共同基座（`AppService` 或等价层）。
+- 建立 `handshaker-ffi` crate：提供 C ABI/UniFFI 绑定（UDL + 生成器），导出冻结后的领域类型；
+  明确 async 桥接（运行时线程、回调、取消传播）与错误映射（FFI 错误码 ↔ `Error`）。
+- 实现 Swift UniFFI 接入：生成 Swift 绑定，提供最小示例工程，验证连接、浏览、传输与事件订阅
+  四条 GUI 消费路径。
+- 版本与文档：版本 0.7.0；新增 FFI/应用服务模型文档与兼容性策略；回归 + security_review + 真机冒烟。
+
+验收：
+
+- CLI 与 FFI 共用同一应用服务模型，行为一致（同一批自动化测试覆盖两侧）。
+- Swift 示例通过 `handshaker-ffi` 完成连接、浏览、传输与事件订阅。
+- public API/错误模型/事件模型/JSON schema 冻结并有文档；FFI 错误码稳定。
+- 既有 154 测试不回归；security_review 通过。
 
 ## 8. 横向测试计划
 
