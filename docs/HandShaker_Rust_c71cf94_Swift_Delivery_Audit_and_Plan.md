@@ -1041,6 +1041,13 @@ transfers/capabilities。
 
 优先级：P1
 
+> **Phase E 复核**：后端与 FFI 已 100% 就绪（ABI 1.4.0、50 个导出符号，
+> 覆盖连接/文件/剪贴板/媒体/批量/信任/监控/照片同步/诊断/事件）。
+> Phase F 只剩 Swift 侧工程与打包：Swift Package 骨架、Codable DTO、
+> RuntimeActor/Service 层、XCFramework 组装（aarch64-apple-darwin，
+> 需要时 x86_64）与真机验收（含 FFI 成功路径——smoke 目前只覆盖
+> 错误/空路径）。CI 接入（G2）与 Linux/Windows FFI 验证仍属 Phase G。
+
 建议新建 Swift Package：
 
 ```text
