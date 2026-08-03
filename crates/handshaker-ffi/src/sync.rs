@@ -22,6 +22,33 @@ use handshaker_application::{SyncProfileDto, SyncStatusDto};
 /// Legacy camera folder used when `remote_root` is omitted.
 const DEFAULT_SYNC_ROOT: &str = "/storage/emulated/0/DCIM/Camera";
 
+/// Cap on caller-supplied identifiers and paths (defense against registry
+/// key and ledger filename abuse; the CLI applies the same spirit).
+const MAX_ID_LEN: usize = 128;
+const MAX_PATH_LEN: usize = 4096;
+
+/// A device uuid must be the bare id form the core ledger accepts:
+/// `[A-Za-z0-9_-]+` (mirrors the CLI's `sync_device_uuid_from_info`
+/// validation). An optional `phone:` prefix is stripped first, so both
+/// "abc123" and "phone:abc123" are accepted — the important part is that
+/// the stored value is sanitize-stable: `sanitize_device_uuid` is lossy
+/// for any other character, and two ids that collapse onto the same
+/// ledger would let one device's plan propose deleting the other's local
+/// files (security review fix).
+fn normalize_device_uuid(raw: &str) -> Option<&str> {
+    let raw = raw.strip_prefix("phone:").unwrap_or(raw);
+    if raw.is_empty() || raw.len() > MAX_ID_LEN {
+        return None;
+    }
+    if !raw
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_')
+    {
+        return None;
+    }
+    Some(raw)
+}
+
 /// Parse a `SyncProfileDto` JSON request. The session id always comes from
 /// the call argument (never from the payload); `id` defaults to
 /// `device_uuid`, `remote_root` to the camera folder and `enabled` to true.
@@ -40,18 +67,19 @@ fn parse_profile(
     let device_uuid = value
         .get("device_uuid")
         .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
+        .and_then(normalize_device_uuid)
         .ok_or_else(|| {
-            err(
-                &PublicError::new(PublicErrorCode::InvalidArgument, "device_uuid is required")
-                    .operation(operation),
+            err(&PublicError::new(
+                PublicErrorCode::InvalidArgument,
+                "device_uuid is required and must match [A-Za-z0-9_-]+",
             )
+            .operation(operation))
         })?
         .to_string();
     let local_root = value
         .get("local_root")
         .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && s.len() <= MAX_PATH_LEN)
         .ok_or_else(|| {
             err(
                 &PublicError::new(PublicErrorCode::InvalidArgument, "local_root is required")
@@ -62,13 +90,13 @@ fn parse_profile(
     let id = value
         .get("id")
         .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && s.len() <= MAX_ID_LEN)
         .unwrap_or(&device_uuid)
         .to_string();
     let remote_root = value
         .get("remote_root")
         .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && s.len() <= MAX_PATH_LEN)
         .unwrap_or(DEFAULT_SYNC_ROOT)
         .to_string();
     let enabled = value
@@ -124,6 +152,25 @@ pub unsafe extern "C" fn hs_sync_start(
         let runtime = ffi_try!(runtime_ref(runtime, "sync.start"));
         let request = ffi_try!(input_str(request_ptr, request_len, "sync.start"));
         let profile = ffi_try!(parse_profile(session_id, request.as_bytes(), "sync.start"));
+        // Fail fast on a missing session (security review fix): without
+        // this, every call registers a job and spawns a task that only
+        // reports its failure asynchronously, letting an arbitrary caller
+        // grow the sync-jobs registry unboundedly.
+        if runtime
+            ._tokio
+            .block_on(async {
+                runtime
+                    .app
+                    .get_session_snapshot(SessionId(session_id))
+                    .await
+            })
+            .is_err()
+        {
+            return err(
+                &PublicError::new(PublicErrorCode::SessionNotFound, "session not found")
+                    .operation("sync.start"),
+            );
+        }
         let profile_id = match runtime
             ._tokio
             .block_on(async { runtime.app.start_sync(profile).await })
@@ -286,16 +333,14 @@ mod tests {
     }
 
     #[test]
-    fn sync_start_registers_job_even_for_missing_session() {
-        // start_sync registers the job and spawns the background run; the
-        // failure (missing session) surfaces later via hs_sync_status's
-        // last_error, not as a call error — matching the CLI poll loop.
+    fn sync_start_missing_session_fails_fast() {
+        // Security review fix: hs_sync_start validates the session up
+        // front so a bogus call cannot register a job and spawn a task
+        // that would otherwise grow the sync-jobs registry unboundedly.
         let runtime = runtime_ptr();
         let result = unsafe { hs_sync_start(runtime, 999, PROFILE.as_ptr(), PROFILE.len()) };
-        assert_eq!(result.status, 0);
-        let bytes = unsafe { crate::buffer::into_vec(result.value) };
-        let value: Value = serde_json::from_slice(&bytes).expect("json");
-        assert_eq!(value["profile_id"], "phone:abc");
+        assert_eq!(result.status, 1);
+        assert_eq!(error_code_of(result), "session_not_found");
         unsafe { hs_runtime_destroy(runtime) };
     }
 
@@ -348,12 +393,15 @@ mod tests {
 
     #[test]
     fn parse_profile_applies_defaults_and_session_override() {
+        // A phone: prefix is stripped; the stored uuid is the bare id the
+        // core ledger accepts (sanitize-stable).
         let request = br#"{
             "device_uuid":"phone:def",
             "local_root":"/tmp/out"
         }"#;
         let profile = parse_profile(42, request, "test").expect("defaults");
-        assert_eq!(profile.id, "phone:def");
+        assert_eq!(profile.id, "def");
+        assert_eq!(profile.device_uuid, "def");
         assert_eq!(profile.session_id, SessionId(42));
         assert_eq!(profile.remote_root, DEFAULT_SYNC_ROOT);
         assert!(profile.enabled);
@@ -370,6 +418,37 @@ mod tests {
         assert_eq!(profile.session_id, SessionId(7));
         assert_eq!(profile.remote_root, "/sdcard/DCIM");
         assert!(!profile.enabled);
+    }
+
+    #[test]
+    fn parse_profile_rejects_colliding_device_uuids() {
+        // Characters that sanitize_device_uuid would strip (':', '.', '/',
+        // spaces) must be rejected, not silently collapsed: "phone:abc"
+        // and "phoneabc" must not land on the same ledger (security
+        // review fix).
+        for bad in [
+            br#"{"device_uuid":"abc:def","local_root":"/tmp/out"}"#.as_slice(),
+            br#"{"device_uuid":"abc/def","local_root":"/tmp/out"}"#.as_slice(),
+            br#"{"device_uuid":"a b","local_root":"/tmp/out"}"#.as_slice(),
+            br#"{"device_uuid":"phone:","local_root":"/tmp/out"}"#.as_slice(),
+            br#"{"device_uuid":"..","local_root":"/tmp/out"}"#.as_slice(),
+        ] {
+            assert!(
+                parse_profile(1, bad, "test").is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
+        // Over-long ids and paths are rejected too.
+        let long_id = format!(
+            "{{\"device_uuid\":\"{}\",\"local_root\":\"/tmp/out\"}}",
+            "a".repeat(200)
+        );
+        assert!(parse_profile(1, long_id.as_bytes(), "test").is_err());
+        let long_path = format!(
+            "{{\"device_uuid\":\"abc\",\"local_root\":\"{}\"}}",
+            "/x".repeat(5000)
+        );
+        assert!(parse_profile(1, long_path.as_bytes(), "test").is_err());
     }
 
     #[test]

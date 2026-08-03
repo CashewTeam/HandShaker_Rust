@@ -200,9 +200,11 @@ HsCallResult hs_runtime_diagnostics(HsRuntime *runtime);
 
 /* Photo sync (ABI 1.4). hs_sync_plan/start take a SyncProfileDto request
  * {"id":"<optional, default device_uuid>",
- *  "device_uuid":"phone:<uuid>","remote_root":"<optional, default
- *  camera folder>","local_root":"/abs/path","enabled":true}
- * (session id always comes from the call argument). hs_sync_plan result:
+ *  "device_uuid":"<uuid, optional 'phone:' prefix stripped>",
+ *  "remote_root":"<optional, default camera folder>",
+ *  "local_root":"/abs/path","enabled":true}
+ * (session id always comes from the call argument; device_uuid must be
+ * [A-Za-z0-9_-]+, ids and paths are length-capped). hs_sync_plan result:
  * SyncPlanDto. hs_sync_start launches the run in the background and
  * returns {"profile_id":"<id>"}; progress is polled with hs_sync_status
  * (SyncStatusDto) or observed via events (SyncWatchApplied/Transfer-

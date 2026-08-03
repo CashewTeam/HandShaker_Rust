@@ -472,13 +472,15 @@ fn default_state_dir() -> Option<PathBuf> {
     }
 }
 
-/// The on-disk cache path for one thumbnail (stable across calls).
+/// The on-disk cache path for one thumbnail (stable across calls). The
+/// digest covers the full (device key, remote path) pair — a truncated
+/// device prefix alone would let two devices' equal paths collide and
+/// serve the wrong thumbnail from the all-hit fast path (security review
+/// fix).
 fn cache_path_for(cache_dir: &Path, kind: &str, device_key: &str, remote_path: &str) -> PathBuf {
     let device = sanitize_cache_component(device_key);
-    cache_dir.join(format!(
-        "{device}-{kind}-{:016x}.thumb",
-        fnv1a64(remote_path)
-    ))
+    let digest = fnv1a64(&format!("{device_key}\0{remote_path}"));
+    cache_dir.join(format!("{device}-{kind}-{digest:016x}.thumb"))
 }
 
 /// Write one thumbnail to the cache (or reuse the existing file) and return
@@ -499,9 +501,13 @@ fn cache_thumbnail(
 ) -> Result<String, HsCallResult> {
     let path = cache_path_for(cache_dir, kind, device_key, remote_path);
     if !path.exists() {
+        // Full-nanosecond timestamp: the subsec-nanos form wraps every
+        // second and could collide for same-second concurrent writers
+        // (security review fix); pid + wall-clock nanos makes the temp
+        // name unique in practice.
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
+            .map(|duration| duration.as_nanos())
             .unwrap_or(0);
         let tmp_name = format!(
             "{}.{}.{}.tmp",
