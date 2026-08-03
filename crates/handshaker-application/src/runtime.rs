@@ -1054,12 +1054,14 @@ impl HandShakerRuntime {
                     // as per-file failures by core; surface it as a connection
                     // loss instead of a silent partial success.
                     //
-                    // Only session-level `Error::Transport` failures reach this
-                    // check: USB bulk errors are wrapped in `io::Error` by the
-                    // transport (usb.rs) and map to `LocalIo` via
-                    // `From<io::Error>`, so transient USB hiccups can never
-                    // tear down the session. Transport failures here mean the
-                    // frame writer/reader or response channel is gone.
+                    // A `Transport` failure here is never a transient USB
+                    // hiccup: the USB transport wraps bulk errors in
+                    // `io::Error`, but frame.rs converts those back to
+                    // `Error::Transport` and the reader task calls
+                    // `fail_connection()` (session.rs), which fails every
+                    // in-flight request — so a Transport-coded failure means
+                    // the core session already declared the connection dead.
+                    // `mark_connection_lost` only mirrors that verdict.
                     let connection_closed = result
                         .failures
                         .iter()
