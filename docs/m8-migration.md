@@ -66,7 +66,7 @@
 - **FFI 传输面(fd8b96b)**:ABI 1.1.0;`hs_transfer_start_download/start_upload/
   cancel/get/list`;header 追加;Swift smoke 覆盖错误路径与空列表。
 - 测试 186 → 192(core 120 / bin 22 / cli 12 / app 22 / ffi 15 / localization 1);
-  0.7.2 收尾后 **198**(app 23 / bin 22 / cli 12 / ffi 19 / localization 1)。
+  0.7.2 收尾后 **197**(core 120 / app 23 / bin 22 / cli 12 / ffi 19 / localization 1)。
 
 ## 6. 全量核对记录(HEAD 2965f64,工作树干净)
 
