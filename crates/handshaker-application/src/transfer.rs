@@ -59,6 +59,23 @@ pub struct TransferSnapshot {
     pub started_at_ms: Option<u64>,
     pub finished_at_ms: Option<u64>,
     pub error: Option<crate::error::PublicError>,
+    /// Planned item count (files + trees) of a batch transfer; 0 for
+    /// single-file transfers. Phase E field; `#[serde(default)]` keeps
+    /// legacy JSON decoding.
+    #[serde(default)]
+    pub item_count: u64,
+    /// Items completed so far (batch transfers).
+    #[serde(default)]
+    pub completed_items: u64,
+    /// Items failed so far (batch transfers).
+    #[serde(default)]
+    pub failed_items: u64,
+    /// Source path of the item currently being processed.
+    #[serde(default)]
+    pub current_item: Option<String>,
+    /// Aggregated per-item result, attached before the terminal transition.
+    #[serde(default)]
+    pub batch_result: Option<BatchTransferResultDto>,
 }
 
 /// Start a download. `remote_path` is absolute or resolved by the caller.
@@ -427,6 +444,39 @@ impl TransferRegistry {
             started_at_ms: Some(now_ms()),
             finished_at_ms: None,
             error: None,
+            item_count: 0,
+            completed_items: 0,
+            failed_items: 0,
+            current_item: None,
+            batch_result: None,
+        }
+    }
+
+    /// Shared progress-throttle decision (M8.1 Phase C / C2): a progress
+    /// update may emit when enough time passed since the last emit or the
+    /// byte counter advanced past the byte threshold. Item-level batch
+    /// updates carry no byte delta (`bytes: None`) and use the time
+    /// threshold only. Updates the throttle state when the update may
+    /// emit; a throttled update does not refresh the timestamps. The
+    /// caller must hold the entry's snapshot lock (lock order: snapshot,
+    /// then throttle — the same order `set_progress` uses).
+    fn throttle_allows(&self, entry: &ActiveTransfer, now: u64, bytes: Option<u64>) -> bool {
+        let mut throttle = entry
+            .progress_throttle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let enough_time = now.saturating_sub(throttle.last_emit_ms) >= PROGRESS_MIN_INTERVAL_MS;
+        let enough_bytes = bytes
+            .map(|bytes| bytes.saturating_sub(throttle.last_emit_bytes) >= PROGRESS_MIN_BYTES)
+            .unwrap_or(false);
+        if enough_time || enough_bytes {
+            throttle.last_emit_ms = now;
+            if let Some(bytes) = bytes {
+                throttle.last_emit_bytes = bytes;
+            }
+            true
+        } else {
+            false
         }
     }
 
@@ -459,25 +509,80 @@ impl TransferRegistry {
             if !terminal {
                 snapshot.state = TransferState::Running;
             }
-            let mut throttle = entry
-                .progress_throttle
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let now = now_ms();
-            let enough_time = now.saturating_sub(throttle.last_emit_ms) >= PROGRESS_MIN_INTERVAL_MS;
-            let enough_bytes =
-                transferred.saturating_sub(throttle.last_emit_bytes) >= PROGRESS_MIN_BYTES;
-            if enough_time || enough_bytes {
-                throttle.last_emit_ms = now;
-                throttle.last_emit_bytes = transferred;
-                true
-            } else {
-                false
-            }
+            self.throttle_allows(entry, now_ms(), Some(transferred))
         };
         if emit && let Ok(snapshot) = self.get(id) {
             self.event_hub
                 .publish(BackendEvent::TransferUpdated(snapshot));
+        }
+    }
+
+    /// Called from the background batch task (sync context) after each
+    /// plan item: updates the item counters and the current item, then
+    /// publishes a time-throttled `TransferUpdated` event. Terminal states
+    /// are never rolled back to Running (same rule as `set_progress`); the
+    /// counters may still advance after a cancel.
+    pub(crate) fn set_batch_items(
+        &self,
+        id: TransferId,
+        completed: u64,
+        failed: u64,
+        current: Option<String>,
+    ) {
+        let emit = {
+            let guard = self
+                .transfers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(entry) = guard.get(&id) else {
+                return;
+            };
+            let mut snapshot = entry
+                .snapshot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let terminal = matches!(
+                snapshot.state,
+                TransferState::Completed | TransferState::Failed | TransferState::Cancelled
+            );
+            snapshot.completed_items = completed;
+            snapshot.failed_items = failed;
+            snapshot.current_item = current;
+            if !terminal {
+                snapshot.state = TransferState::Running;
+            }
+            // Item counters carry no byte delta; only the 100 ms time
+            // threshold applies.
+            self.throttle_allows(entry, now_ms(), None)
+        };
+        if emit && let Ok(snapshot) = self.get(id) {
+            self.event_hub
+                .publish(BackendEvent::TransferUpdated(snapshot));
+        }
+    }
+
+    /// Attach the aggregated batch result before the terminal transition
+    /// (the terminal `TransferUpdated` event then carries it). A terminal
+    /// state is never overwritten: the late result of a cancelled transfer
+    /// is dropped.
+    pub(crate) fn set_batch_result(&self, id: TransferId, result: BatchTransferResultDto) {
+        let guard = self
+            .transfers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(entry) = guard.get(&id) else {
+            return;
+        };
+        let mut snapshot = entry
+            .snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let terminal = matches!(
+            snapshot.state,
+            TransferState::Completed | TransferState::Failed | TransferState::Cancelled
+        );
+        if !terminal {
+            snapshot.batch_result = Some(result);
         }
     }
 

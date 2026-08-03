@@ -1670,13 +1670,51 @@ fn transfer_snapshot_json_contract_is_stable() {
         started_at_ms: Some(1),
         finished_at_ms: None,
         error: None,
+        item_count: 3,
+        completed_items: 1,
+        failed_items: 0,
+        current_item: Some("/remote/g.bin".into()),
+        batch_result: Some(BatchTransferResultDto {
+            ok: vec![BatchTransferItemDto {
+                source: "/remote/g.bin".into(),
+                target: "/local/g.bin".into(),
+            }],
+            failures: Vec::new(),
+        }),
     };
     let json = serde_json::to_value(&snapshot).expect("serialize");
     assert_eq!(json["id"], 7);
     assert_eq!(json["direction"], "download");
     assert_eq!(json["state"], "running");
+    // Phase E fields are part of the wire contract.
+    assert_eq!(json["item_count"], 3);
+    assert_eq!(json["completed_items"], 1);
+    assert_eq!(json["failed_items"], 0);
+    assert_eq!(json["current_item"], "/remote/g.bin");
+    assert_eq!(json["batch_result"]["ok"][0]["source"], "/remote/g.bin");
     let decoded: TransferSnapshot = serde_json::from_value(json).expect("deserialize");
     assert_eq!(decoded, snapshot);
+
+    // Legacy JSON without the Phase E fields decodes with defaults.
+    let legacy: TransferSnapshot = serde_json::from_value(serde_json::json!({
+        "id": 7,
+        "session_id": 1,
+        "direction": "download",
+        "source": "/remote/f.bin",
+        "destination": "/local/f.bin",
+        "state": "running",
+        "transferred_bytes": 12,
+        "total_bytes": 100,
+        "started_at_ms": 1,
+        "finished_at_ms": null,
+        "error": null,
+    }))
+    .expect("legacy JSON decodes");
+    assert_eq!(legacy.item_count, 0);
+    assert_eq!(legacy.completed_items, 0);
+    assert_eq!(legacy.failed_items, 0);
+    assert_eq!(legacy.current_item, None);
+    assert_eq!(legacy.batch_result, None);
 }
 
 #[test]
@@ -1725,6 +1763,163 @@ fn batch_request_json_round_trips() {
     let json = serde_json::to_value(&dto).expect("serialize");
     assert_eq!(json["ok"][0]["source"], "/remote/c.bin");
     assert!(json["failures"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn start_batch_transfer_without_session_fails_fast() {
+    // No adb in tests and no real device: the batch entry points must fail
+    // fast with SessionNotFound before any transport work.
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    let request = BatchTransferRequest {
+        session_id: SessionId(999),
+        files: vec![BatchTransferItemDto {
+            source: "/remote/a.bin".into(),
+            target: "/local/a.bin".into(),
+        }],
+        trees: vec![crate::transfer::TreeTransferDto {
+            source: "/remote/dir".into(),
+            target: "/local/dir".into(),
+        }],
+        overwrite: true,
+    };
+    let error = runtime
+        .start_batch_download(request.clone())
+        .await
+        .expect_err("missing session");
+    assert_eq!(error.code, PublicErrorCode::SessionNotFound, "download");
+    let error = runtime
+        .start_batch_upload(request)
+        .await
+        .expect_err("missing session");
+    assert_eq!(error.code, PublicErrorCode::SessionNotFound, "upload");
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn session_count_counts_only_open_sessions() {
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    assert_eq!(runtime.session_count().await, 0, "no sessions yet");
+    // A failed connect (adb binary is missing in test config) must not
+    // register a session.
+    let error = runtime
+        .connect(crate::dto::ConnectRequest {
+            device: fake_device(),
+        })
+        .await
+        .expect_err("connect must fail without adb");
+    assert!(matches!(
+        error.code,
+        PublicErrorCode::AdbUnavailable
+            | PublicErrorCode::ConnectFailed
+            | PublicErrorCode::InvalidState
+    ));
+    assert_eq!(
+        runtime.session_count().await,
+        0,
+        "failed connect must not count"
+    );
+    runtime.shutdown().await.expect("shutdown");
+    assert_eq!(
+        runtime.session_count().await,
+        0,
+        "shutdown clears the registry"
+    );
+}
+
+#[test]
+fn set_batch_items_is_throttled_and_never_rolls_back_terminal_state() {
+    // Phase E: item counters advance per plan item, events are
+    // time-throttled (no byte delta), and a terminal state is never
+    // flipped back to Running by a late batch update.
+    use crate::event::{BackendEvent, EventHub};
+    use crate::transfer::{TransferDirectionDto, TransferRegistry};
+
+    let hub = EventHub::new(64);
+    let mut receiver = hub.subscribe();
+    let registry = TransferRegistry::new(hub, 64, None);
+    let entry = registry.register(registry.snapshot_for(
+        SessionId(1),
+        TransferDirectionDto::Download,
+        "/remote/a.bin".into(),
+        "/local/a.bin".into(),
+    ));
+    let id = entry.snapshot.lock().unwrap().id;
+
+    // First update always emits; a same-millisecond second update is
+    // normally throttled, but on a slow machine the two calls can straddle
+    // the 100 ms window — allow either, never more than two.
+    registry.set_batch_items(id, 1, 0, Some("/remote/a.bin".into()));
+    registry.set_batch_items(id, 2, 0, Some("/remote/b.bin".into()));
+    let snapshot = registry.get(id).unwrap();
+    assert_eq!(snapshot.completed_items, 2);
+    assert_eq!(snapshot.failed_items, 0);
+    assert_eq!(snapshot.current_item.as_deref(), Some("/remote/b.bin"));
+
+    let mut updated = 0;
+    while let Ok(envelope) = receiver.try_recv() {
+        if matches!(envelope.event, BackendEvent::TransferUpdated(_)) {
+            updated += 1;
+        }
+    }
+    assert!(
+        (1..=2).contains(&updated),
+        "small item update must be throttled (got {updated} events)"
+    );
+
+    // Terminal state is never rolled back: counters may still advance, the
+    // state stays Cancelled.
+    registry.cancel(id).expect("cancel");
+    registry.set_batch_items(id, 3, 1, Some("/remote/c.bin".into()));
+    let snapshot = registry.get(id).unwrap();
+    assert_eq!(snapshot.state, TransferState::Cancelled);
+    assert_eq!(snapshot.completed_items, 3);
+    assert_eq!(snapshot.failed_items, 1);
+    assert_eq!(snapshot.current_item.as_deref(), Some("/remote/c.bin"));
+}
+
+#[test]
+fn set_batch_result_attaches_result_and_serializes() {
+    use crate::event::EventHub;
+    use crate::transfer::{TransferDirectionDto, TransferFailureDto, TransferRegistry};
+
+    let registry = TransferRegistry::new(EventHub::new(8), 64, None);
+    let entry = registry.register(registry.snapshot_for(
+        SessionId(1),
+        TransferDirectionDto::Download,
+        "/remote/a.bin".into(),
+        "/local/a.bin".into(),
+    ));
+    let id = entry.snapshot.lock().unwrap().id;
+    let result = BatchTransferResultDto {
+        ok: vec![BatchTransferItemDto {
+            source: "/remote/a.bin".into(),
+            target: "/local/a.bin".into(),
+        }],
+        failures: vec![TransferFailureDto {
+            source: "/remote/b.bin".into(),
+            target: "/local/b.bin".into(),
+            message: "remote io".into(),
+        }],
+    };
+    registry.set_batch_result(id, result.clone());
+    let snapshot = registry.get(id).unwrap();
+    assert_eq!(snapshot.batch_result.as_ref(), Some(&result));
+
+    // The result is part of the snapshot wire contract.
+    let json = serde_json::to_value(&snapshot).expect("serialize");
+    assert_eq!(json["batch_result"]["ok"][0]["source"], "/remote/a.bin");
+    assert_eq!(json["batch_result"]["failures"][0]["message"], "remote io");
+
+    // Terminal states are never overwritten: after cancel the late result
+    // is dropped.
+    registry.cancel(id).expect("cancel");
+    registry.set_batch_result(id, BatchTransferResultDto::default());
+    let snapshot = registry.get(id).unwrap();
+    assert_eq!(snapshot.batch_result.as_ref(), Some(&result));
 }
 
 // ---- M8.1 Phase C: event bridge (C1) and connection loss (C5) ----

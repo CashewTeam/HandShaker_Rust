@@ -520,6 +520,13 @@ impl HandShakerRuntime {
         Ok(id)
     }
 
+    /// Number of currently registered sessions (short critical section
+    /// reading `sessions.len()`; safe before any connect and after
+    /// shutdown — failed connects never register a session).
+    pub async fn session_count(&self) -> usize {
+        self.inner.sessions.lock().await.len()
+    }
+
     pub async fn disconnect(&self, session_id: SessionId) -> AppResult<()> {
         self.ensure_open()?;
         let session = {
@@ -1015,8 +1022,10 @@ impl HandShakerRuntime {
                 .collect::<Vec<_>>()
                 .join(", "),
         );
-        // Carry the planned total so GUI can render progress against it.
+        // Carry the planned total so GUI can render progress against it;
+        // the item count drives the item-level progress counters.
         snapshot.total_bytes = request.plan.total_bytes;
+        snapshot.item_count = request.plan.items.len() as u64;
         let id = snapshot.id;
         let entry = self.inner.transfers.register(snapshot);
         let registry = self.inner.transfers.clone();
@@ -1091,6 +1100,12 @@ impl HandShakerRuntime {
                     }
                     .map_err(|error| from_core_error(error, "execute_file_plan"))?;
                     merge_core_batch(&mut result, partial);
+                    registry.set_batch_items(
+                        id,
+                        result.ok.len() as u64,
+                        result.failures.len() as u64,
+                        Some(tree.source.clone()),
+                    );
                 }
                 let core_items: Vec<handshaker_core::BatchTransferItem> = files
                     .iter()
@@ -1110,6 +1125,12 @@ impl HandShakerRuntime {
                     }
                     .map_err(|error| from_core_error(error, "execute_file_plan"))?;
                     merge_core_batch(&mut result, partial);
+                    registry.set_batch_items(
+                        id,
+                        result.ok.len() as u64,
+                        result.failures.len() as u64,
+                        files.last().map(|file| file.source.clone()),
+                    );
                 }
                 Ok(())
             }
@@ -1120,6 +1141,10 @@ impl HandShakerRuntime {
                     if let Some(total) = total_bytes {
                         registry.set_progress(id, total, total);
                     }
+                    // Attach the aggregated result before the terminal
+                    // transition so the final `TransferUpdated` event
+                    // carries it.
+                    registry.set_batch_result(id, batch_result_to_dto(result));
                     if let Some(snapshot) = registry.transition(id, TransferState::Completed) {
                         event_hub.publish(BackendEvent::TransferUpdated(snapshot));
                     }
@@ -1159,6 +1184,9 @@ impl HandShakerRuntime {
                         )
                         .operation("execute_file_plan"),
                     );
+                    // Partial success is still a result: attach it before
+                    // the Failed transition.
+                    registry.set_batch_result(id, batch_result_to_dto(result));
                     if let Some(snapshot) = registry.transition(id, TransferState::Failed) {
                         event_hub.publish(BackendEvent::TransferUpdated(snapshot));
                     }
@@ -1553,6 +1581,108 @@ impl HandShakerRuntime {
             .map_err(|error| from_core_error(error, "batch_upload"))?;
         merge_core_batch(&mut result, partial);
         Ok(batch_result_to_dto(result))
+    }
+
+    /// Start a batch download as a background transfer (Phase E): files and
+    /// directory trees run serially under one unified transfer id, per-item
+    /// failures are aggregated (never aborting the rest), and item-level
+    /// progress is published via `TransferUpdated` events. Remote sources
+    /// are resolved against the device root here (consistent with
+    /// `batch_download`); the local side is used as-is.
+    pub async fn start_batch_download(
+        &self,
+        request: BatchTransferRequest,
+    ) -> AppResult<TransferId> {
+        self.start_batch_transfer(request, FilePlanDirection::Download)
+            .await
+    }
+
+    /// Start a batch upload as a background transfer (Phase E): mirror of
+    /// `start_batch_download` for uploads — remote targets are resolved
+    /// against the device root, the local side is used as-is.
+    pub async fn start_batch_upload(&self, request: BatchTransferRequest) -> AppResult<TransferId> {
+        self.start_batch_transfer(request, FilePlanDirection::Upload)
+            .await
+    }
+
+    /// Shared implementation: resolve every file/tree pair to absolute
+    /// paths (remote side via `resolve_remote_path`, local side as-is),
+    /// wrap them in an executable plan, and hand the plan to
+    /// `execute_file_plan`, which runs it as a background task under one
+    /// transfer id with serial execution (concurrency 1).
+    async fn start_batch_transfer(
+        &self,
+        request: BatchTransferRequest,
+        direction: FilePlanDirection,
+    ) -> AppResult<TransferId> {
+        self.ensure_open()?;
+        let session = self.session_handle(request.session_id).await?;
+        session.record_activity();
+        let root = session.client.root_path().to_string();
+        let mut items = Vec::with_capacity(request.files.len() + request.trees.len());
+        match direction {
+            FilePlanDirection::Download => {
+                for file in &request.files {
+                    items.push(FilePlanItem {
+                        source: crate::resolve_remote_path(&root, &file.source),
+                        destination: file.target.clone(),
+                        is_directory: false,
+                        size: None,
+                    });
+                }
+                for tree in &request.trees {
+                    items.push(FilePlanItem {
+                        source: crate::resolve_remote_path(&root, &tree.source),
+                        destination: tree.target.clone(),
+                        is_directory: true,
+                        size: None,
+                    });
+                }
+            }
+            FilePlanDirection::Upload => {
+                for file in &request.files {
+                    items.push(FilePlanItem {
+                        source: file.source.clone(),
+                        destination: crate::resolve_remote_path(&root, &file.target),
+                        is_directory: false,
+                        size: None,
+                    });
+                }
+                for tree in &request.trees {
+                    items.push(FilePlanItem {
+                        source: tree.source.clone(),
+                        destination: crate::resolve_remote_path(&root, &tree.target),
+                        is_directory: true,
+                        size: None,
+                    });
+                }
+            }
+        }
+        let (file_count, directory_count) =
+            items.iter().fold((0u64, 0u64), |(files, dirs), item| {
+                if item.is_directory {
+                    (files, dirs + 1)
+                } else {
+                    (files + 1, dirs)
+                }
+            });
+        let plan = FileOperationPlan {
+            direction,
+            session_id: request.session_id,
+            items,
+            conflicts: Vec::new(),
+            file_count,
+            directory_count,
+            total_bytes: None,
+            requires_recursive: directory_count > 0,
+            executable: true,
+        };
+        self.execute_file_plan(ExecuteFilePlanRequest {
+            plan,
+            overwrite: request.overwrite,
+            concurrency: 1,
+        })
+        .await
     }
 
     pub async fn get_transfer(&self, id: TransferId) -> AppResult<TransferSnapshot> {
