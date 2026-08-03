@@ -4,6 +4,7 @@ members = [
     "crates/handshaker-core",
     "crates/handshaker-cli",
     "crates/handshaker-application",
+    "crates/handshaker-ffi",
 ]
 
 [workspace.package]

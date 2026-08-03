@@ -1,0 +1,15 @@
+[package]
+name = "handshaker-ffi"
+version.workspace = true
+edition.workspace = true
+description = "Stable C ABI for handshaker-application (Swift/.NET/GTK bindings)"
+
+[lib]
+crate-type = ["rlib", "staticlib", "cdylib"]
+name = "handshaker_ffi"
+
+[dependencies]
+handshaker-application = { path = "../handshaker-application" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
