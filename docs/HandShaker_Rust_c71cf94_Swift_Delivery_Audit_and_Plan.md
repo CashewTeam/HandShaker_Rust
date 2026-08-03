@@ -49,7 +49,7 @@
 | FFI 基础设施 | 80% | 95%（ABI 单一事实来源、Header 校验、C/Swift smoke 本地全过） |
 | FFI 功能覆盖 | 40% | 100%（52 个符号：文件/剪贴板/信任/发现/监控/批量/媒体/诊断/照片同步/update file info/media merge 全导出，MVP 面齐） |
 | Apple 二进制与 Swift 包装交付 | 30% | 80%（静态 XCFramework + Swift Package 本地全过：43 测试；真机验收读路径通过；正式签名/分发仍待发布决策） |
-| Swift GUI 完整 MVP 后端准备 | 45% | 95%（后端与 FFI 100% 齐备 + Swift SDK 可用，剩余 GUI 应用工程与写路径真机） |
+| Swift GUI 完整 MVP 后端准备 | 45% | 98%（后端与 FFI 100% 齐备 + Swift SDK 可用 + 真机读写路径验收通过，剩余 GUI 应用工程） |
 
 ### 最终判断
 
@@ -1051,11 +1051,21 @@ transfers/capabilities。
 > + File/Transfer/Clipboard/Media/Sync/Trust/Monitor Services +
 > EventStream（AsyncThrowingStream，onTermination 清理）；静态
 > XCFramework 由 `scripts/build-ffi-macos.sh` 生成（binaryTarget 引用）；
-> 43 个 Swift 测试本地全过；真机读路径验收通过（ADB：连接/ping/ls/stat/
-> 剪贴板读/照片库/EXIF/诊断/媒体合并），写路径因手机端 SSP 拒绝
-> （CREATE_FOLDER/push 返回 FILE_IO_INVALID_SOURCE，CLI 同因——手机端
-> 行为变化，昨晚 Phase D 验收时写正常）以精确 SKIP 记录。剩余：Swift
-> GUI 应用工程（用户侧）与写路径真机复验（需手机端恢复/重启）。
+> 43 个 Swift 测试本地全过；**真机读写路径验收全部通过**（ADB
+> 3f13d4b4：连接/ping/ls/stat/剪贴板读/照片库/EXIF/诊断/媒体合并 +
+> mkdir/upload/download 字节一致/move/delete，teardown 清理、0 adb
+> forward 残留）。
+>
+> **写路径阻塞调查结论（已解决）**：早前 `FILE_IO_INVALID_SOURCE`
+> 并非手机端服务异常，而是两个叠加根因——(1) `/sdcard` 是符号链接，
+> 手机端 `FileProcessor.f()`（`d/c.java:874`）用
+> `StorageManager.getVolumeList()` 枚举卷根后按 `absolutePath.startsWith`
+> 匹配，`/sdcard/...` 不匹配真实挂载路径 → 写操作被拒；已由
+> `resolve_remote_path` 将 `/sdcard` 别名展开为设备 root（26e902f，
+> 反编译依据 + 真机验证）；(2) Swift 测试在 `startUpload`/`startDownload`
+> 之后未等待传输终态就 move（这两个 API 只发起任务返回 `TransferID`，
+> CLI 的 push 是同步批量等待）——已由 `waitForTransfer` 轮询
+> `hs_transfer_get` 修复（facd51f）。剩余：Swift GUI 应用工程（用户侧）。
 
 建议新建 Swift Package：
 
@@ -1369,7 +1379,7 @@ Core 后端功能：成熟
 CLI：成熟；Application 迁移已收口（仅 device discover 直连 core）
 Application：架构正确，preview 明确（P0/P1 已关闭，fixture 补齐）
 FFI：功能覆盖 100%（ABI 1.5.0、52 符号，MVP 面齐；Header/snapshot 校验 + C/Swift smoke 本地全过）
-Swift 集成：可以进行（XCFramework + Swift Package 本地 43 测试全过，真机读路径验收通过）
+Swift 集成：可以进行（XCFramework + Swift Package 本地 43 测试全过，真机读写路径验收全部通过）
 Swift 集成：可以开始（后端与 FFI 能力齐备）
 Swift 正式交付：暂不建议（待 Phase F/G：Swift Package、XCFramework、CI）
 ```
