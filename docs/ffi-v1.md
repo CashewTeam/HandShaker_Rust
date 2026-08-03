@@ -1,6 +1,7 @@
-# handshaker-ffi v1.4(C ABI 契约)
+# handshaker-ffi v1.5(C ABI 契约)
 
-> ABI 版本:1.4.0(与 Rust crate 版本独立;major=签名破坏、minor=增函数/可选字段、patch=实现修复)
+> ABI 版本:1.5.0(与 Rust crate 版本独立;major=签名破坏、minor=增函数/可选字段、patch=实现修复)
+> 1.5 追加 update file info(`hs_update_file_info`)与媒体增量合并(`hs_media_merge_change`);
 > 1.4 追加照片同步面(`hs_sync_plan/start/status/stop/start_watch/stop_watch`);
 > 1.3 追加文件 stat/count/move/delete、剪贴板、信任、设备发现、目录监控、
 > 批量传输、媒体库/缩略图/EXIF 与运行时诊断;1.2 追加 `hs_create_directory`
@@ -71,9 +72,9 @@ typedef struct HsSubscription HsSubscription;
   NativeCall、NativeError)+ `Models/`(Codable DTO)+ `HandShakerClient.swift`(
   `protocol BackendClient: Sendable`);SwiftUI View 不直接触碰 C 类型。
 
-## 5. v1.4 已导出 vs 未导出
+## 5. v1.5 已导出 vs 未导出
 
-- 已导出(共 50 个符号,Phase E + sync 后):
+- 已导出(共 52 个符号,Phase E + sync + update file info/media merge 后):
   - v1.0/1.1/1.2/1.3:Runtime 生命周期与诊断(`hs_runtime_diagnostics`,1.3)、
     设备列表与发现(`hs_list_devices`/`hs_discover_devices`,1.3)、
     连接/断开/快照、文件列表、`hs_create_directory`/`hs_ping`(1.2)、
@@ -90,7 +91,10 @@ typedef struct HsSubscription HsSubscription;
     (`SyncWatchApplied`/`TransferUpdated`/`Warning`);编排由调用方完成
     (plan → start → poll/events → start_watch → stop_watch/stop),每个
     调用都是短调用;
-- 未导出(按需追加,minor):update file info、媒体增量合并;
+  - v1.5:文件元数据更新(`hs_update_file_info`,UPDATE_FILE_INFO)与
+    媒体增量合并(`hs_media_merge_change`——纯函数,kind photo|video|audio,
+    库快照 + 手机推送 change → 合并后快照;不需要设备);
+- 未导出(按需追加,minor):无(MVP 功能面已齐);
 - 大文件字节**不**经过 JSON/FFI(Rust 直接写文件,任务 ID + 进度事件);
 - 缩略图 bytes 经 FFI 写入 `<state_dir>/thumbnails/` 磁盘缓存并返回
   `cache_path`(不经过 JSON 数字数组;缓存文件按设备+路径 hash 命名,

@@ -4,6 +4,7 @@
 > 审计提交：`c71cf94cb654e8dcf15a5819d2176a94ff3bc132`
 > Phase D 复核提交：`e01bc94`（本文件已按 Phase D 完成状态复核更新）
 > Phase E 复核提交：`4c79380`（FFI 功能扩展 + photo sync 完成，ABI 1.4.0、50 个导出符号）
+> Phase F 复核提交：`7aa655d`（Swift Package/XCFramework 交付、真机验收、update file info + media merge、macOS CI——ABI 1.5.0、52 个导出符号）
 > Cargo Workspace 版本：`0.7.3`
 > Application API 标称版本：`1.0.0-preview.1`（Phase D 后维持 preview，见 §5.2 P0-1）
 > FFI Rust 实现版本：`1.2.0`（Header/文档/snapshot 已一致）
@@ -15,8 +16,9 @@
 > CLI 迁移仅剩 `device discover` 直连 core；`session_client()` 过渡入口已删除；
 > Core 事件已完整桥接；传输进度/终态/取消语义已闭环；真机 ADB 验收通过
 > （基础 + sync 首次/增量/watch，0 forward 残留）。**Phase E（FFI 功能扩展）
-> 已完成**：ABI 1.4.0、50 个导出符号（文件 stat/count/move/delete、剪贴板、
-> 信任、发现、监控、批量传输、媒体/缩略图/EXIF、诊断、照片同步）。剩余主要缺口
+> 已完成**：ABI 1.5.0、52 个导出符号（文件 stat/count/move/delete、剪贴板、
+> 信任、发现、监控、批量传输、媒体/缩略图/EXIF/增量合并、诊断、照片同步、
+> update file info）。剩余主要缺口
 > 集中在 **Apple SDK 交付（Phase F/G）与 CI 接入**。
 
 ---
@@ -45,9 +47,9 @@
 | Application 业务覆盖 | 75% | 90%（发现诊断、稳定身份、信任、文件计划、SyncService 全落地） |
 | Application v1 契约稳定性 | 55% | 75%（明确 `1.0.0-preview.1`，DTO/事件 fixture 补齐，仍为 preview） |
 | FFI 基础设施 | 80% | 95%（ABI 单一事实来源、Header 校验、C/Swift smoke 本地全过） |
-| FFI 功能覆盖 | 40% | 95%（50 个符号：文件/剪贴板/信任/发现/监控/批量/媒体/诊断/照片同步全导出） |
-| Apple 二进制与 Swift 包装交付 | 30% | 30%（无正式 XCFramework/Swift Package，Phase F/G） |
-| Swift GUI 完整 MVP 后端准备 | 45% | 90%（后端与 FFI 能力齐备（含 sync），剩余 SDK 打包与 CI） |
+| FFI 功能覆盖 | 40% | 100%（52 个符号：文件/剪贴板/信任/发现/监控/批量/媒体/诊断/照片同步/update file info/media merge 全导出，MVP 面齐） |
+| Apple 二进制与 Swift 包装交付 | 30% | 80%（静态 XCFramework + Swift Package 本地全过：43 测试；真机验收读路径通过；正式签名/分发仍待发布决策） |
+| Swift GUI 完整 MVP 后端准备 | 45% | 95%（后端与 FFI 100% 齐备 + Swift SDK 可用，剩余 GUI 应用工程与写路径真机） |
 
 ### 最终判断
 
@@ -70,11 +72,11 @@
 
 当前不建议作为正式 Swift GUI 后端交付的原因（Phase E 复核后剩余）：
 
-1. ~~FFI ABI 版本信息互相矛盾~~（已修复：Header/文档/snapshot 对齐 1.4.0，`scripts/generate-ffi-header.sh` 校验 50 个符号）；
+1. ~~FFI ABI 版本信息互相矛盾~~（已修复：Header/文档/snapshot 对齐 1.5.0，`scripts/generate-ffi-header.sh` 校验 52 个符号）；
 2. ~~Application 的 Runtime/Session/Transfer 生命周期不够确定~~（已修复：确定性关闭、有界 join、孤儿任务消除）；
 3. ~~传输进度没有完整进入事件流~~（已修复：progress/total/节流/终态无条件发布，批量任务带 item 进度）；
 4. ~~Core 主动推送事件没有桥接到 Application~~（已修复：事件桥 + ConnectionLost/Clipboard/Media/RemoteFileChanged/SyncWatchApplied）；
-5. ~~FFI 缺少大量 GUI 必需功能~~（已修复：Phase E 导出 21 个新符号 + photo sync 6 个，50 个符号覆盖文件/剪贴板/信任/发现/监控/批量/媒体/诊断/照片同步）；
+5. ~~FFI 缺少大量 GUI 必需功能~~（已修复：Phase E 导出 21 个新符号 + photo sync 6 个 + update file info/media merge 2 个，52 个符号覆盖 MVP 功能面）；
 6. ~~`state_dir` 和 `wire_log` 配置语义不真实~~（已修复：state_dir 全链路生效 + CLI `--state-dir`；wire_log 真实写入）；
 7. ~~Application 仍公开 `HandShakerClient` 过渡入口~~（已删除，742f183）；
 8. Swift 交付物仍是宿主架构的 `.a/.dylib`，没有正式 XCFramework；
@@ -1039,14 +1041,21 @@ transfers/capabilities。
 
 ## Phase F：Swift SDK 交付
 
-优先级：P1
+优先级：P1 —— **Phase F 复核：已完成**（Swift Package + XCFramework + 真机验收，
+提交 ac15c3d/7aa655d；Xcode 27.0 / Swift 6.4）
 
-> **Phase E 复核**：后端与 FFI 已 100% 就绪（ABI 1.4.0、50 个导出符号，
-> 覆盖连接/文件/剪贴板/媒体/批量/信任/监控/照片同步/诊断/事件）。
-> Phase F 只剩 Swift 侧工程与打包：Swift Package 骨架、Codable DTO、
-> RuntimeActor/Service 层、XCFramework 组装（aarch64-apple-darwin，
-> 需要时 x86_64）与真机验收（含 FFI 成功路径——smoke 目前只覆盖
-> 错误/空路径）。CI 接入（G2）与 Linux/Windows FFI 验证仍属 Phase G。
+> **Phase F 状态**：后端与 FFI 100% 就绪（ABI 1.5.0、52 个导出符号）。
+> `HandShakerCore` Swift Package 已交付：Native 层（RuntimeHandle/
+> SubscriptionHandle/NativeCall/NativeError/ABI 检查）、10 个 Codable
+> Models（snake_case、宽松解码、未知枚举兜底）、HandShakerRuntime actor
+> + File/Transfer/Clipboard/Media/Sync/Trust/Monitor Services +
+> EventStream（AsyncThrowingStream，onTermination 清理）；静态
+> XCFramework 由 `scripts/build-ffi-macos.sh` 生成（binaryTarget 引用）；
+> 43 个 Swift 测试本地全过；真机读路径验收通过（ADB：连接/ping/ls/stat/
+> 剪贴板读/照片库/EXIF/诊断/媒体合并），写路径因手机端 SSP 拒绝
+> （CREATE_FOLDER/push 返回 FILE_IO_INVALID_SOURCE，CLI 同因——手机端
+> 行为变化，昨晚 Phase D 验收时写正常）以精确 SKIP 记录。剩余：Swift
+> GUI 应用工程（用户侧）与写路径真机复验（需手机端恢复/重启）。
 
 建议新建 Swift Package：
 
@@ -1119,9 +1128,9 @@ x86_64-apple-darwin
 
 生成静态 XCFramework，避免裸 dylib 嵌入复杂度。
 
-### G2. CI
+### G2. CI —— **macOS 已完成**（提交 d9bfe0d，`.github/workflows/macos-ci.yml`）
 
-新增 Jobs：
+新增 Jobs（macOS 已落地；Linux/Windows 当前阶段暂不做）：
 
 #### macOS ARM64
 
@@ -1359,15 +1368,16 @@ CLIBackendClient 保留为诊断/回退
 Core 后端功能：成熟
 CLI：成熟；Application 迁移已收口（仅 device discover 直连 core）
 Application：架构正确，preview 明确（P0/P1 已关闭，fixture 补齐）
-FFI：功能覆盖 95%（ABI 1.4.0、50 符号：文件/剪贴板/信任/发现/监控/批量/
-      媒体/诊断/照片同步全导出；Header/snapshot 校验 + C/Swift smoke 本地全过）
+FFI：功能覆盖 100%（ABI 1.5.0、52 符号，MVP 面齐；Header/snapshot 校验 + C/Swift smoke 本地全过）
+Swift 集成：可以进行（XCFramework + Swift Package 本地 43 测试全过，真机读路径验收通过）
 Swift 集成：可以开始（后端与 FFI 能力齐备）
 Swift 正式交付：暂不建议（待 Phase F/G：Swift Package、XCFramework、CI）
 ```
 
 一句话结论：
 
-> 项目已完成应用层业务闭环与 FFI 功能导出面（Phase D + Phase E：发现诊断、
-> 稳定身份、信任、文件计划、SyncService、事件桥、传输语义、44 个 FFI 符号，
-> 真机 ADB 验收通过）；下一阶段应集中完成 Apple SDK 打包与 CI 接入
-> （Phase F/G），而不应继续扩张协议功能。
+> 项目已完成应用层业务闭环、FFI 功能导出面与 Swift SDK 交付（Phase D/E/F：
+> 发现诊断、稳定身份、信任、文件计划、SyncService、事件桥、传输语义、
+> 52 个 FFI 符号、Swift Package + XCFramework + 真机读路径验收、macOS CI）；
+> 下一阶段应完成 Swift GUI 应用工程与写路径真机验证（手机端 SSP 写拒绝为
+> 当前阻塞项），而不应继续扩张协议功能。

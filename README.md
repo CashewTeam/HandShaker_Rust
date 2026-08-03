@@ -129,6 +129,19 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
   进度用 status 轮询或事件订阅（SyncWatchApplied/TransferUpdated/
   Warning），编排由调用方完成（plan → start → poll/events →
   start_watch → stop_watch/stop），每个调用都是短调用。
+- **M8.3 Update file info + 媒体增量合并（已完成，ABI 1.5.0，52 个导出
+  符号）**：`hs_update_file_info`（UPDATE_FILE_INFO）与
+  `hs_media_merge_change`（纯函数：库快照 + 手机推送 change → 合并后
+  快照，kind photo|video|audio，不需要设备）；Application 对应
+  `update_files_info` 与 `merge_photo_library`/`merge_video_library`/
+  `merge_audio_library`。
+- **M8.4 Swift SDK（已完成）**：`HandShakerCore` Swift Package
+  （Native 层 + 10 个 Codable Models + HandShakerRuntime actor +
+  File/Transfer/Clipboard/Media/Sync/Trust/Monitor Services +
+  EventStream），静态 XCFramework 由 `scripts/build-ffi-macos.sh`
+  生成，43 个 Swift 测试本地全过，真机读路径验收通过
+  （`scripts/swift-device-acceptance.sh`，写路径手机端拒绝时精确
+  SKIP）；macOS CI 已接入（`.github/workflows/macos-ci.yml`）。
 - 剪贴板/目录监控之外的推送发送侧仍属于后续里程碑。
 
 ## 命令行教程
