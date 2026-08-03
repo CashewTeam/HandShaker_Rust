@@ -292,6 +292,23 @@ fn resolve_remote_path_rules() {
         resolve_remote_path("/root", "/../../etc/passwd"),
         "/etc/passwd"
     );
+    // The legacy `/sdcard` symlink alias expands to the device root: the
+    // phone's FileProcessor matches requests against real volume roots,
+    // so `/sdcard/...` write ops would be rejected with
+    // FILE_IO_INVALID_SOURCE (real-device evidence).
+    assert_eq!(
+        resolve_remote_path("/storage/emulated/0", "/sdcard/Download/a.txt"),
+        "/storage/emulated/0/Download/a.txt"
+    );
+    assert_eq!(
+        resolve_remote_path("/storage/emulated/0", "/sdcard"),
+        "/storage/emulated/0"
+    );
+    // Not an alias boundary: /sdcardX stays untouched.
+    assert_eq!(
+        resolve_remote_path("/storage/emulated/0", "/sdcardX/foo"),
+        "/sdcardX/foo"
+    );
 }
 
 #[test]

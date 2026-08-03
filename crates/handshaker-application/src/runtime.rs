@@ -2797,6 +2797,19 @@ pub fn resolve_remote_path(root: &str, path: &str) -> String {
         return root.to_string();
     }
     if trimmed.starts_with('/') {
+        // `/sdcard` is a symlink on Android; the phone's FileProcessor
+        // matches a request against enumerated volume roots by real
+        // absolute path (`StorageManager.getVolumeList()` + startsWith),
+        // so write operations under `/sdcard/...` come back as
+        // FILE_IO_INVALID_SOURCE (real-device evidence). Expand the
+        // legacy alias to the session's device root (the same directory)
+        // for every operation — reads and writes are unaffected in
+        // substance, writes stop being rejected.
+        if let Some(rest) = trimmed.strip_prefix("/sdcard")
+            && (rest.is_empty() || rest.starts_with('/'))
+        {
+            return normalize_remote_path(&format!("{root}{rest}"));
+        }
         return normalize_remote_path(trimmed);
     }
     let joined = format!("{root}/{trimmed}");
