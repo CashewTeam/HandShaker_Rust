@@ -1,6 +1,6 @@
 [package]
 name = "handshaker_rust"
-version = "0.5.0"
+version = "0.6.1"
 edition = "2024"
 build = "build.rs"
 
@@ -23,6 +23,7 @@ mdns-sd = "0.20"
 prost = "0.14"
 rand = "0.8"
 rsa = { version = "0.9", features = ["sha2"] }
+rusb = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = { version = "0.10", features = ["oid"] }

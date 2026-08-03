@@ -5,9 +5,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use md5::{Digest as _, Md5};
 use prost::Message;
-use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{ReadHalf, WriteHalf};
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{interval, timeout};
@@ -260,20 +259,23 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    pub async fn establish(
-        mut stream: TcpStream,
+    pub async fn establish<S>(
+        mut stream: S,
         request_timeout: Duration,
         heartbeat_interval: Duration,
         wire_log: Option<Arc<WireLog>>,
-        handshake: &dyn HandshakeStrategy,
+        handshake: &dyn HandshakeStrategy<S>,
         serial: String,
-    ) -> Result<Self> {
+    ) -> Result<Self>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         let outcome = handshake
             .establish(&mut stream, request_timeout, wire_log.as_ref())
             .await?;
         let keys = Arc::new(outcome.keys);
         let handshake_info = outcome.wifi;
-        let (reader, writer) = stream.into_split();
+        let (reader, writer) = tokio::io::split(stream);
         let closed = Arc::new(AtomicBool::new(false));
         let (writer_sender, writer_receiver) = mpsc::channel(64);
         let writer_task = spawn_writer(
@@ -516,12 +518,15 @@ impl SessionInner {
     }
 }
 
-fn spawn_writer(
-    mut writer: OwnedWriteHalf,
+fn spawn_writer<S>(
+    mut writer: WriteHalf<S>,
     mut receiver: mpsc::Receiver<WriteCommand>,
     closed: Arc<AtomicBool>,
     wire_log: Option<Arc<WireLog>>,
-) -> JoinHandle<()> {
+) -> JoinHandle<()>
+where
+    S: AsyncWrite + Unpin + Send + 'static,
+{
     tokio::spawn(async move {
         while let Some(command) = receiver.recv().await {
             let result =
@@ -551,7 +556,10 @@ fn spawn_writer(
     })
 }
 
-fn spawn_reader(mut reader: OwnedReadHalf, inner: Arc<SessionInner>) -> JoinHandle<()> {
+fn spawn_reader<S>(mut reader: ReadHalf<S>, inner: Arc<SessionInner>) -> JoinHandle<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     tokio::spawn(async move {
         let mut unmatched = HashMap::<u32, NormalAccumulator>::new();
         loop {
@@ -884,7 +892,7 @@ mod tests {
     use rsa::{Pkcs1v15Encrypt, Pkcs1v15Sign, RsaPublicKey};
     use sha2::{Digest, Sha256};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+    use tokio::net::{TcpListener, TcpStream};
 
     use crate::protocol::crypto::KEY_TABLE;
     use crate::protocol::frame::MAX_UPSTREAM_PAYLOAD;
@@ -893,7 +901,10 @@ mod tests {
 
     type Aes256CbcDecryptor = cbc::Decryptor<Aes256>;
 
-    async fn read_upstream(stream: &mut TcpStream) -> (u32, u8, Vec<u8>) {
+    async fn read_upstream<S>(stream: &mut S) -> (u32, u8, Vec<u8>)
+    where
+        S: AsyncRead + Unpin,
+    {
         let mut header = [0_u8; 9];
         stream
             .read_exact(&mut header)
@@ -910,7 +921,10 @@ mod tests {
         (sid, flag, payload)
     }
 
-    async fn write_normal(stream: &mut TcpStream, sid: u32, body: &[u8]) {
+    async fn write_normal<S>(stream: &mut S, sid: u32, body: &[u8])
+    where
+        S: AsyncWrite + Unpin,
+    {
         let mut payload = (body.len() as u64).to_be_bytes().to_vec();
         payload.extend_from_slice(body);
         for chunk in payload.chunks(5) {
@@ -1111,7 +1125,7 @@ mod tests {
         let (client, server) = tokio::join!(client, server);
         let client = client.unwrap();
         let (mut server, _) = server.unwrap();
-        let (_, writer) = client.into_split();
+        let (_, writer) = tokio::io::split(client);
         let closed = Arc::new(AtomicBool::new(false));
         let (writer_sender, writer_receiver) = mpsc::channel(64);
         let writer_task = spawn_writer(writer, writer_receiver, Arc::clone(&closed), None);
@@ -1248,6 +1262,82 @@ mod tests {
         assert_eq!(response.r#type, None, "field 1 may be absent");
         assert_eq!(response.host_timestamp, Some(21));
         assert_eq!(response.client_timestamp, Some(42));
+        session.close().await.expect("close");
+        server.await.expect("server");
+    }
+
+    /// The session layer must be transport-agnostic: run the exact same
+    /// handshake + signed request round trip over an in-memory duplex stream
+    /// instead of TCP, mirroring the USB bulk channel (UsbStream implements
+    /// AsyncRead + AsyncWrite over libusb).
+    #[tokio::test]
+    async fn handshake_and_request_round_trip_over_memory_stream() {
+        let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            let mut stream = server_side;
+            let (handshake_sid, handshake_flag, payload) = read_upstream(&mut stream).await;
+            assert_eq!(handshake_sid, 0x8000_0001);
+            assert_eq!(handshake_flag, 0);
+
+            let clear =
+                Aes256CbcDecryptor::new((&KEY_TABLE[16..48]).into(), (&KEY_TABLE[..16]).into())
+                    .decrypt_padded_vec_mut::<Pkcs7>(&payload[16..])
+                    .expect("AES public key");
+            let public_der = base64::engine::general_purpose::STANDARD
+                .decode(clear)
+                .expect("base64 public key");
+            assert_eq!(&payload[..16], &Md5::digest(&public_der)[..]);
+            let public = RsaPublicKey::from_pkcs1_der(&public_der).expect("RSA public key");
+            let encrypted = public
+                .encrypt(&mut OsRng, Pkcs1v15Encrypt, b"ok")
+                .expect("encrypt handshake result");
+            let encoded = base64::engine::general_purpose::STANDARD.encode(encrypted);
+            write_normal(&mut stream, handshake_sid, encoded.as_bytes()).await;
+
+            let (request_sid, request_flag, payload) = read_upstream(&mut stream).await;
+            assert_eq!(request_sid, 0x8000_1001);
+            assert_eq!(request_flag, 1);
+            let (signature, protobuf) = payload.split_at(128);
+            public
+                .verify(
+                    Pkcs1v15Sign::new::<Sha256>(),
+                    &Sha256::digest(protobuf),
+                    signature,
+                )
+                .expect("request signature");
+            let request = SspHeartBeatRequest::decode(protobuf).expect("heartbeat request");
+            let response = SspHeartBeatResponse {
+                r#type: None,
+                host_timestamp: request.host_timestamp,
+                client_timestamp: Some(7),
+            }
+            .encode_to_vec();
+            write_normal(&mut stream, request_sid, &response).await;
+
+            let (_, quit_flag, quit_payload) = read_upstream(&mut stream).await;
+            assert_eq!(quit_flag, 1);
+            assert!(quit_payload.len() >= 128);
+        });
+
+        let session = Session::establish(
+            client_side,
+            Duration::from_secs(2),
+            Duration::from_secs(60),
+            None,
+            &AdbRawKeyExchange,
+            "memory".to_string(),
+        )
+        .await
+        .expect("session over duplex stream");
+        let request = SspHeartBeatRequest {
+            r#type: Some(SspRequestType::HeartBeatRequest as i32),
+            host_timestamp: Some(21),
+        };
+        let body = session.request(&request).await.expect("response");
+        let response = SspHeartBeatResponse::decode(body.as_slice()).expect("decode response");
+        assert_eq!(response.r#type, None, "field 1 may be absent");
+        assert_eq!(response.host_timestamp, Some(21));
+        assert_eq!(response.client_timestamp, Some(7));
         session.close().await.expect("close");
         server.await.expect("server");
     }

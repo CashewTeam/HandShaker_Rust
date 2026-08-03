@@ -1,10 +1,17 @@
 pub(crate) mod adb;
+pub(crate) mod usb;
 pub(crate) mod wifi;
 
 use async_trait::async_trait;
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::error::Result;
+
+/// A duplex byte stream usable by the SSP session layer, regardless of
+/// transport (TCP forward, WiFi socket, USB AOA bulk).
+pub(crate) trait TransportStream: AsyncRead + AsyncWrite + Unpin + Send {}
+
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> TransportStream for T {}
 
 /// Host-side resource tied to a connected transport, released on close.
 #[derive(Debug)]
@@ -24,9 +31,9 @@ impl TransportCleanup {
     }
 }
 
-#[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) struct ConnectedTransport {
-    pub stream: TcpStream,
+    pub stream: Box<dyn TransportStream>,
     /// Stable label used for session logging and error messages
     /// (ADB serial, or the WiFi `ip:port` before the phone identity is known).
     pub label: String,

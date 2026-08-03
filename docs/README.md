@@ -43,6 +43,7 @@ HandShaker 的局域网设备发现使用 **Apple Bonjour（mDNS/DNS-SD）**，�
 | [20-m4-media-library](20-m4-media-library.md) | M4 媒体库与缩略图（设计与实现记录） |
 | [21-m5-exif-batch](21-m5-exif-batch.md) | M5 EXIF 拉取、媒体库增量合并与批量/递归传输（设计与实现记录） |
 | [22-m6-photo-sync](22-m6-photo-sync.md) | M6 照片同步与实时同步（设计与实现记录） |
+| [23-m7-usb-aoa](23-m7-usb-aoa.md) | M7 USB AOA 连接（设计与实现记录） |
 
 ## 术语
 

@@ -23,6 +23,13 @@ mod sync_store;
 mod test_support;
 mod transport;
 
+/// Discover USB AOA accessory devices (VID 0x18d1 accessory interfaces).
+pub fn list_usb_accessories() -> Result<Vec<UsbAccessory>> {
+    transport::usb::list_accessories()
+}
+
+pub use transport::usb::UsbAccessory;
+
 pub use cancellation::{CancellationInfo, CancellationOrigin, CancellationToken, RequestOptions};
 pub use client::{ClientOptions, ConnectionTarget, EventCallbacks, HandShakerClient, PingResult};
 pub use domain::{

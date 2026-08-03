@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::timeout;
 
 use crate::error::{Error, Result};
@@ -18,11 +18,16 @@ pub(crate) struct HandshakeOutcome {
     pub wifi: Option<super::wifi_handshake::WifiHandshakeInfo>,
 }
 
+/// A transport-agnostic handshake. Implementations only need a duplex byte
+/// stream (TCP, USB bulk, ...) and speak the same SSP frames on all of them.
 #[async_trait]
-pub(crate) trait HandshakeStrategy: Send + Sync {
+pub(crate) trait HandshakeStrategy<S>: Send + Sync
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
     async fn establish(
         &self,
-        stream: &mut TcpStream,
+        stream: &mut S,
         request_timeout: Duration,
         wire_log: Option<&Arc<WireLog>>,
     ) -> Result<HandshakeOutcome>;
@@ -32,10 +37,13 @@ pub(crate) trait HandshakeStrategy: Send + Sync {
 pub(crate) struct AdbRawKeyExchange;
 
 #[async_trait]
-impl HandshakeStrategy for AdbRawKeyExchange {
+impl<S> HandshakeStrategy<S> for AdbRawKeyExchange
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
     async fn establish(
         &self,
-        stream: &mut TcpStream,
+        stream: &mut S,
         request_timeout: Duration,
         wire_log: Option<&Arc<WireLog>>,
     ) -> Result<HandshakeOutcome> {
@@ -72,9 +80,16 @@ impl HandshakeStrategy for AdbRawKeyExchange {
             }
             let clear = keys.decrypt_handshake_result(&response)?;
             if clear != b"ok" {
+                // A malicious phone could inject arbitrary bytes into the
+                // error string; log only a bounded hex prefix.
+                let mut preview = String::new();
+                for byte in clear.iter().take(16) {
+                    use std::fmt::Write;
+                    let _ = write!(preview, "{byte:02x}");
+                }
                 return Err(Error::Handshake(i18n::format(
                     "handshake.result_invalid",
-                    &[&format!("{:?}", String::from_utf8_lossy(&clear))],
+                    &[&preview],
                 )));
             }
             Ok(())
@@ -86,11 +101,14 @@ impl HandshakeStrategy for AdbRawKeyExchange {
     }
 }
 
-pub(crate) async fn read_normal_direct(
-    stream: &mut TcpStream,
+pub(crate) async fn read_normal_direct<R>(
+    stream: &mut R,
     expected_sid: u32,
     wire_log: Option<&Arc<WireLog>>,
-) -> Result<Vec<u8>> {
+) -> Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
     // A rogue phone (or a spoofed mDNS entry) could declare an arbitrarily
     // large length prefix; cap the accumulated handshake response so the
     // wait loop cannot balloon client memory.

@@ -110,7 +110,7 @@ impl TransportConnector for AdbConnector {
         })?;
 
         Ok(ConnectedTransport {
-            stream,
+            stream: Box::new(stream),
             label: device.serial.clone(),
             cleanup: TransportCleanup::Adb(cleanup),
         })

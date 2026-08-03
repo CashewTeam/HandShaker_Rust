@@ -27,7 +27,7 @@ use crate::events::{EventFilter, EventSubscription};
 use crate::exif_parser;
 use crate::i18n;
 use crate::protocol::frame::{MAX_UPSTREAM_PAYLOAD, WireLog};
-use crate::protocol::handshake::{AdbRawKeyExchange, HandshakeStrategy};
+use crate::protocol::handshake::AdbRawKeyExchange;
 use crate::protocol::proto::*;
 use crate::protocol::wifi_handshake::WifiTrustHandshake;
 use crate::session::Session;
@@ -35,6 +35,7 @@ use crate::state::StateStore;
 use crate::transport::TransportCleanup;
 use crate::transport::TransportConnector;
 use crate::transport::adb::{AdbConnector, list_devices, list_devices_with_timeout};
+use crate::transport::usb::UsbConnector;
 use crate::transport::wifi::WifiConnector;
 use futures_util::StreamExt;
 
@@ -70,6 +71,9 @@ pub enum ConnectionTarget {
     Adb { serial: Option<String> },
     /// Connect directly over WiFi to the phone's dynamic SSP port.
     Wifi { address: SocketAddr },
+    /// Connect over the USB AOA accessory channel (bulk byte stream).
+    /// `location_id` is the `bus-ports` location string when specified.
+    Usb { location_id: Option<String> },
 }
 
 /// Options controlling a HandShaker connection.
@@ -291,23 +295,88 @@ impl HandShakerClient {
                 let connected = connector.connect().await?;
                 (connected.label.clone(), connected)
             }
+            ConnectionTarget::Usb { location_id } => {
+                let location = location_id.clone();
+                let uuid = state.host_uuid.to_string();
+                let timeout = options.timeout;
+                // libusb open/control/claim and the accessory switch poll are
+                // blocking; keep them off the tokio worker threads. The phone
+                // app opens the accessory asynchronously after ATTACHED, so a
+                // first attempt can race it: retry once after a short pause.
+                let (label, connected) = tokio::task::spawn_blocking(move || {
+                    let attempt = || {
+                        UsbConnector::new(location.clone(), &uuid, timeout)
+                            .connect()
+                            .map_err(|error| {
+                                // LocalIo -> Transport so the CLI maps it to
+                                // the connection error class.
+                                if matches!(error, Error::LocalIo(_)) {
+                                    Error::Transport(error.to_string())
+                                } else {
+                                    error
+                                }
+                            })
+                    };
+                    let mut connected = match attempt() {
+                        Ok(connected) => connected,
+                        Err(first) => {
+                            std::thread::sleep(Duration::from_secs(3));
+                            match attempt() {
+                                Ok(connected) => connected,
+                                Err(_) => return Err(first),
+                            }
+                        }
+                    };
+                    Ok::<_, Error>((connected.label.clone(), connected))
+                })
+                .await
+                .map_err(|join| {
+                    Error::Transport(i18n::format(
+                        "usb.connect_task_failed",
+                        &[&join.to_string()],
+                    ))
+                })??;
+                (label, connected)
+            }
         };
-        let handshake: Box<dyn HandshakeStrategy> = match &target {
-            ConnectionTarget::Adb { .. } => Box::new(AdbRawKeyExchange),
-            ConnectionTarget::Wifi { .. } => Box::new(
-                WifiTrustHandshake::new(state.host_uuid.to_string(), state.trust.clone())
-                    .with_trust_store(state_store.clone()),
-            ),
+        let session = match &target {
+            ConnectionTarget::Adb { .. } => {
+                Session::establish(
+                    connected.stream,
+                    options.timeout,
+                    options.heartbeat_interval,
+                    wire_log,
+                    &AdbRawKeyExchange,
+                    serial.clone(),
+                )
+                .await?
+            }
+            ConnectionTarget::Wifi { .. } => {
+                let handshake =
+                    WifiTrustHandshake::new(state.host_uuid.to_string(), state.trust.clone())
+                        .with_trust_store(state_store.clone());
+                Session::establish(
+                    connected.stream,
+                    options.timeout,
+                    options.heartbeat_interval,
+                    wire_log,
+                    &handshake,
+                    serial.clone(),
+                )
+                .await?
+            }
+            ConnectionTarget::Usb { .. } => {
+                Session::establish(
+                    connected.stream,
+                    options.timeout,
+                    options.heartbeat_interval,
+                    wire_log,
+                    &AdbRawKeyExchange,
+                    serial.clone(),
+                )
+                .await?
+            }
         };
-        let session = Session::establish(
-            connected.stream,
-            options.timeout,
-            options.heartbeat_interval,
-            wire_log,
-            handshake.as_ref(),
-            serial.clone(),
-        )
-        .await?;
         // Persist the trust record after a successful WiFi TRUST_ALWAYS.
         if let Some(info) = &session.handshake_info {
             if let Some(derived_key) = &info.derived_key {

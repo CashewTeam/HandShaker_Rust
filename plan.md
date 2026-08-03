@@ -1,6 +1,6 @@
 # HandShaker_Rust 后端现状与完整开发计划
 
-> 状态基线：2026-08-02，Cargo package `handshaker_rust 0.5.0`。
+> 状态基线：2026-08-03，Cargo package `handshaker_rust 0.6.1`。
 >
 > 本文只把已经存在于 Rust 代码中的能力标记为“已实现”。协议文档、proto schema 或抓包已经确认，
 > 但尚未形成正式 Rust API/CLI 的能力，仍标记为“未实现”。
@@ -557,7 +557,7 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ## 9. 版本建议
 
-- 当前 `0.5.0`：ADB 基线 + 事件/取消 + WiFi 连接与信任 + 目录监控/主动推送 watch + 媒体库与缩略图 + EXIF/增量合并/批量传输 + 照片同步（PHOTO_SYNC/SYNC_MONITOR 发送侧与增量状态机）。
+- 当前 `0.6.1`：ADB 基线 + 事件/取消 + WiFi 连接与信任 + 目录监控/主动推送 watch + 媒体库与缩略图 + EXIF/增量合并/批量传输 + 照片同步（PHOTO_SYNC/SYNC_MONITOR 发送侧与增量状态机）。
 - 媒体、同步或 USB 等较大里程碑：根据 public API 兼容性由维护者决定 Y 版本。
 - `1.0.0` 前提：至少 ADB + WiFi 稳定、公开 API 和 JSON schema 有兼容承诺、跨平台发布流程成熟。
 - 单次 Bug 修复和简单功能默认只递增 Z；纯文档不递增版本。
@@ -565,7 +565,7 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ## 10. 下一步建议
 
-M0–M6 均已完成（M5 = EXIF 拉取 + 媒体库增量合并 + 批量/递归传输，0.4.0；M5 收尾 = dry-run/区间下载/UPDATE_FILE_INFO/受控并发，0.4.1；M6 = 照片同步与实时同步，0.5.0）。建议接着执行 **M7**（USB AOA 连接）或优先处理遗留项：
+M0–M7 均已完成（M5 = EXIF 拉取 + 媒体库增量合并 + 批量/递归传输，0.4.0；M5 收尾 = dry-run/区间下载/UPDATE_FILE_INFO/受控并发，0.4.1；M6 = 照片同步与实时同步，0.5.0；M7 = USB AOA 连接，0.6.0，含传输层抽象与 AOA identification，真机完整业务验收通过；0.6.1 = `batch` 长连接批量会话，规避 accessory 单次会话）。建议优先处理遗留项：
 
 1. M6 遗留：`sync run` 串行下载可接入 `batch_transfer` 并发；37/38/39 发送侧真机验收（§6.2 待执行）；
 2. 安全遗留：剪贴板 gzip 解压输出上限（M3 记录）、`fs ls/device.info/clipboard.get` human 输出

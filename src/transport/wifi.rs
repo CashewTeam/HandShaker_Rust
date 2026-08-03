@@ -40,7 +40,7 @@ impl TransportConnector for WifiConnector {
             Error::Transport(i18n::format("wifi.nodelay_failed", &[&error.to_string()]))
         })?;
         Ok(ConnectedTransport {
-            stream,
+            stream: Box::new(stream),
             label: self.address.to_string(),
             cleanup: TransportCleanup::None,
         })
@@ -73,7 +73,10 @@ mod tests {
         let address = listener.local_addr().expect("local address");
         drop(listener); // Close the port so connect is refused.
         let connector = WifiConnector::new(address, Duration::from_secs(1));
-        let error = connector.connect().await.expect_err("must fail");
-        assert!(matches!(error, Error::Transport(_)), "{error:?}");
+        match connector.connect().await {
+            Err(Error::Transport(_)) => {}
+            Err(error) => panic!("expected Transport error, got {error}"),
+            Ok(_) => panic!("connect must fail against a closed port"),
+        }
     }
 }

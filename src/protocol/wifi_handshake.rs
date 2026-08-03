@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use prost::Message;
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::timeout;
 
 use crate::error::{Error, Result};
@@ -91,10 +91,13 @@ impl WifiTrustHandshake {
 }
 
 #[async_trait]
-impl HandshakeStrategy for WifiTrustHandshake {
+impl<S> HandshakeStrategy<S> for WifiTrustHandshake
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
     async fn establish(
         &self,
-        stream: &mut TcpStream,
+        stream: &mut S,
         request_timeout: Duration,
         wire_log: Option<&Arc<WireLog>>,
     ) -> Result<HandshakeOutcome> {
@@ -325,8 +328,8 @@ impl HandshakeStrategy for WifiTrustHandshake {
     }
 }
 
-async fn send_unsigned<M: Message>(
-    stream: &mut TcpStream,
+async fn send_unsigned<M: Message, W: AsyncWrite + Unpin>(
+    stream: &mut W,
     sid: u32,
     message: &M,
     wire_log: Option<&Arc<WireLog>>,

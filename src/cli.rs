@@ -1,5 +1,5 @@
 use std::env;
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -102,6 +102,11 @@ pub(crate) struct Cli {
     #[arg(long, global = true, conflicts_with = "serial", value_parser = parse_socket_addr)]
     pub wifi: Option<SocketAddr>,
 
+    /// Connect over USB AOA instead of ADB/WiFi. With `--serial`, the value is
+    /// the accessory `bus-ports` location (e.g. `1-2`).
+    #[arg(long, global = true, conflicts_with = "wifi")]
+    pub usb: bool,
+
     #[arg(long, global = true, value_enum, default_value_t = OutputFormat::Human)]
     pub output: OutputFormat,
 
@@ -153,6 +158,7 @@ fn localized_command() -> clap::Command {
     localize_subcommand(&mut command, "media", "cli.command.media");
     localize_subcommand(&mut command, "sync", "cli.command.sync");
     localize_subcommand(&mut command, "shell", "cli.command.shell");
+    localize_subcommand(&mut command, "batch", "cli.command.batch");
     localize_subcommand(&mut command, "watch", "cli.command.watch");
 
     if let Some(device) = command.find_subcommand_mut("device") {
@@ -381,6 +387,9 @@ pub(crate) enum Command {
     #[command(subcommand)]
     Sync(SyncCommand),
     Shell,
+    /// Read commands from stdin (one per line) and run them on a single
+    /// persistent connection. Non-interactive; exit/quit ends the session.
+    Batch,
     /// Watch the connected device for events (directory monitor, clipboard,
     /// device info and other pushes). Registers monitors for each --path and
     /// streams events until interrupted or the connection closes.
@@ -598,6 +607,7 @@ pub(crate) fn command_name(command: &Command) -> &'static str {
         Command::Sync(SyncCommand::Watch { .. }) => "sync.watch",
         Command::Sync(SyncCommand::Status) => "sync.status",
         Command::Shell => "shell",
+        Command::Batch => "batch",
         Command::Watch { .. } => "watch",
     }
 }
@@ -635,8 +645,26 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         }
         return run_shell(&cli).await;
     }
+    if matches!(cli.command, Command::Batch) {
+        return run_batch(&cli).await;
+    }
     if matches!(cli.command, Command::Watch { .. }) {
         return watch(&cli).await;
+    }
+    // Parameter validation must happen before any device connection so
+    // missing required arguments surface as usage errors (exit 2).
+    if let Command::Sync(command) = &cli.command {
+        let missing_output_dir = match command {
+            SyncCommand::Plan { output_dir, .. }
+            | SyncCommand::Run { output_dir, .. }
+            | SyncCommand::Watch { output_dir, .. } => output_dir.is_none(),
+            SyncCommand::Status => false,
+        };
+        if missing_output_dir {
+            return Err(Error::Usage(
+                i18n::text("sync.output_dir_required").to_string(),
+            ));
+        }
     }
 
     let client = connect(&cli).await?;
@@ -782,6 +810,11 @@ async fn connect_with_all_callbacks(cli: &Cli) -> Result<HandShakerClient> {
 }
 
 fn connection_target(cli: &Cli) -> ConnectionTarget {
+    if cli.usb {
+        return ConnectionTarget::Usb {
+            location_id: cli.serial.clone(),
+        };
+    }
     match cli.wifi {
         Some(address) => ConnectionTarget::Wifi { address },
         None => ConnectionTarget::Adb {
@@ -792,11 +825,11 @@ fn connection_target(cli: &Cli) -> ConnectionTarget {
 
 async fn device_list(timeout: Duration) -> Result<Outcome> {
     let devices = HandShakerClient::list_adb_devices_with_timeout("adb", timeout).await?;
+    let accessories = handshaker_rust::list_usb_accessories()?;
     let localizer = ZhCn;
-    let human = if devices.is_empty() {
-        localizer.text(MessageKey::NoDevices).to_string()
-    } else {
-        let mut lines = vec![localizer.text(MessageKey::DeviceListHeader).to_string()];
+    let mut lines = Vec::new();
+    if !devices.is_empty() {
+        lines.push(localizer.text(MessageKey::DeviceListHeader).to_string());
         lines.extend(devices.iter().map(|device| {
             format!(
                 "{}\t{}\t{}\t{}",
@@ -806,9 +839,28 @@ async fn device_list(timeout: Duration) -> Result<Outcome> {
                 device.device.as_deref().unwrap_or("-")
             )
         }));
-        lines.join("\n")
-    };
-    Outcome::new("device.list", devices, human)
+    }
+    if !accessories.is_empty() {
+        lines.push(localizer.text(MessageKey::UsbDeviceListHeader).to_string());
+        lines.extend(accessories.iter().map(|accessory| {
+            format!(
+                "{}\t{:04x}:{:04x}\t{}",
+                accessory.location,
+                accessory.vendor_id,
+                accessory.product_id,
+                sanitize_human(accessory.serial.as_deref().unwrap_or("-"))
+            )
+        }));
+    }
+    if lines.is_empty() {
+        lines.push(localizer.text(MessageKey::NoDevices).to_string());
+    }
+    // Merge USB accessories into the JSON payload under "usb".
+    let payload = serde_json::json!({
+        "adb": devices,
+        "usb": accessories,
+    });
+    Outcome::new("device.list", payload, lines.join("\n"))
 }
 
 async fn device_discover(cli: &Cli) -> Result<Outcome> {
@@ -1412,6 +1464,11 @@ async fn execute_connected(
                 localizer.text(MessageKey::ShellNested).to_string(),
             ));
         }
+        Command::Batch => {
+            return Err(Error::Usage(
+                localizer.text(MessageKey::ShellNested).to_string(),
+            ));
+        }
         Command::Watch { .. } => {
             return Err(Error::Usage(
                 localizer.text(MessageKey::WatchNested).to_string(),
@@ -1769,7 +1826,13 @@ fn sanitize_human(value: &str) -> String {
         .filter(|character| {
             !matches!(
                 *character,
-                '\0'..='\u{1F}' | '\u{7F}' | '\u{80}'..='\u{9F}'
+                // C0 controls, DEL, C1 controls (CSI/OSC) and Unicode bidi
+                // overrides (spoofing via RTL reordering).
+                '\0'..='\u{1F}'
+                    | '\u{7F}'
+                    | '\u{80}'..='\u{9F}'
+                    | '\u{202A}'..='\u{202E}'
+                    | '\u{2066}'..='\u{2069}'
             )
         })
         .collect()
@@ -2084,7 +2147,10 @@ async fn run_shell(cli: &Cli) -> Result<()> {
     loop {
         let prompt = i18n::format(
             "shell.prompt",
-            &[&client.device_info().serial, &context.remote_cwd],
+            &[
+                &sanitize_human(&client.device_info().serial),
+                &sanitize_human(&context.remote_cwd),
+            ],
         );
         let line = match editor.readline(&prompt) {
             Ok(line) => line,
@@ -2245,6 +2311,182 @@ async fn run_shell(cli: &Cli) -> Result<()> {
     close
 }
 
+/// Non-interactive batch mode: read one command per line from stdin and run
+/// them sequentially on a single persistent connection (heartbeat keeps the
+/// session alive; the phone's accessory session stays open until `exit` /
+/// `quit` or EOF, avoiding the single-shot re-identify cost of per-command
+/// connections). Output follows `--output`; command failures are reported to
+/// stderr and the run continues, except transport/handshake/timeout/protocol
+/// errors which abort. Exits non-zero when any command failed.
+async fn run_batch(cli: &Cli) -> Result<()> {
+    let client = connect(cli).await?;
+    let localizer = ZhCn;
+    let mut context = CommandContext {
+        remote_cwd: client.root_path().to_string(),
+        local_cwd: env::current_dir()?,
+        in_shell: true,
+    };
+    let mut failed = 0u32;
+    let mut fatal = None;
+    let stdin = io::stdin();
+    let mut lines = stdin.lock().lines();
+    while let Some(line) = lines.next() {
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                // Abort-class: no in-loop print (main.rs renders once), and
+                // the unified close below still runs.
+                fatal = Some(Error::LocalIo(
+                    localizer.format(MessageKey::BatchReadFailed, &[&error.to_string()]),
+                ));
+                break;
+            }
+        };
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let words = match shell_words::split(line) {
+            Ok(words) => words,
+            Err(error) => {
+                eprintln!(
+                    "{}",
+                    localizer.format(MessageKey::CommandParseError, &[&error.to_string()])
+                );
+                failed += 1;
+                continue;
+            }
+        };
+        match words.first().map(String::as_str) {
+            Some("exit" | "quit") => break,
+            Some("help") if words.len() == 1 => {
+                println!("{}", localizer.text(MessageKey::ShellHelp));
+                continue;
+            }
+            Some("pwd") if words.len() == 1 => {
+                println!("{}", context.remote_cwd);
+                continue;
+            }
+            Some("lpwd") if words.len() == 1 => {
+                println!("{}", context.local_cwd.display());
+                continue;
+            }
+            Some("cd") if words.len() == 2 => {
+                let path = resolve_remote(&context.remote_cwd, &words[1]);
+                match client.stat(&path).await {
+                    Ok(Some(file)) if file.is_directory => context.remote_cwd = path,
+                    Ok(_) => eprintln!(
+                        "{}",
+                        localizer.format(MessageKey::RemoteNotDirectory, &[&path])
+                    ),
+                    Err(error) => eprintln!(
+                        "{}",
+                        localizer.format(MessageKey::Error, &[&error.to_string()])
+                    ),
+                }
+                continue;
+            }
+            Some("lcd") if words.len() == 2 => {
+                let path = resolve_local(&context.local_cwd, Path::new(&words[1]));
+                if path.is_dir() {
+                    context.local_cwd = path;
+                } else {
+                    eprintln!(
+                        "{}",
+                        localizer.format(
+                            MessageKey::LocalNotDirectory,
+                            &[&path.display().to_string()],
+                        )
+                    );
+                }
+                continue;
+            }
+            _ => {}
+        }
+        let argv = shell_command_argv(words);
+        let parsed = match Cli::try_parse_localized_from(argv) {
+            Ok(parsed) => parsed,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                ) =>
+            {
+                let _ = error.print();
+                continue;
+            }
+            Err(_) => {
+                eprintln!(
+                    "{}",
+                    localizer.format(MessageKey::Error, &[i18n::text("cli.parse_error")],)
+                );
+                failed += 1;
+                continue;
+            }
+        };
+        if matches!(parsed.command, Command::Shell | Command::Batch) {
+            eprintln!(
+                "{}",
+                localizer.format(
+                    MessageKey::Error,
+                    &[localizer.text(MessageKey::ShellNested)],
+                )
+            );
+            failed += 1;
+            continue;
+        }
+        match execute_connected(&parsed.command, &client, &context, parsed.yes, cli.output).await {
+            Ok(outcome) => {
+                if let Err(error) = render(&outcome, cli.output) {
+                    // Output write failure (e.g. EPIPE when piping stdout to
+                    // head): abort via the unified close + fatal path.
+                    fatal = Some(error);
+                    break;
+                }
+            }
+            Err(error) => {
+                let fatal_class = matches!(
+                    error,
+                    Error::Transport(_)
+                        | Error::Handshake(_)
+                        | Error::Timeout(_)
+                        | Error::Protocol(_)
+                );
+                // main.rs renders the returned error; only print in-loop for
+                // per-command failures that continue.
+                if !fatal_class {
+                    eprintln!(
+                        "{}",
+                        localizer.format(MessageKey::Error, &[&error.to_string()])
+                    );
+                }
+                if fatal_class {
+                    fatal = Some(error);
+                    break;
+                }
+                failed += 1;
+            }
+        }
+    }
+    let close = client.close().await;
+    // Abort-class errors (transport/handshake/timeout/protocol, stdin or
+    // render failures) take precedence over the per-command failure summary so
+    // scripts can tell an aborted run from a completed one.
+    if let Some(error) = fatal {
+        return Err(error);
+    }
+    if failed > 0 {
+        eprintln!(
+            "{}",
+            localizer.format(MessageKey::BatchFailures, &[&failed.to_string()])
+        );
+        return Err(Error::LocalIo(
+            localizer.format(MessageKey::BatchFailures, &[&failed.to_string()]),
+        ));
+    }
+    close
+}
+
 fn shell_command_argv(words: Vec<String>) -> Vec<String> {
     let mut argv = vec!["handshaker".to_string()];
     if words.first().map(String::as_str) == Some("ls") {
@@ -2386,13 +2628,13 @@ fn human_device_info(info: &handshaker_rust::DeviceInfo) -> String {
     localizer.format(
         MessageKey::DeviceInfo,
         &[
-            &info.serial,
-            info.name.as_deref().unwrap_or("-"),
-            info.model.as_deref().unwrap_or("-"),
-            info.brand.as_deref().unwrap_or("-"),
-            info.smartisan_version.as_deref().unwrap_or("-"),
-            info.apk_version_name.as_deref().unwrap_or("-"),
-            &info.root_path,
+            &sanitize_human(&info.serial),
+            &sanitize_human(info.name.as_deref().unwrap_or("-")),
+            &sanitize_human(info.model.as_deref().unwrap_or("-")),
+            &sanitize_human(info.brand.as_deref().unwrap_or("-")),
+            &sanitize_human(info.smartisan_version.as_deref().unwrap_or("-")),
+            &sanitize_human(info.apk_version_name.as_deref().unwrap_or("-")),
+            &sanitize_human(&info.root_path),
             &battery,
             if info.phone_locked.unwrap_or(false) {
                 localizer.text(MessageKey::Yes)

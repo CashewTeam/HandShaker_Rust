@@ -1,4 +1,5 @@
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
@@ -168,8 +169,12 @@ fn device_list_reads_only_adb_devices_long() {
     assert!(output.status.success());
     let envelope: Value = serde_json::from_slice(&output.stdout).expect("JSON envelope");
     assert_eq!(envelope["command"], "device.list");
-    assert_eq!(envelope["data"][0]["serial"], "ABC123");
-    assert_eq!(envelope["data"][0]["model"], "DE106");
+    assert_eq!(envelope["data"]["adb"][0]["serial"], "ABC123");
+    assert_eq!(envelope["data"]["adb"][0]["model"], "DE106");
+    assert!(
+        envelope["data"]["usb"].is_array(),
+        "usb accessories are listed"
+    );
 
     let human = Command::new(env!("CARGO_BIN_EXE_handshaker"))
         .args(["device", "list"])
@@ -184,12 +189,11 @@ fn device_list_reads_only_adb_devices_long() {
         .output()
         .expect("run handshaker human output");
     assert!(human.status.success());
-    assert_eq!(
-        String::from_utf8(human.stdout).expect("UTF-8 output"),
-        format!(
-            "{}\nABC123\tdevice\tDE106\tosborn\n",
-            handshaker_rust::i18n::text("device.list_header")
-        )
+    let human_output = String::from_utf8(human.stdout).expect("UTF-8 output");
+    let adb_header = handshaker_rust::i18n::text("device.list_header");
+    assert!(
+        human_output.contains(&format!("{adb_header}\nABC123\tdevice\tDE106\tosborn")),
+        "ADB rows must appear with their header: {human_output}"
     );
     assert_eq!(
         std::fs::read_to_string(calls).expect("calls"),
@@ -267,4 +271,60 @@ fn sync_commands_parse_and_require_output_dir() {
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).expect("UTF-8 help");
     assert!(help.contains(handshaker_rust::i18n::text("cli.command.sync_plan")));
+}
+
+#[test]
+fn batch_subcommand_parses_and_requires_connection() {
+    // Localized help for the batch group.
+    let output = Command::new(env!("CARGO_BIN_EXE_handshaker"))
+        .env("HOME", "/tmp/hs-cli-test-home")
+        .args(["batch", "--help"])
+        .output()
+        .expect("batch help");
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).expect("UTF-8 help");
+    assert!(help.contains(handshaker_rust::i18n::text("cli.command.batch")));
+
+    // Without a device, batch fails at device selection (3) or connection (4),
+    // not usage (2): the command itself parses.
+    let mut output = Command::new(env!("CARGO_BIN_EXE_handshaker"))
+        .env("HOME", "/tmp/hs-cli-test-home")
+        .args(["--output", "json", "batch"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn batch");
+    let mut stdin = output.stdin.take().expect("stdin");
+    write!(stdin, "device ping\nquit\n").expect("write batch lines");
+    drop(stdin);
+    let status = output.wait_with_output().expect("wait batch");
+    assert_ne!(
+        status.status.code(),
+        Some(2),
+        "batch must parse; failure is device/connection level"
+    );
+}
+
+#[test]
+fn batch_rejects_nested_shell_line() {
+    // A `shell` line inside batch is rejected as usage but the batch itself
+    // still parses and connects-fails at device level (not usage).
+    let mut output = Command::new(env!("CARGO_BIN_EXE_handshaker"))
+        .env("HOME", "/tmp/hs-cli-test-home")
+        .args(["--output", "json", "batch"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn batch nested");
+    let mut stdin = output.stdin.take().expect("stdin");
+    write!(stdin, "shell\nquit\n").expect("write nested shell");
+    drop(stdin);
+    let status = output.wait_with_output().expect("wait batch nested");
+    assert_ne!(
+        status.status.code(),
+        Some(2),
+        "nested shell is per-line, not usage"
+    );
 }
