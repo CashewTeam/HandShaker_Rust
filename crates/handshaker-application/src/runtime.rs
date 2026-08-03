@@ -1057,7 +1057,7 @@ impl HandShakerRuntime {
                     // A `Transport` failure here is never a transient USB
                     // hiccup: the USB transport wraps bulk errors in
                     // `io::Error`, but frame.rs converts those back to
-                    // `Error::Transport` and the reader task calls
+                    // `Error::Transport` and the reader/writer task calls
                     // `fail_connection()` (session.rs), which fails every
                     // in-flight request — so a Transport-coded failure means
                     // the core session already declared the connection dead.
