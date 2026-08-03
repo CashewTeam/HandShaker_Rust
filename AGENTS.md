@@ -74,10 +74,10 @@ Swift / .NET / 其他语言包装层
 3. `docs/13-verification-status.md` 中的验证等级和源码索引；
 4. `docs/` 中对应协议、传输、命令和平台文档；
 5. 本地反编译资料：
-   - `Android_jadx/`
-   - `android_smali/`
-   - `original_smali_1.2.0/`
-   - `macos/`
+   - `Reference/Android_jadx/`
+   - `Reference/android_smali/`
+   - `Reference/original_smali_1.2.0/`
+   - `Reference/macos/`
 6. Core 中已有的 fake SSP、测试向量和状态机测试；
 7. 明确标记的推断。
 
@@ -757,12 +757,19 @@ FFI ABI 与 Cargo Workspace、Application API 和 CLI schema 独立。
 
 ## 10. Swift、GTK 与 .NET 接入规则
 
+> 仓库定位：本仓库是 Rust 后端，不交付 GUI 应用工程；Swift/GTK/.NET 包装
+> 层不属于本仓库（Swift SDK 位于 `platform/macos/HandShakerCore`，作为
+> 后端能力证明与 CI 验证对象，GUI 应用工程由外部项目承载）。
+> 平台策略：现阶段适配目标为现代 macOS；其他平台暂不承诺适配，但架构
+> 保持未来多平台兼容（transport/平台实现隔离在 Core，Application 为 UI
+> 无关契约，FFI 为稳定 C ABI）。
+
 ### 10.1 Swift
 
-推荐 Swift 层结构：
+推荐 Swift 层结构（已落地于 `platform/macos/HandShakerCore`）：
 
 ```text
-HandShakerCore/
+platform/macos/HandShakerCore/
 ├── Native/
 │   ├── RuntimeHandle
 │   ├── NativeCall

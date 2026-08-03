@@ -68,7 +68,7 @@ typedef struct HsSubscription HsSubscription;
 - `include/module.modulemap` 提供模块 `HandShakerFFI`;
 - 构建:`scripts/build-ffi-macos.sh`(stage 到 `dist/apple/`);
 - 冒烟:`scripts/run-ffi-smoke-tests.sh`(C + Swift);
-- Swift 层结构建议:`HandShakerCore/Native/`(RuntimeHandle RAII、
+- Swift 层结构建议:`platform/macos/HandShakerCore/Native/`(RuntimeHandle RAII、
   NativeCall、NativeError)+ `Models/`(Codable DTO)+ `HandShakerClient.swift`(
   `protocol BackendClient: Sendable`);SwiftUI View 不直接触碰 C 类型。
 

@@ -1105,10 +1105,10 @@ void hs_subscription_destroy(HsSubscription* subscription);
 
 # 8. Swift 接入目标
 
-## 8.1 Swift 层结构
+## 8.1 Swift 层结构（现已落地为 `platform/macos/HandShakerCore`，2026-08）
 
 ```text
-HandShakerCore/
+platform/macos/HandShakerCore/
 ├── Generated/
 ├── Native/
 │   ├── RuntimeHandle.swift
@@ -1127,7 +1127,7 @@ protocol BackendClient: Sendable
 正式实现：
 
 ```text
-FFIBackendClient → HandShakerCore Swift wrapper → C ABI/UniFFI
+FFIBackendClient → platform/macos/HandShakerCore Swift wrapper → C ABI/UniFFI
 ```
 
 不允许：
@@ -1451,7 +1451,7 @@ dist/apple/
 ├── libhandshaker_ffi.a
 ├── handshaker_ffi.h
 ├── module.modulemap
-└── HandShakerCore.xcframework（建议）
+└── platform/macos/Artifacts/HandShakerFFI.xcframework（建议）
 ```
 
 ---

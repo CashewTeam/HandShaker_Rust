@@ -55,7 +55,7 @@
 
 当前可以立即启动的 Swift 工作：
 
-- 建立 `HandShakerCore` Swift 包装层；
+- 建立 `platform/macos/HandShakerCore` Swift 包装层（已完成，2026-08）；
 - 验证 Runtime 创建和关闭；
 - 设备枚举（含分通道 warnings）；
 - ADB/Wi-Fi/USB 连接；
@@ -1045,7 +1045,7 @@ transfers/capabilities。
 提交 ac15c3d/7aa655d；Xcode 27.0 / Swift 6.4）
 
 > **Phase F 状态**：后端与 FFI 100% 就绪（ABI 1.5.0、52 个导出符号）。
-> `HandShakerCore` Swift Package 已交付：Native 层（RuntimeHandle/
+> `platform/macos/HandShakerCore` Swift Package 已交付：Native 层（RuntimeHandle/
 > SubscriptionHandle/NativeCall/NativeError/ABI 检查）、10 个 Codable
 > Models（snake_case、宽松解码、未知枚举兜底）、HandShakerRuntime actor
 > + File/Transfer/Clipboard/Media/Sync/Trust/Monitor Services +
@@ -1070,7 +1070,7 @@ transfers/capabilities。
 建议新建 Swift Package：
 
 ```text
-HandShakerCore/
+platform/macos/HandShakerCore/
 ├── Package.swift
 ├── Sources/
 │   ├── CHandShakerFFI/

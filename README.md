@@ -8,11 +8,17 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
 2. 优先完成 macOS 版 `HandShaker_CLI`，提供纯命令行使用入口，用于功能测试和 Agent 调用。
 3. 在 CLI 后端基础上，实现现代化、可复用的通用跨平台 Rust 后端，使其能够与原版 HandShaker 互通，并为后续 GUI 开发提供基础。
 
+> **仓库定位（2026-08）**：本仓库是 **Rust 后端**，不包含 GUI 应用工程。
+> 平台策略：**现阶段适配目标为现代 macOS**（ARM64；必要时 x86_64），
+> 其他平台暂不承诺适配；但架构与代码始终按未来多平台设计（transport/
+> 平台实现隔离在 Core 层，`handshaker-application` 为 UI 无关业务契约，
+> FFI 提供稳定 C ABI）。跨平台验证顺序：macOS → Linux → 其他。
+
 ## 跨平台开发顺序
 
-1. 现代 ARM64 macOS
-2. Linux
-3. 其他平台
+1. 现代 ARM64 macOS（当前唯一适配目标）
+2. Linux（后续，开发时保持兼容）
+3. 其他平台（未来，开发时保持不绑死）
 
 ## 目录结构
 
@@ -24,7 +30,7 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
   `handshaker-application`(UI 无关业务层,统一契约)、`handshaker-cli`
   (`handshaker` 可执行文件)、`handshaker-ffi`(稳定 C ABI)。
 - `tools/capture/`：SSP 协议抓包验证工具（Python，经 adb forward 与真机对话并逐字节日志）。
-- `Android_jadx/`、`android_smali/`、`macos/`：本地保留的逆向与反编译资料，不纳入 Git 记录，也不会由本仓库重新分发。
+- `Reference/`：本地保留的逆向与反编译资料（jadx 源码、smali、原版 1.2.0 反编译、macOS 参考），不纳入 Git 记录，也不会由本仓库重新分发。
 
 ## 当前状态
 
@@ -135,7 +141,7 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
   快照，kind photo|video|audio，不需要设备）；Application 对应
   `update_files_info` 与 `merge_photo_library`/`merge_video_library`/
   `merge_audio_library`。
-- **M8.4 Swift SDK（已完成）**：`HandShakerCore` Swift Package
+- **M8.4 Swift SDK（已完成）**：`platform/macos/HandShakerCore` Swift Package
   （Native 层 + 10 个 Codable Models + HandShakerRuntime actor +
   File/Transfer/Clipboard/Media/Sync/Trust/Monitor Services +
   EventStream），静态 XCFramework 由 `scripts/build-ffi-macos.sh`

@@ -56,7 +56,7 @@ jobs:
         run: bash scripts/build-ffi-macos.sh
 
       - name: Swift Package tests
-        working-directory: HandShakerCore
+        working-directory: platform/macos
         run: swift test
 
       # Real-device acceptance is opt-in: without HS_ACCEPTANCE=1 the

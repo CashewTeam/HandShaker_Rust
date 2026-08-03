@@ -32,7 +32,7 @@
 - `i18n.rs` include_str:`../../../locales/zh-CN.json`;
 - `CARGO_BIN_EXE_handshaker`(CLI 集成测试)随 crate 迁移自动工作;
 - 根 `Cargo.toml` 现为纯 workspace(无 package);`cargo build --workspace` 构建全部;
-- 反编译基准 `original_smali_1.2.0/`(gitignored)未受影响。
+- 反编译基准 `Reference/original_smali_1.2.0/`(gitignored)未受影响。
 
 ## 4. 已知迁移遗留(非回归)
 
@@ -166,7 +166,7 @@ connect/disconnect/get session、list files、subscribe/next/destroy。
 | `scripts/build-ffi-linux.sh` | ❌ 未建(计划要求 macOS + Linux CI) |
 | `scripts/generate-ffi-header.sh` | ❌ 未建(当前 header 手工维护) |
 | `dist/apple/`(lib .a/.dylib + header + modulemap) | ❌ 未产出(脚本未运行/未入库) |
-| `HandShakerCore.xcframework` | ⏳ 建议项,未做 |
+| `platform/macos/Artifacts/HandShakerFFI.xcframework` | ⏳ 建议项,未做 |
 
 ### 6.5 后续提交补录(§5 未覆盖)
 
