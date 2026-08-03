@@ -215,6 +215,13 @@ mod tests {
                 "missing {expected}"
             );
         }
+        // Negative guard (review follow-up): the sync backend exists but its
+        // FFI wrapper is intentionally not shipped, so the capability must
+        // stay absent — a regression re-adding it must fail this test.
+        assert!(
+            !capabilities.iter().any(|capability| capability == "sync"),
+            "unexpected sync capability"
+        );
         unsafe { hs_runtime_destroy(runtime) };
     }
 }

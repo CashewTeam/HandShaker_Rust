@@ -737,4 +737,45 @@ mod tests {
         assert_eq!(fnv1a64("foobar"), 0x8594_4171_f739_67e8);
         assert_ne!(fnv1a64("/a.jpg"), fnv1a64("/b.jpg"));
     }
+
+    #[test]
+    fn thumbnail_cache_round_trip_reuses_file() {
+        // Review follow-up: the cache logic deserves direct tests even though
+        // the FFI symbol itself needs a session/device.
+        let dir = std::env::temp_dir().join(format!(
+            "hs-thumb-cache-test-{}-{dir_nanos}",
+            std::process::id(),
+            dir_nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let path1 = cache_thumbnail(&dir, "image", "phone:abc", "/a.jpg", b"bytes-1", "test")
+            .expect("first write");
+        let path2 = cache_thumbnail(&dir, "image", "phone:abc", "/a.jpg", b"bytes-2", "test")
+            .expect("reuse");
+        // Same stable cache path; the second call must reuse the existing
+        // file (its content stays the first write) — no duplicate, no
+        // clobbering.
+        assert_eq!(path1, path2);
+        assert_eq!(std::fs::read(&path1).unwrap(), b"bytes-1");
+        assert_eq!(std::fs::read(&path2).unwrap(), b"bytes-1");
+
+        // Distinct devices with the same remote path get distinct entries.
+        let other = cache_thumbnail(&dir, "image", "phone:xyz", "/a.jpg", b"other", "test")
+            .expect("other device");
+        assert_ne!(path1, other);
+        assert_eq!(std::fs::read(&other).unwrap(), b"other");
+
+        // Sanitized device keys can never inject path separators: dots and
+        // slashes are both stripped, so no ".." escape survives.
+        let evil = sanitize_cache_component("../../etc/passwd");
+        assert_eq!(evil, "etcpasswd");
+        assert!(!evil.contains('/'));
+        assert!(!evil.contains('.'));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
