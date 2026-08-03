@@ -9,6 +9,7 @@ use clap::{ArgAction, Args, CommandFactory, FromArgMatches, Parser, Subcommand, 
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use serde::Serialize;
+use tokio::io::AsyncBufReadExt;
 
 use handshaker_core::{
     ClipboardEntry, Error, HandShakerClient, Result,
@@ -3005,7 +3006,9 @@ fn shell_command_argv(words: Vec<String>) -> Vec<String> {
 /// `confirm` variant that also handles Ctrl-C while waiting for input:
 /// `sync run`/`sync watch` are Ctrl-C self-handling (see main.rs), so a
 /// default SIGINT during the prompt would kill the process without closing
-/// the session or releasing the adb forward.
+/// the session or releasing the adb forward. Uses `tokio::io::stdin()` so
+/// the blocking read runs on the blocking pool and the `ctrl_c` arm stays
+/// pollable even on a single-worker runtime.
 async fn confirm_interruptible(action: &str, yes: bool, format: OutputFormat) -> Result<()> {
     if yes {
         return Ok(());
@@ -3020,8 +3023,12 @@ async fn confirm_interruptible(action: &str, yes: bool, format: OutputFormat) ->
     io::stdout().flush()?;
     let answer = tokio::select! {
         line = async {
+            // tokio's Stdin implements AsyncRead only; wrap it in a
+            // BufReader so read_line (AsyncBufReadExt) works and the
+            // blocking read runs on the blocking pool.
+            let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
             let mut answer = String::new();
-            io::stdin().read_line(&mut answer)?;
+            stdin.read_line(&mut answer).await?;
             Ok::<String, Error>(answer)
         } => line,
         _ = tokio::signal::ctrl_c() => return Err(Error::Interrupted),

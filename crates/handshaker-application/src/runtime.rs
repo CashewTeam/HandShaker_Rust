@@ -1710,7 +1710,11 @@ impl HandShakerRuntime {
     /// the configured root are dropped (the phone answers with its whole
     /// library; `Path::strip_prefix` is segment-wise, so a sibling like
     /// DCIM/Camera2 never matches phone_root DCIM/Camera).
-    async fn sync_pipeline(&self, profile: &SyncProfileDto) -> AppResult<SyncPipeline> {
+    async fn sync_pipeline(
+        &self,
+        profile: &SyncProfileDto,
+        cancel: Option<&handshaker_core::CancellationToken>,
+    ) -> AppResult<SyncPipeline> {
         let session = self.session_handle(profile.session_id).await?;
         let store = self.sync_store_for(profile)?;
         let snapshot = store
@@ -1737,6 +1741,12 @@ impl HandShakerRuntime {
         const PHOTO_SYNC_REJECT_BACKOFF_MS: u64 = 1_500;
         let mut phone = None;
         for attempt in 0..=PHOTO_SYNC_REJECT_RETRIES {
+            if cancel.is_some_and(|token| token.is_cancelled()) {
+                return Err(
+                    PublicError::new(PublicErrorCode::TransferCancelled, "sync cancelled")
+                        .operation("sync.plan"),
+                );
+            }
             let result = session
                 .client
                 .photo_sync(&pc_id, &snapshot_to_remote_files(&snapshot))
@@ -1792,7 +1802,7 @@ impl HandShakerRuntime {
             )
             .operation("sync.plan"));
         }
-        let pipeline = self.sync_pipeline(&profile).await?;
+        let pipeline = self.sync_pipeline(&profile, None).await?;
         sync_plan_to_dto(
             &profile.id,
             &pipeline.config,
@@ -1874,7 +1884,11 @@ impl HandShakerRuntime {
     /// failed). There must be no nested `tokio::spawn` in here: aborting
     /// the outer task would orphan the inner one, which then keeps the
     /// session/client alive past disconnect (device finding: no QUIT, no
-    /// cleanup until process exit).
+    /// cleanup until process exit). After a panic the `task` slot is not
+    /// cleared (the `= None` below is skipped); stop_sync still recovers
+    /// the job (it `take()`s the slot and maps the JoinError), and CLI
+    /// always stops before exit, so a library caller must stop a panicked
+    /// job before re-starting it.
     async fn run_sync_job(&self, job: Arc<SyncJob>) {
         let outcome = self.run_sync_once(&job).await;
         match outcome {
@@ -1938,7 +1952,7 @@ impl HandShakerRuntime {
         if job.cancel.is_cancelled() {
             return Ok(None);
         }
-        let pipeline = self.sync_pipeline(&job.profile).await?;
+        let pipeline = self.sync_pipeline(&job.profile, Some(&job.cancel)).await?;
         if job.cancel.is_cancelled() {
             return Ok(None);
         }
@@ -1995,18 +2009,19 @@ impl HandShakerRuntime {
         if let Some(mut task) = task {
             match tokio::time::timeout(SYNC_STOP_DEADLINE, &mut task).await {
                 Ok(Ok(())) => {}
-                Ok(Err(join_error)) => {
-                    // The run task panicked: mark the job failed so the
-                    // panic is observable (running can never stay true).
-                    let message = join_error.to_string();
+                Ok(Err(_join_error)) => {
+                    // The run task panicked. The status write below is only
+                    // observable during the tiny window before the job is
+                    // removed by remove_sync_job_if_current; its load-bearing
+                    // effect is running=false so a re-registration never
+                    // inherits a stuck job. The panic payload itself is not
+                    // worth preserving (join_error.to_string() only says
+                    // "task panicked").
                     job.set_status(|status| {
                         status.running = false;
                         status.last_error = Some(
-                            PublicError::new(
-                                PublicErrorCode::Internal,
-                                format!("sync pipeline panicked: {message}"),
-                            )
-                            .operation("sync.run"),
+                            PublicError::new(PublicErrorCode::Internal, "sync pipeline panicked")
+                                .operation("sync.run"),
                         );
                     });
                 }
