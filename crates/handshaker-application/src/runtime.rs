@@ -9,13 +9,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::Mutex;
 
-use handshaker_core::{ClientOptions, ConnectionTarget, DeviceInfo, HandShakerClient, RemoteFile};
+use handshaker_core::{
+    ClientOptions, ConnectionTarget, DeviceInfo, ErrorCode, HandShakerClient, RemoteFile,
+};
 
 use crate::dto::{
     ConnectRequest, DeviceDescriptor, DeviceId, DeviceInfoDto, FileEntryDto, ListDevicesRequest,
     ListFilesRequest, RuntimeConfig, SessionId, SessionSnapshot, SessionState, TransportKind,
 };
 use crate::error::{AppResult, PublicError, PublicErrorCode, from_core_error};
+use crate::event::{BackendEvent, EventEnvelope, EventHub};
+use crate::transfer::{
+    DownloadRequest, TransferDirectionDto, TransferId, TransferRegistry, TransferSnapshot,
+    TransferState, UploadRequest, request_options, transfer_options,
+};
+
+use tokio::sync::broadcast;
 
 fn now_ms() -> u64 {
     SystemTime::now()
@@ -24,9 +33,10 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// One open session: the core client plus its stable descriptors.
+/// One open session: the core client (shared with transfer tasks) plus its
+/// stable descriptors.
 struct ActiveSession {
-    client: HandShakerClient,
+    client: Arc<HandShakerClient>,
     device: DeviceDescriptor,
     device_info: DeviceInfoDto,
     connected_at_ms: u64,
@@ -39,9 +49,8 @@ struct RuntimeInner {
     sessions: Mutex<HashMap<SessionId, ActiveSession>>,
     next_session_id: AtomicU64,
     shutting_down: AtomicBool,
-    /// Placeholder for the M8.7 event hub; kept to stabilize the shutdown
-    /// contract (cancel subscriptions, close sessions, mark closed).
-    _event_capacity: usize,
+    event_hub: EventHub,
+    transfers: Arc<TransferRegistry>,
 }
 
 /// The application service root. `create` is async by contract; callers
@@ -61,24 +70,44 @@ impl HandShakerRuntime {
         }
         Ok(Self {
             inner: Arc::new(RuntimeInner {
+                event_hub: EventHub::new(config.event_capacity),
+                transfers: Arc::new(TransferRegistry::new()),
                 config,
                 sessions: Mutex::new(HashMap::new()),
                 next_session_id: AtomicU64::new(1),
                 shutting_down: AtomicBool::new(false),
-                _event_capacity: 0,
             }),
         })
     }
 
-    /// Idempotent: cancels activity, closes all sessions, marks closed.
+    /// Idempotent: cancels transfers, closes all sessions, marks closed.
     /// New operations after shutdown return `RuntimeClosed`.
     pub async fn shutdown(&self) -> AppResult<()> {
         self.inner.shutting_down.store(true, Ordering::SeqCst);
+        self.inner.event_hub.publish(BackendEvent::RuntimeStopping);
+        // Cancel all transfers first so their tasks release session clients.
+        for id in self
+            .inner
+            .transfers
+            .list()
+            .iter()
+            .map(|snapshot| snapshot.id)
+        {
+            let _ = self.inner.transfers.cancel(id);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let sessions = std::mem::take(&mut *self.inner.sessions.lock().await);
         for (_, session) in sessions {
-            let _ = session.client.close().await;
+            if let Ok(client) = Arc::try_unwrap(session.client) {
+                let _ = client.close().await;
+            }
         }
         Ok(())
+    }
+
+    /// Subscribe to backend events (broadcast; `Lagged` surfaced on recv).
+    pub fn subscribe_events(&self) -> broadcast::Receiver<EventEnvelope> {
+        self.event_hub().subscribe()
     }
 
     pub fn config(&self) -> &RuntimeConfig {
@@ -190,14 +219,18 @@ impl HandShakerRuntime {
         let device_info = client.device_info().clone();
         let id = SessionId(self.inner.next_session_id.fetch_add(1, Ordering::SeqCst));
         let session = ActiveSession {
-            client,
-            device: request.device,
+            client: Arc::new(client),
+            device: request.device.clone(),
             device_info: device_info_to_dto(&device_info),
             connected_at_ms: now_ms(),
             last_activity_at_ms: now_ms(),
             state: SessionState::Ready,
         };
         self.inner.sessions.lock().await.insert(id, session);
+        let snapshot = self.get_session_snapshot(id).await?;
+        self.inner
+            .event_hub
+            .publish(BackendEvent::SessionStateChanged(snapshot));
         Ok(id)
     }
 
@@ -208,11 +241,26 @@ impl HandShakerRuntime {
             PublicError::new(PublicErrorCode::SessionNotFound, "session not found")
         })?;
         drop(guard);
-        session
-            .client
-            .close()
-            .await
-            .map_err(|error| from_core_error(error, "disconnect"))
+        let result = match Arc::try_unwrap(session.client) {
+            Ok(client) => client
+                .close()
+                .await
+                .map_err(|error| from_core_error(error, "disconnect")),
+            // A transfer task still borrows the client; the connection is torn
+            // down when the last Arc drops (transport stream close).
+            Err(_) => Ok(()),
+        };
+        self.inner
+            .event_hub
+            .publish(BackendEvent::SessionStateChanged(SessionSnapshot {
+                id: session_id,
+                device: session.device,
+                device_info: session.device_info,
+                state: SessionState::Closed,
+                connected_at_ms: session.connected_at_ms,
+                last_activity_at_ms: Some(session.last_activity_at_ms),
+            }));
+        result
     }
 
     pub async fn get_session_snapshot(&self, session_id: SessionId) -> AppResult<SessionSnapshot> {
@@ -246,6 +294,130 @@ impl HandShakerRuntime {
             .await
             .map_err(|error| from_core_error(error, "list_files"))?;
         Ok(files.into_iter().map(remote_file_to_dto).collect())
+    }
+
+    // ---- transfers ----
+
+    /// Start a background download; returns the transfer id immediately.
+    pub async fn start_download(&self, request: DownloadRequest) -> AppResult<TransferId> {
+        self.ensure_open()?;
+        let client = self.session_client(request.session_id).await?;
+        let snapshot = self.inner.transfers.into_snapshot_for(
+            request.session_id,
+            TransferDirectionDto::Download,
+            request.remote_path.clone(),
+            request.local_path.display().to_string(),
+        );
+        let id = snapshot.id;
+        let entry = self.inner.transfers.register(snapshot);
+        let registry = self.inner.transfers.clone();
+        let event_hub = self.event_hub();
+        let options = transfer_options(registry.clone(), id, request.overwrite);
+        let token = request_options(entry.cancel.clone());
+        let remote = request.remote_path;
+        let local = request.local_path;
+        let handle = tokio::spawn(async move {
+            registry.transition(id, TransferState::Running);
+            let result = client
+                .download_with_options(&remote, &local, options, token)
+                .await;
+            match result {
+                Ok(bytes) => {
+                    registry.set_progress(id, bytes);
+                    if let Some(snapshot) = registry.transition(id, TransferState::Completed) {
+                        event_hub.publish(BackendEvent::TransferUpdated(snapshot));
+                    }
+                }
+                Err(error) => {
+                    if matches!(error.code(), ErrorCode::Cancelled | ErrorCode::Interrupted) {
+                        registry.transition(id, TransferState::Cancelled);
+                    } else {
+                        registry.set_error(id, from_core_error(error, "download"));
+                        registry.transition(id, TransferState::Failed);
+                    }
+                    if let Some(snapshot) = registry.get(id).ok() {
+                        event_hub.publish(BackendEvent::TransferUpdated(snapshot));
+                    }
+                }
+            }
+        });
+        *entry.join.lock().expect("join poisoned") = Some(handle);
+        Ok(id)
+    }
+
+    /// Start a background upload; returns the transfer id immediately.
+    pub async fn start_upload(&self, request: UploadRequest) -> AppResult<TransferId> {
+        self.ensure_open()?;
+        let client = self.session_client(request.session_id).await?;
+        let snapshot = self.inner.transfers.into_snapshot_for(
+            request.session_id,
+            TransferDirectionDto::Upload,
+            request.local_path.display().to_string(),
+            request.remote_path.clone(),
+        );
+        let id = snapshot.id;
+        let entry = self.inner.transfers.register(snapshot);
+        let registry = self.inner.transfers.clone();
+        let event_hub = self.event_hub();
+        let options = transfer_options(registry.clone(), id, request.overwrite);
+        let token = request_options(entry.cancel.clone());
+        let local = request.local_path;
+        let remote = request.remote_path;
+        let handle = tokio::spawn(async move {
+            registry.transition(id, TransferState::Running);
+            let result = client
+                .upload_with_options(&local, &remote, options, token)
+                .await;
+            match result {
+                Ok(bytes) => {
+                    registry.set_progress(id, bytes);
+                    if let Some(snapshot) = registry.transition(id, TransferState::Completed) {
+                        event_hub.publish(BackendEvent::TransferUpdated(snapshot));
+                    }
+                }
+                Err(error) => {
+                    if matches!(error.code(), ErrorCode::Cancelled | ErrorCode::Interrupted) {
+                        registry.transition(id, TransferState::Cancelled);
+                    } else {
+                        registry.set_error(id, from_core_error(error, "upload"));
+                        registry.transition(id, TransferState::Failed);
+                    }
+                    if let Some(snapshot) = registry.get(id).ok() {
+                        event_hub.publish(BackendEvent::TransferUpdated(snapshot));
+                    }
+                }
+            }
+        });
+        *entry.join.lock().expect("join poisoned") = Some(handle);
+        Ok(id)
+    }
+
+    pub async fn cancel_transfer(&self, id: TransferId) -> AppResult<()> {
+        self.ensure_open()?;
+        self.inner.transfers.cancel(id)
+    }
+
+    pub async fn get_transfer(&self, id: TransferId) -> AppResult<TransferSnapshot> {
+        self.ensure_open()?;
+        self.inner.transfers.get(id)
+    }
+
+    pub async fn list_transfers(&self) -> AppResult<Vec<TransferSnapshot>> {
+        self.ensure_open()?;
+        self.inner.transfers.reap();
+        Ok(self.inner.transfers.list())
+    }
+
+    async fn session_client(&self, session_id: SessionId) -> AppResult<Arc<HandShakerClient>> {
+        let guard = self.inner.sessions.lock().await;
+        guard
+            .get(&session_id)
+            .map(|session| session.client.clone())
+            .ok_or_else(|| PublicError::new(PublicErrorCode::SessionNotFound, "session not found"))
+    }
+
+    fn event_hub(&self) -> EventHub {
+        self.inner.event_hub.clone()
     }
 }
 

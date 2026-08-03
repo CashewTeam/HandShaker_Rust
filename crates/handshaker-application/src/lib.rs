@@ -8,14 +8,21 @@
 
 mod dto;
 mod error;
+mod event;
 mod runtime;
+mod transfer;
 
 pub use dto::{
     ConnectRequest, DeviceDescriptor, DeviceId, DeviceInfoDto, FileEntryDto, ListDevicesRequest,
     ListFilesRequest, RuntimeConfig, SessionId, SessionSnapshot, SessionState, TransportKind,
 };
 pub use error::{AppResult, PublicError, PublicErrorCode, from_core_error};
+pub use event::{BackendEvent, EventEnvelope, EventHub};
 pub use runtime::{HandShakerRuntime, normalize_remote_path, resolve_remote_path};
+pub use transfer::{
+    DownloadRequest, TransferDirectionDto, TransferId, TransferRegistry, TransferSnapshot,
+    TransferState, UploadRequest,
+};
 
 #[cfg(test)]
 mod tests;

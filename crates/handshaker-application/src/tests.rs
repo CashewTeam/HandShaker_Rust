@@ -264,3 +264,130 @@ fn unknown_enum_values_are_rejected_not_guessed() {
     let result: Result<TransportKind, _> = serde_json::from_str("\"bluetooth\"");
     assert!(result.is_err());
 }
+
+// ---- M8.7 transfer & event tests ----
+
+#[test]
+fn transfer_state_transitions_are_one_way() {
+    use crate::transfer::{
+        TransferDirectionDto, TransferRegistry, TransferSnapshot, TransferState,
+    };
+
+    let registry = TransferRegistry::new();
+    let snapshot = registry.into_snapshot_for(
+        SessionId(1),
+        TransferDirectionDto::Download,
+        "/remote/a.bin".into(),
+        "/local/a.bin".into(),
+    );
+    let id = snapshot.id;
+    registry.register(snapshot); // register before transition/cancel lookups
+    assert_eq!(registry.get(id).unwrap().state, TransferState::Queued);
+    assert_eq!(
+        registry
+            .transition(id, TransferState::Running)
+            .unwrap()
+            .state,
+        TransferState::Running
+    );
+    let completed = registry.transition(id, TransferState::Completed).unwrap();
+    assert_eq!(completed.state, TransferState::Completed);
+    assert!(completed.finished_at_ms.is_some());
+    // Terminal state is never overwritten (one-way).
+    assert_eq!(
+        registry
+            .transition(id, TransferState::Failed)
+            .unwrap()
+            .state,
+        TransferState::Completed
+    );
+    assert_eq!(registry.get(id).unwrap().state, TransferState::Completed);
+}
+
+#[test]
+fn cancel_transfer_is_idempotent_and_missing_is_stable() {
+    use crate::transfer::{TransferDirectionDto, TransferRegistry, TransferState};
+
+    let registry = TransferRegistry::new();
+    let snapshot = registry.into_snapshot_for(
+        SessionId(1),
+        TransferDirectionDto::Download,
+        "/r".into(),
+        "/l".into(),
+    );
+    registry.register(snapshot.clone());
+    registry.cancel(snapshot.id).expect("cancel once");
+    registry
+        .cancel(snapshot.id)
+        .expect("cancel twice (idempotent)");
+    assert_eq!(
+        registry.get(snapshot.id).unwrap().state,
+        TransferState::Cancelled
+    );
+    let missing = registry
+        .cancel(crate::transfer::TransferId(999))
+        .err()
+        .expect("missing");
+    assert_eq!(missing.code, PublicErrorCode::TransferNotFound);
+}
+
+#[tokio::test]
+async fn event_hub_sequences_and_lags() {
+    use crate::event::{BackendEvent, EventEnvelope, EventHub};
+
+    let hub = EventHub::new(2);
+    let mut receiver = hub.subscribe();
+    hub.publish(BackendEvent::RuntimeStarted); // seq 1
+    hub.publish(BackendEvent::RuntimeStarted); // seq 2
+    hub.publish(BackendEvent::RuntimeStarted); // seq 3 overwrites slot 0
+    // The receiver missed seq 1 (capacity 2): first recv reports the skip.
+    let skipped = match receiver.recv().await {
+        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => n,
+        other => panic!("expected Lagged, got {other:?}"),
+    };
+    assert!(skipped >= 1);
+    // After a Lagged, tokio broadcast resumes at the oldest retained slot;
+    // with capacity 2 after 3 publishes the retained events are seq 2 and 3.
+    let resumed: EventEnvelope = receiver.recv().await.expect("resumed event");
+    assert!(resumed.sequence >= 2);
+}
+
+#[tokio::test]
+async fn subscribe_after_shutdown_still_gets_runtime_stopping() {
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    let mut receiver = runtime.subscribe_events();
+    runtime.shutdown().await.expect("shutdown");
+    // Receiver sees RuntimeStopping published by shutdown.
+    let envelope = receiver.recv().await.expect("event after shutdown");
+    assert!(matches!(
+        envelope.event,
+        crate::event::BackendEvent::RuntimeStopping
+    ));
+}
+
+#[test]
+fn transfer_snapshot_json_contract_is_stable() {
+    use crate::transfer::{TransferDirectionDto, TransferSnapshot, TransferState};
+
+    let snapshot = TransferSnapshot {
+        id: crate::transfer::TransferId(7),
+        session_id: SessionId(1),
+        direction: TransferDirectionDto::Download,
+        source: "/remote/f.bin".into(),
+        destination: "/local/f.bin".into(),
+        state: TransferState::Running,
+        transferred_bytes: 12,
+        total_bytes: Some(100),
+        started_at_ms: Some(1),
+        finished_at_ms: None,
+        error: None,
+    };
+    let json = serde_json::to_value(&snapshot).expect("serialize");
+    assert_eq!(json["id"], 7);
+    assert_eq!(json["direction"], "download");
+    assert_eq!(json["state"], "running");
+    let decoded: TransferSnapshot = serde_json::from_value(json).expect("deserialize");
+    assert_eq!(decoded, snapshot);
+}
