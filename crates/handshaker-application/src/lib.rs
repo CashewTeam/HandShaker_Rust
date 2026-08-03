@@ -10,6 +10,7 @@ mod discovery;
 mod dto;
 mod error;
 mod event;
+mod file_plan;
 mod media;
 mod runtime;
 mod transfer;
@@ -25,6 +26,10 @@ pub use dto::{
 };
 pub use error::{AppResult, PublicError, PublicErrorCode, from_core_error};
 pub use event::{BackendEvent, EventEnvelope, EventHub};
+pub use file_plan::{
+    ExecuteFilePlanRequest, FileConflictKind, FileOperationPlan, FilePlanConflict,
+    FilePlanDirection, FilePlanItem, PlanDownloadRequest, PlanUploadRequest,
+};
 pub use media::{
     AudioAlbumDto, AudioFileDto, AudioLibraryDto, ExifDataDto, ImageAlbumDto, ImageFileDto,
     PhotoLibraryDto, ThumbnailsDto, VideoAlbumDto, VideoFileDto, VideoLibraryDto,

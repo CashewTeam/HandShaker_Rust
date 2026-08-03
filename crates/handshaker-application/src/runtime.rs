@@ -29,6 +29,10 @@ use crate::dto::{
 };
 use crate::error::{AppResult, PublicError, PublicErrorCode, from_core_error};
 use crate::event::{BackendEvent, EventEnvelope, EventHub};
+use crate::file_plan::{
+    ExecuteFilePlanRequest, FileConflictKind, FileOperationPlan, FilePlanConflict,
+    FilePlanDirection, FilePlanItem, PlanDownloadRequest, PlanUploadRequest,
+};
 use crate::media::{
     AudioAlbumDto, AudioLibraryDto, ExifDataDto, ImageFileDto, PhotoLibraryDto, ThumbnailsDto,
     VideoFileDto, VideoLibraryDto, dto_to_audio_album, dto_to_image_file, dto_to_video_file,
@@ -94,6 +98,14 @@ impl ActiveSession {
             connected_at_ms: self.connected_at_ms,
             last_activity_at_ms: Some(self.last_activity_at_ms),
         }
+    }
+
+    /// Current device-info DTO (shared with the event bridge).
+    pub(crate) fn device_info(&self) -> DeviceInfoDto {
+        self.device_info
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
@@ -672,6 +684,398 @@ impl HandShakerRuntime {
         .await
     }
 
+    // ---- file plans (Phase D / D4) ----
+
+    /// Preflight a download batch: source type, recursive requirement,
+    /// destination resolution and overwrite/type conflicts are all decided
+    /// here; GUI only renders the plan and the user's choices.
+    pub async fn plan_download(
+        &self,
+        request: PlanDownloadRequest,
+    ) -> AppResult<FileOperationPlan> {
+        self.ensure_open()?;
+        let session = self.session_handle(request.session_id).await?;
+        let root = session.device_info().root_path;
+
+        let mut items = Vec::new();
+        let mut conflicts = Vec::new();
+        let mut requires_recursive = false;
+
+        for raw_source in &request.remote_sources {
+            let source = resolve_remote_path(&root, raw_source);
+            let remote = self
+                .stat_file(StatFileRequest {
+                    session_id: request.session_id,
+                    path: source.clone(),
+                })
+                .await?;
+
+            let Some(remote) = remote else {
+                conflicts.push(FilePlanConflict {
+                    kind: FileConflictKind::SourceMissing,
+                    source: source.clone(),
+                    destination: request.local_destination.clone(),
+                    message: "remote source does not exist".into(),
+                    overridable: false,
+                });
+                continue;
+            };
+
+            if remote.is_directory && !request.recursive {
+                requires_recursive = true;
+                conflicts.push(FilePlanConflict {
+                    kind: FileConflictKind::RecursiveRequired,
+                    source: source.clone(),
+                    destination: request.local_destination.clone(),
+                    message: "directory download requires recursive mode".into(),
+                    overridable: true,
+                });
+            }
+
+            let Some(destination) = resolve_local_download_destination(
+                &request.local_destination,
+                &remote,
+                request.remote_sources.len(),
+                &mut conflicts,
+            ) else {
+                continue;
+            };
+
+            inspect_local_destination(
+                &destination,
+                remote.is_directory,
+                request.overwrite,
+                &mut conflicts,
+            );
+
+            items.push(FilePlanItem {
+                source,
+                destination: destination.display().to_string(),
+                is_directory: remote.is_directory,
+                size: (!remote.is_directory).then_some(remote.size),
+            });
+        }
+
+        append_duplicate_destination_conflicts(&items, &mut conflicts);
+        Ok(finalize_file_plan(
+            FilePlanDirection::Download,
+            request.session_id,
+            items,
+            conflicts,
+            requires_recursive,
+        ))
+    }
+
+    /// Preflight an upload batch (mirror of [`Self::plan_download`]).
+    pub async fn plan_upload(&self, request: PlanUploadRequest) -> AppResult<FileOperationPlan> {
+        self.ensure_open()?;
+        let session = self.session_handle(request.session_id).await?;
+        let root = session.device_info().root_path;
+        let remote_destination = resolve_remote_path(&root, &request.remote_destination);
+        let remote_destination_stat = self
+            .stat_optional(request.session_id, &remote_destination)
+            .await?;
+
+        let mut items = Vec::new();
+        let mut conflicts = Vec::new();
+        let mut requires_recursive = false;
+
+        for raw_source in &request.local_sources {
+            let source = std::path::PathBuf::from(raw_source);
+            let metadata = match tokio::fs::metadata(&source).await {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    conflicts.push(FilePlanConflict {
+                        kind: FileConflictKind::SourceMissing,
+                        source: raw_source.clone(),
+                        destination: remote_destination.clone(),
+                        message: "local source does not exist".into(),
+                        overridable: false,
+                    });
+                    continue;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                    conflicts.push(FilePlanConflict {
+                        kind: FileConflictKind::LocalPermissionDenied,
+                        source: raw_source.clone(),
+                        destination: remote_destination.clone(),
+                        message: "local source is not readable".into(),
+                        overridable: false,
+                    });
+                    continue;
+                }
+                Err(error) => {
+                    return Err(map_local_plan_error(error, raw_source));
+                }
+            };
+
+            let is_directory = metadata.is_dir();
+            if is_directory && !request.recursive {
+                requires_recursive = true;
+                conflicts.push(FilePlanConflict {
+                    kind: FileConflictKind::RecursiveRequired,
+                    source: raw_source.clone(),
+                    destination: remote_destination.clone(),
+                    message: "directory upload requires recursive mode".into(),
+                    overridable: true,
+                });
+            }
+
+            let Some(destination) = resolve_remote_upload_destination(
+                &remote_destination,
+                &source,
+                request.local_sources.len(),
+                remote_destination_stat.as_ref(),
+                &mut conflicts,
+            ) else {
+                continue;
+            };
+
+            if let Some(existing) = self.stat_optional(request.session_id, &destination).await? {
+                append_remote_destination_conflict(
+                    raw_source,
+                    &destination,
+                    is_directory,
+                    &existing,
+                    request.overwrite,
+                    &mut conflicts,
+                );
+            }
+
+            items.push(FilePlanItem {
+                source: source.display().to_string(),
+                destination,
+                is_directory,
+                size: (!is_directory).then_some(metadata.len()),
+            });
+        }
+
+        append_duplicate_destination_conflicts(&items, &mut conflicts);
+        Ok(finalize_file_plan(
+            FilePlanDirection::Upload,
+            request.session_id,
+            items,
+            conflicts,
+            requires_recursive,
+        ))
+    }
+
+    /// Stat one remote path as optional: `RemotePathNotFound` becomes
+    /// `None`, everything else propagates (Phase D / D4; never parse error
+    /// text).
+    async fn stat_optional(
+        &self,
+        session_id: SessionId,
+        path: &str,
+    ) -> AppResult<Option<FileEntryDto>> {
+        match self
+            .stat_file(StatFileRequest {
+                session_id,
+                path: path.to_string(),
+            })
+            .await
+        {
+            Ok(file) => Ok(file),
+            Err(error) if error.code == PublicErrorCode::RemotePathNotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Execute a preflighted plan as a background transfer; returns the
+    /// unified transfer id immediately. The plan's session must still be
+    /// open, and the caller's `overwrite` must match the plan's conflicts.
+    pub async fn execute_file_plan(
+        &self,
+        request: ExecuteFilePlanRequest,
+    ) -> AppResult<TransferId> {
+        self.ensure_open()?;
+        if !request.plan.is_executable_with(request.overwrite) {
+            return Err(PublicError::new(
+                PublicErrorCode::InvalidState,
+                "plan contains unresolved conflicts for the given options",
+            )
+            .operation("execute_file_plan"));
+        }
+        self.session_handle(request.plan.session_id).await?;
+        self.start_batch_plan(request).await
+    }
+
+    /// Convert an executable plan into a background batch transfer task with
+    /// a unified transfer id (files -> `download_many`/`upload_many`,
+    /// directories -> `download_tree`/`upload_tree`, serial with the given
+    /// concurrency; failures are aggregated, never aborting the rest).
+    async fn start_batch_plan(&self, request: ExecuteFilePlanRequest) -> AppResult<TransferId> {
+        let client = self.session_client_arc(request.plan.session_id).await?;
+        let direction = match request.plan.direction {
+            FilePlanDirection::Download => TransferDirectionDto::Download,
+            FilePlanDirection::Upload => TransferDirectionDto::Upload,
+        };
+        let mut snapshot = self.inner.transfers.snapshot_for(
+            request.plan.session_id,
+            direction,
+            request
+                .plan
+                .items
+                .iter()
+                .map(|item| item.source.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            request
+                .plan
+                .items
+                .iter()
+                .map(|item| item.destination.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        // Carry the planned total so GUI can render progress against it.
+        snapshot.total_bytes = request.plan.total_bytes;
+        let id = snapshot.id;
+        let entry = self.inner.transfers.register(snapshot);
+        let registry = self.inner.transfers.clone();
+        let event_hub = self.event_hub();
+        let inner = self.inner.clone();
+        let session_id = request.plan.session_id;
+        let overwrite = request.overwrite;
+        let concurrency = request.concurrency.max(1);
+        let total_bytes = request.plan.total_bytes;
+        let item_count = request.plan.items.len();
+
+        // Split the plan into file pairs and directory trees (both sides are
+        // already resolved absolute paths).
+        let trees: Vec<TreeTransferDto> = request
+            .plan
+            .items
+            .iter()
+            .filter(|item| item.is_directory)
+            .map(|item| TreeTransferDto {
+                source: item.source.clone(),
+                target: item.destination.clone(),
+            })
+            .collect();
+        let files: Vec<BatchTransferItemDto> = request
+            .plan
+            .items
+            .iter()
+            .filter(|item| !item.is_directory)
+            .map(|item| BatchTransferItemDto {
+                source: item.source.clone(),
+                target: item.destination.clone(),
+            })
+            .collect();
+
+        let handle = tokio::spawn(async move {
+            registry.transition(id, TransferState::Running);
+            // BatchTransferOptions is not Clone (progress callback Arc); build
+            // a fresh copy per call.
+            let batch = || handshaker_core::BatchTransferOptions {
+                overwrite,
+                progress: None,
+                offset: 0,
+                concurrency,
+            };
+            let mut result = handshaker_core::BatchTransferResult::default();
+            let outcome: Result<(), PublicError> = async {
+                for tree in &trees {
+                    let partial = match direction {
+                        TransferDirectionDto::Download => {
+                            client
+                                .download_tree(
+                                    &tree.source,
+                                    std::path::Path::new(&tree.target),
+                                    batch(),
+                                )
+                                .await
+                        }
+                        TransferDirectionDto::Upload => {
+                            client
+                                .upload_tree(
+                                    std::path::Path::new(&tree.source),
+                                    &tree.target,
+                                    batch(),
+                                )
+                                .await
+                        }
+                    }
+                    .map_err(|error| from_core_error(error, "execute_file_plan"))?;
+                    merge_core_batch(&mut result, partial);
+                }
+                let core_items: Vec<handshaker_core::BatchTransferItem> = files
+                    .iter()
+                    .map(|file| handshaker_core::BatchTransferItem {
+                        source: file.source.clone(),
+                        target: file.target.clone(),
+                    })
+                    .collect();
+                if !core_items.is_empty() {
+                    let partial = match direction {
+                        TransferDirectionDto::Download => {
+                            client.download_many(&core_items, batch()).await
+                        }
+                        TransferDirectionDto::Upload => {
+                            client.upload_many(&core_items, batch()).await
+                        }
+                    }
+                    .map_err(|error| from_core_error(error, "execute_file_plan"))?;
+                    merge_core_batch(&mut result, partial);
+                }
+                Ok(())
+            }
+            .await;
+
+            match outcome {
+                Ok(()) if result.failures.is_empty() => {
+                    if let Some(total) = total_bytes {
+                        registry.set_progress(id, total, total);
+                    }
+                    if let Some(snapshot) = registry.transition(id, TransferState::Completed) {
+                        event_hub.publish(BackendEvent::TransferUpdated(snapshot));
+                    }
+                }
+                Ok(()) => {
+                    // Some items failed but the batch itself completed
+                    // (partial success): observable, never silent.
+                    registry.set_error(
+                        id,
+                        PublicError::new(
+                            PublicErrorCode::RemoteIo,
+                            format!(
+                                "{} of {} plan items failed",
+                                result.failures.len(),
+                                item_count
+                            ),
+                        )
+                        .operation("execute_file_plan"),
+                    );
+                    if let Some(snapshot) = registry.transition(id, TransferState::Failed) {
+                        event_hub.publish(BackendEvent::TransferUpdated(snapshot));
+                    }
+                }
+                Err(error) => {
+                    let connection_closed = connection_lost_code(error.code);
+                    registry.set_error(id, error);
+                    if let Some(snapshot) = registry.transition(id, TransferState::Failed) {
+                        event_hub.publish(BackendEvent::TransferUpdated(snapshot));
+                    }
+                    if connection_closed {
+                        mark_connection_lost(
+                            &inner.sessions,
+                            &inner.transfers,
+                            session_id,
+                            &event_hub,
+                        )
+                        .await;
+                    }
+                }
+            }
+        });
+        *entry
+            .join
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(handle);
+        Ok(id)
+    }
+
     // ---- clipboard (M8 §5.5-adjacent service) ----
 
     /// List clipboard history for an open session.
@@ -1036,15 +1440,18 @@ impl HandShakerRuntime {
     /// Short critical section: clone the session's client Arc, then drop the
     /// registry lock before any network await (M8.1 Phase B / B1).
     async fn session_client_arc(&self, session_id: SessionId) -> AppResult<Arc<HandShakerClient>> {
-        let guard = self.inner.sessions.lock().await;
-        let session = guard.get(&session_id).ok_or_else(|| {
-            PublicError::new(PublicErrorCode::SessionNotFound, "session not found")
-        })?;
-        // M8.1 Phase C / C5: once a connection loss (or explicit close) has
-        // marked the session non-Ready, later requests fail fast instead of
-        // waiting on a dead transport. The registry entry stays until
-        // disconnect/shutdown removes it, so the stable error here is
-        // SessionClosed, not SessionNotFound.
+        Ok(self.session_handle(session_id).await?.client.clone())
+    }
+
+    /// Short critical section: clone the session Arc (Phase D / D5 helper),
+    /// then drop the registry lock before any network await. Fails fast with
+    /// `SessionClosed` once the session left `Ready`.
+    async fn session_handle(&self, session_id: SessionId) -> AppResult<Arc<ActiveSession>> {
+        let session = {
+            let guard = self.inner.sessions.lock().await;
+            guard.get(&session_id).cloned()
+        }
+        .ok_or_else(|| PublicError::new(PublicErrorCode::SessionNotFound, "session not found"))?;
         let state = session_state_from_u8(session.state.load(Ordering::SeqCst));
         if !matches!(state, SessionState::Ready) {
             return Err(PublicError::new(
@@ -1052,7 +1459,7 @@ impl HandShakerRuntime {
                 "session is not ready",
             ));
         }
-        Ok(session.client.clone())
+        Ok(session)
     }
 
     /// Run one request against a session's client with connection-loss
@@ -1495,4 +1902,214 @@ pub(crate) fn batch_result_to_dto(
             })
             .collect(),
     }
+}
+
+// ---- Phase D / D4: plan helpers ----
+
+/// Resolve the local download destination for one remote entry. With a
+/// single source the destination is used as-is unless it is an existing
+/// directory (then the remote basename is appended); with multiple sources
+/// the destination must be an existing directory. Returns `None` when the
+/// destination cannot be resolved (a conflict was appended).
+pub(crate) fn resolve_local_download_destination(
+    destination: &str,
+    remote: &FileEntryDto,
+    source_count: usize,
+    conflicts: &mut Vec<FilePlanConflict>,
+) -> Option<std::path::PathBuf> {
+    let base = std::path::Path::new(&remote.path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("download");
+    let destination_path = std::path::PathBuf::from(destination);
+    let existing = std::fs::metadata(&destination_path).ok();
+
+    if source_count > 1 {
+        match existing {
+            Some(metadata) if metadata.is_dir() => {
+                return Some(destination_path.join(base));
+            }
+            _ => {
+                conflicts.push(FilePlanConflict {
+                    kind: FileConflictKind::DestinationTypeMismatch,
+                    source: remote.path.clone(),
+                    destination: destination.to_string(),
+                    message: "multi-source download requires an existing destination directory"
+                        .into(),
+                    overridable: false,
+                });
+                return None;
+            }
+        }
+    }
+    match existing {
+        Some(metadata) if metadata.is_dir() => Some(destination_path.join(base)),
+        _ => Some(destination_path),
+    }
+}
+
+/// Inspect an already-resolved local download destination: an existing file
+/// is a `DestinationExists` conflict (overridable by `overwrite`); a
+/// file/directory shape mismatch is never overridable.
+pub(crate) fn inspect_local_destination(
+    destination: &std::path::Path,
+    remote_is_directory: bool,
+    overwrite: bool,
+    conflicts: &mut Vec<FilePlanConflict>,
+) {
+    let Some(metadata) = std::fs::metadata(destination).ok() else {
+        return;
+    };
+    if metadata.is_dir() != remote_is_directory {
+        conflicts.push(FilePlanConflict {
+            kind: FileConflictKind::DestinationTypeMismatch,
+            source: destination.display().to_string(),
+            destination: destination.display().to_string(),
+            message: "destination type does not match the source".into(),
+            overridable: false,
+        });
+    } else if metadata.is_file() {
+        conflicts.push(FilePlanConflict {
+            kind: FileConflictKind::DestinationExists,
+            source: destination.display().to_string(),
+            destination: destination.display().to_string(),
+            message: "destination already exists".into(),
+            overridable: overwrite,
+        });
+    }
+}
+
+/// Resolve the remote upload destination for one local source. With a
+/// single source the destination is used as-is unless it is an existing
+/// remote directory (then the local basename is appended); with multiple
+/// sources the destination must be an existing remote directory.
+pub(crate) fn resolve_remote_upload_destination(
+    destination: &str,
+    source: &std::path::Path,
+    source_count: usize,
+    destination_stat: Option<&FileEntryDto>,
+    conflicts: &mut Vec<FilePlanConflict>,
+) -> Option<String> {
+    let base = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("upload");
+    if source_count > 1 {
+        match destination_stat {
+            Some(existing) if existing.is_directory => {
+                return Some(format!("{destination}/{base}"));
+            }
+            _ => {
+                conflicts.push(FilePlanConflict {
+                    kind: FileConflictKind::DestinationTypeMismatch,
+                    source: source.display().to_string(),
+                    destination: destination.to_string(),
+                    message: "multi-source upload requires an existing remote directory".into(),
+                    overridable: false,
+                });
+                return None;
+            }
+        }
+    }
+    match destination_stat {
+        Some(existing) if existing.is_directory => Some(format!("{destination}/{base}")),
+        _ => Some(destination.to_string()),
+    }
+}
+
+/// Compare one planned upload target with the remote entry that exists
+/// there: a shape mismatch is never overridable; an existing file of the
+/// same shape is overridable by `overwrite`.
+pub(crate) fn append_remote_destination_conflict(
+    source: &str,
+    destination: &str,
+    is_directory: bool,
+    existing: &FileEntryDto,
+    overwrite: bool,
+    conflicts: &mut Vec<FilePlanConflict>,
+) {
+    if existing.is_directory != is_directory {
+        conflicts.push(FilePlanConflict {
+            kind: FileConflictKind::DestinationTypeMismatch,
+            source: source.to_string(),
+            destination: destination.to_string(),
+            message: "remote destination type does not match the source".into(),
+            overridable: false,
+        });
+    } else if !existing.is_directory {
+        conflicts.push(FilePlanConflict {
+            kind: FileConflictKind::DestinationExists,
+            source: source.to_string(),
+            destination: destination.to_string(),
+            message: "remote destination already exists".into(),
+            overridable: overwrite,
+        });
+    }
+}
+
+/// Two sources mapping onto the same destination are never overridable by
+/// overwrite — one of them would silently be skipped.
+pub(crate) fn append_duplicate_destination_conflicts(
+    items: &[FilePlanItem],
+    conflicts: &mut Vec<FilePlanConflict>,
+) {
+    let mut seen = std::collections::HashMap::<&str, &str>::new();
+    for item in items {
+        if let Some(previous) = seen.insert(item.destination.as_str(), item.source.as_str()) {
+            conflicts.push(FilePlanConflict {
+                kind: FileConflictKind::DuplicateDestination,
+                source: item.source.clone(),
+                destination: item.destination.clone(),
+                message: format!(
+                    "multiple sources map to the same destination ({previous} and {})",
+                    item.source
+                ),
+                overridable: false,
+            });
+        }
+    }
+}
+
+/// Compute the aggregate counters and executability of a plan. `executable`
+/// is false while any non-overridable conflict remains; overridable
+/// conflicts are resolved by the caller's options at execution time.
+pub(crate) fn finalize_file_plan(
+    direction: FilePlanDirection,
+    session_id: SessionId,
+    items: Vec<FilePlanItem>,
+    conflicts: Vec<FilePlanConflict>,
+    requires_recursive: bool,
+) -> FileOperationPlan {
+    let file_count = items.iter().filter(|item| !item.is_directory).count() as u64;
+    let directory_count = items.iter().filter(|item| item.is_directory).count() as u64;
+    let total_bytes = {
+        let sum: u64 = items
+            .iter()
+            .filter_map(|item| item.size)
+            .fold(0, u64::saturating_add);
+        (file_count > 0).then_some(sum)
+    };
+    let executable = conflicts.iter().all(|conflict| conflict.overridable);
+    FileOperationPlan {
+        direction,
+        session_id,
+        items,
+        conflicts,
+        file_count,
+        directory_count,
+        total_bytes,
+        requires_recursive,
+        executable,
+    }
+}
+
+/// Map a local filesystem error that is not a missing/permission case onto
+/// the stable public error.
+fn map_local_plan_error(error: std::io::Error, source: &str) -> PublicError {
+    PublicError::new(
+        PublicErrorCode::LocalPermissionDenied,
+        format!("cannot inspect local source {source}"),
+    )
+    .with_detail(error.to_string())
+    .operation("plan_upload")
 }

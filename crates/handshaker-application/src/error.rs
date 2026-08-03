@@ -29,6 +29,9 @@ pub enum PublicErrorCode {
     RemotePathNotFound = 3001,
     RemotePermissionDenied = 3002,
     RemotePathExists = 3003,
+    /// Generic remote-side operation failure (e.g. an aggregated batch of
+    /// items where some failed; Phase D / D4).
+    RemoteIo = 3004,
     // 3100–3199 local file system
     LocalPathNotFound = 3101,
     LocalPermissionDenied = 3102,
@@ -74,6 +77,7 @@ impl PublicErrorCode {
             RemotePathNotFound => "remote_path_not_found",
             RemotePermissionDenied => "remote_permission_denied",
             RemotePathExists => "remote_path_exists",
+            RemoteIo => "remote_io",
             LocalPathNotFound => "local_path_not_found",
             LocalPermissionDenied => "local_permission_denied",
             LocalPathExists => "local_path_exists",

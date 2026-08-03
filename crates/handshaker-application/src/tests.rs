@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use handshaker_core::{DeviceInfo, RemoteFile};
 
-use crate::dto::{DeviceDescriptor, DeviceId, RuntimeConfig, SessionId, TransportKind};
+use crate::dto::{
+    DeviceDescriptor, DeviceId, FileEntryDto, RuntimeConfig, SessionId, TransportKind,
+};
 use crate::error::{PublicErrorCode, from_core_error};
 use crate::runtime::normalize_remote_path;
 use crate::transfer::{
@@ -848,6 +850,405 @@ async fn reset_wifi_trust_rejects_invalid_endpoint() {
         .await
         .expect_err("invalid endpoint");
     assert_eq!(error.code, PublicErrorCode::InvalidArgument);
+    runtime.shutdown().await.expect("shutdown");
+}
+
+// ---- Phase D / D4: file plans ----
+
+#[tokio::test]
+async fn plan_download_unknown_session_is_stable_error() {
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    let error = runtime
+        .plan_download(crate::file_plan::PlanDownloadRequest {
+            session_id: SessionId(999),
+            remote_sources: vec!["/DCIM/a.jpg".to_string()],
+            local_destination: "/tmp/a.jpg".to_string(),
+            recursive: false,
+            overwrite: false,
+        })
+        .await
+        .expect_err("unknown session");
+    assert_eq!(error.code, PublicErrorCode::SessionNotFound);
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[test]
+fn download_destination_single_source_uses_destination_as_is() {
+    let mut conflicts = Vec::new();
+    let remote = FileEntryDto {
+        path: "/storage/emulated/0/DCIM/a.jpg".to_string(),
+        size: 10,
+        created_at_ms: None,
+        modified_at_ms: None,
+        is_directory: false,
+        checksum: None,
+        is_trash: None,
+        media_id: None,
+    };
+    // Non-existent destination: used verbatim.
+    let destination = crate::runtime::resolve_local_download_destination(
+        "/tmp/out/nonexistent/a.jpg",
+        &remote,
+        1,
+        &mut conflicts,
+    )
+    .expect("resolved");
+    assert_eq!(
+        destination,
+        std::path::PathBuf::from("/tmp/out/nonexistent/a.jpg")
+    );
+    assert!(conflicts.is_empty());
+}
+
+#[test]
+fn download_destination_multi_source_requires_existing_directory() {
+    let mut conflicts = Vec::new();
+    let remote = FileEntryDto {
+        path: "/storage/emulated/0/DCIM/a.jpg".to_string(),
+        size: 10,
+        created_at_ms: None,
+        modified_at_ms: None,
+        is_directory: false,
+        checksum: None,
+        is_trash: None,
+        media_id: None,
+    };
+    // Multi-source into a non-existent destination is a hard conflict.
+    let resolved = crate::runtime::resolve_local_download_destination(
+        "/tmp/out/missing",
+        &remote,
+        2,
+        &mut conflicts,
+    );
+    assert!(resolved.is_none());
+    assert_eq!(
+        conflicts[0].kind,
+        crate::file_plan::FileConflictKind::DestinationTypeMismatch
+    );
+    assert!(!conflicts[0].overridable);
+
+    // Multi-source into an existing directory appends the basename.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut conflicts = Vec::new();
+    let resolved = crate::runtime::resolve_local_download_destination(
+        temp.path().to_str().expect("utf8"),
+        &remote,
+        2,
+        &mut conflicts,
+    )
+    .expect("resolved");
+    assert_eq!(resolved.file_name().and_then(|n| n.to_str()), Some("a.jpg"));
+}
+
+#[test]
+fn inspect_local_destination_flags_exists_and_type_mismatch() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let file = temp.path().join("a.jpg");
+    std::fs::write(&file, b"x").expect("write");
+    let dir = temp.path().join("dir");
+    std::fs::create_dir(&dir).expect("mkdir");
+
+    // Existing file, overwrite=false -> overridable DestinationExists.
+    let mut conflicts = Vec::new();
+    crate::runtime::inspect_local_destination(&file, false, false, &mut conflicts);
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(
+        conflicts[0].kind,
+        crate::file_plan::FileConflictKind::DestinationExists
+    );
+    assert!(!conflicts[0].overridable);
+
+    // Existing file, overwrite=true -> overridable.
+    let mut conflicts = Vec::new();
+    crate::runtime::inspect_local_destination(&file, false, true, &mut conflicts);
+    assert!(conflicts[0].overridable);
+
+    // File where a directory is expected -> never overridable.
+    let mut conflicts = Vec::new();
+    crate::runtime::inspect_local_destination(&file, true, true, &mut conflicts);
+    assert_eq!(
+        conflicts[0].kind,
+        crate::file_plan::FileConflictKind::DestinationTypeMismatch
+    );
+    assert!(!conflicts[0].overridable);
+
+    // Existing directory matching a directory source -> no conflict.
+    let mut conflicts = Vec::new();
+    crate::runtime::inspect_local_destination(&dir, true, false, &mut conflicts);
+    assert!(conflicts.is_empty());
+}
+
+#[test]
+fn upload_destination_resolution_rules() {
+    let source = std::path::PathBuf::from("/local/a.jpg");
+    let mut conflicts = Vec::new();
+
+    // Single source, remote destination missing -> used verbatim.
+    let resolved = crate::runtime::resolve_remote_upload_destination(
+        "/storage/emulated/0/Download",
+        &source,
+        1,
+        None,
+        &mut conflicts,
+    )
+    .expect("resolved");
+    assert_eq!(resolved, "/storage/emulated/0/Download");
+
+    // Single source, remote destination is a directory -> basename appended.
+    let dir = FileEntryDto {
+        path: "/storage/emulated/0/Download".to_string(),
+        size: 0,
+        created_at_ms: None,
+        modified_at_ms: None,
+        is_directory: true,
+        checksum: None,
+        is_trash: None,
+        media_id: None,
+    };
+    let resolved = crate::runtime::resolve_remote_upload_destination(
+        "/storage/emulated/0/Download",
+        &source,
+        1,
+        Some(&dir),
+        &mut conflicts,
+    )
+    .expect("resolved");
+    assert_eq!(resolved, "/storage/emulated/0/Download/a.jpg");
+
+    // Multi-source, destination is not a directory -> hard conflict.
+    let mut conflicts = Vec::new();
+    let file = FileEntryDto {
+        path: "/storage/emulated/0/x".to_string(),
+        size: 1,
+        created_at_ms: None,
+        modified_at_ms: None,
+        is_directory: false,
+        checksum: None,
+        is_trash: None,
+        media_id: None,
+    };
+    let resolved = crate::runtime::resolve_remote_upload_destination(
+        "/storage/emulated/0/x",
+        &source,
+        2,
+        Some(&file),
+        &mut conflicts,
+    );
+    assert!(resolved.is_none());
+    assert_eq!(
+        conflicts[0].kind,
+        crate::file_plan::FileConflictKind::DestinationTypeMismatch
+    );
+}
+
+#[test]
+fn remote_destination_conflict_handles_shape_and_overwrite() {
+    let dir = FileEntryDto {
+        path: "/r/d".to_string(),
+        size: 0,
+        created_at_ms: None,
+        modified_at_ms: None,
+        is_directory: true,
+        checksum: None,
+        is_trash: None,
+        media_id: None,
+    };
+    let file = FileEntryDto {
+        path: "/r/f".to_string(),
+        size: 1,
+        created_at_ms: None,
+        modified_at_ms: None,
+        is_directory: false,
+        checksum: None,
+        is_trash: None,
+        media_id: None,
+    };
+    // Directory source vs existing file: never overridable.
+    let mut conflicts = Vec::new();
+    crate::runtime::append_remote_destination_conflict(
+        "s",
+        "/r/f",
+        true,
+        &file,
+        true,
+        &mut conflicts,
+    );
+    assert_eq!(
+        conflicts[0].kind,
+        crate::file_plan::FileConflictKind::DestinationTypeMismatch
+    );
+    assert!(!conflicts[0].overridable);
+    // File source vs existing directory: type mismatch, never overridable.
+    let mut conflicts = Vec::new();
+    crate::runtime::append_remote_destination_conflict(
+        "s",
+        "/r/d",
+        false,
+        &dir,
+        false,
+        &mut conflicts,
+    );
+    assert_eq!(
+        conflicts[0].kind,
+        crate::file_plan::FileConflictKind::DestinationTypeMismatch
+    );
+    assert!(!conflicts[0].overridable);
+    // File vs file: overridable only with overwrite.
+    let mut conflicts = Vec::new();
+    crate::runtime::append_remote_destination_conflict(
+        "s",
+        "/r/f",
+        false,
+        &file,
+        true,
+        &mut conflicts,
+    );
+    assert_eq!(
+        conflicts[0].kind,
+        crate::file_plan::FileConflictKind::DestinationExists
+    );
+    assert!(conflicts[0].overridable);
+    // Directory vs directory: no conflict (tree merge).
+    let mut conflicts = Vec::new();
+    crate::runtime::append_remote_destination_conflict(
+        "s",
+        "/r/d",
+        true,
+        &dir,
+        false,
+        &mut conflicts,
+    );
+    assert!(conflicts.is_empty());
+}
+
+#[test]
+fn duplicate_destination_conflicts_are_never_overridable() {
+    let items = vec![
+        crate::file_plan::FilePlanItem {
+            source: "/a/1.txt".to_string(),
+            destination: "/out/1.txt".to_string(),
+            is_directory: false,
+            size: Some(1),
+        },
+        crate::file_plan::FilePlanItem {
+            source: "/b/1.txt".to_string(),
+            destination: "/out/1.txt".to_string(),
+            is_directory: false,
+            size: Some(2),
+        },
+    ];
+    let mut conflicts = Vec::new();
+    crate::runtime::append_duplicate_destination_conflicts(&items, &mut conflicts);
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(
+        conflicts[0].kind,
+        crate::file_plan::FileConflictKind::DuplicateDestination
+    );
+    assert!(!conflicts[0].overridable);
+}
+
+#[test]
+fn finalize_file_plan_counts_and_derives_executability() {
+    let items = vec![
+        crate::file_plan::FilePlanItem {
+            source: "/a/1.txt".to_string(),
+            destination: "/out/1.txt".to_string(),
+            is_directory: false,
+            size: Some(10),
+        },
+        crate::file_plan::FilePlanItem {
+            source: "/a/dir".to_string(),
+            destination: "/out/dir".to_string(),
+            is_directory: true,
+            size: None,
+        },
+    ];
+    let plan = crate::runtime::finalize_file_plan(
+        crate::file_plan::FilePlanDirection::Download,
+        SessionId(1),
+        items.clone(),
+        Vec::new(),
+        true,
+    );
+    assert_eq!(plan.file_count, 1);
+    assert_eq!(plan.directory_count, 1);
+    assert_eq!(plan.total_bytes, Some(10));
+    assert!(plan.requires_recursive);
+    assert!(plan.executable);
+
+    // A non-overridable conflict kills executability.
+    let plan = crate::runtime::finalize_file_plan(
+        crate::file_plan::FilePlanDirection::Download,
+        SessionId(1),
+        items,
+        vec![crate::file_plan::FilePlanConflict {
+            kind: crate::file_plan::FileConflictKind::SourceMissing,
+            source: "/missing".to_string(),
+            destination: "/out".to_string(),
+            message: "missing".to_string(),
+            overridable: false,
+        }],
+        false,
+    );
+    assert!(!plan.executable);
+}
+
+#[tokio::test]
+async fn execute_file_plan_rejects_unresolvable_plans() {
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    // Non-executable plan: rejected before any session lookup.
+    let plan = crate::file_plan::FileOperationPlan {
+        direction: crate::file_plan::FilePlanDirection::Download,
+        session_id: SessionId(1),
+        items: Vec::new(),
+        conflicts: vec![crate::file_plan::FilePlanConflict {
+            kind: crate::file_plan::FileConflictKind::SourceMissing,
+            source: "/missing".to_string(),
+            destination: "/out".to_string(),
+            message: "missing".to_string(),
+            overridable: false,
+        }],
+        file_count: 0,
+        directory_count: 0,
+        total_bytes: None,
+        requires_recursive: false,
+        executable: false,
+    };
+    let error = runtime
+        .execute_file_plan(crate::file_plan::ExecuteFilePlanRequest {
+            plan,
+            overwrite: true,
+            concurrency: 1,
+        })
+        .await
+        .expect_err("must reject");
+    assert_eq!(error.code, PublicErrorCode::InvalidState);
+
+    // Executable plan with a missing session: SessionNotFound.
+    let plan = crate::file_plan::FileOperationPlan {
+        direction: crate::file_plan::FilePlanDirection::Download,
+        session_id: SessionId(999),
+        items: Vec::new(),
+        conflicts: Vec::new(),
+        file_count: 0,
+        directory_count: 0,
+        total_bytes: None,
+        requires_recursive: false,
+        executable: true,
+    };
+    let error = runtime
+        .execute_file_plan(crate::file_plan::ExecuteFilePlanRequest {
+            plan,
+            overwrite: false,
+            concurrency: 1,
+        })
+        .await
+        .expect_err("unknown session");
+    assert_eq!(error.code, PublicErrorCode::SessionNotFound);
     runtime.shutdown().await.expect("shutdown");
 }
 

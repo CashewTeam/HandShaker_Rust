@@ -1099,30 +1099,36 @@ impl HandShakerClient {
             offset: options.offset,
         };
         let callback = options.progress;
-        let futures = items.iter().map(|item| async {
-            let outcome = match direction {
-                TransferDirection::Upload => {
-                    self.upload(
-                        Path::new(&item.source),
-                        &item.target,
-                        transfer_options.clone(),
-                    )
-                    .await
-                }
-                TransferDirection::Download => {
-                    self.download(
-                        &item.source,
-                        Path::new(&item.target),
-                        transfer_options.clone(),
-                    )
-                    .await
-                }
+        // `cloned` + `async move` so each future owns its item: a borrowing
+        // map closure would require HRTB Send proofs that fail inside
+        // `tokio::spawn` callers (the application plan executor). Only
+        // references and Copy flags are captured.
+        let is_upload = matches!(direction, TransferDirection::Upload);
+        let this = self;
+        let transfer_options = &transfer_options;
+        let done = &done;
+        let callback = &callback;
+        let futures = items.iter().cloned().map(|item| async move {
+            let outcome = if is_upload {
+                this.upload(
+                    Path::new(&item.source),
+                    &item.target,
+                    transfer_options.clone(),
+                )
+                .await
+            } else {
+                this.download(
+                    &item.source,
+                    Path::new(&item.target),
+                    transfer_options.clone(),
+                )
+                .await
             };
             let entry = match outcome {
-                Ok(_) => Ok(item.clone()),
+                Ok(_) => Ok(item),
                 Err(error) => Err(BatchTransferFailure {
-                    source: item.source.clone(),
-                    target: item.target.clone(),
+                    source: item.source,
+                    target: item.target,
                     message: error.to_string(),
                 }),
             };
