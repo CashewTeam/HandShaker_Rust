@@ -101,6 +101,16 @@ async fn unknown_session_errors_are_stable() {
         .await
         .expect_err("missing session");
     assert_eq!(error.code, PublicErrorCode::SessionNotFound);
+    let error = runtime
+        .count_files(crate::dto::CountFilesRequest {
+            session_id: SessionId(42),
+            path: "/".into(),
+            depth: 1,
+            exclusions: vec![],
+        })
+        .await
+        .expect_err("missing session");
+    assert_eq!(error.code, PublicErrorCode::SessionNotFound);
 }
 
 #[test]

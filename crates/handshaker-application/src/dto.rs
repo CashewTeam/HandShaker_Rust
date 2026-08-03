@@ -207,6 +207,16 @@ pub struct CreateDirectoryRequest {
     pub path: String,
 }
 
+/// Count files under a remote directory. `exclusions` are the protocol
+/// exclusion patterns (`SspGetFileCountRequest.exclusion_pattern`).
+#[derive(Debug, Clone)]
+pub struct CountFilesRequest {
+    pub session_id: SessionId,
+    pub path: String,
+    pub depth: u32,
+    pub exclusions: Vec<String>,
+}
+
 /// Move/rename a remote path (M8 §5.5).
 #[derive(Debug, Clone)]
 pub struct MovePathRequest {

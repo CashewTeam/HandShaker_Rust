@@ -15,7 +15,8 @@ use handshaker_core::{
 };
 
 use crate::dto::{
-    ConnectRequest, CreateDirectoryRequest, DeletePathsRequest, DeleteResultDto, DeviceDescriptor,
+    ConnectRequest, CountFilesRequest, CreateDirectoryRequest, DeletePathsRequest, DeleteResultDto,
+    DeviceDescriptor,
     DeviceId, DeviceInfoDto, FileEntryDto, ListDevicesRequest, ListFilesRequest, MovePathRequest,
     PingResultDto, RuntimeConfig, SessionId, SessionSnapshot, SessionState, StatFileRequest,
     TransportKind,
@@ -340,6 +341,22 @@ impl HandShakerRuntime {
             .await
             .map_err(|error| from_core_error(error, "list_files"))?;
         Ok(files.into_iter().map(remote_file_to_dto).collect())
+    }
+
+    /// Count files under a remote directory (protocol exclusions passthrough).
+    pub async fn count_files(&self, request: CountFilesRequest) -> AppResult<u64> {
+        self.ensure_open()?;
+        let guard = self.inner.sessions.lock().await;
+        let session = guard.get(&request.session_id).ok_or_else(|| {
+            PublicError::new(PublicErrorCode::SessionNotFound, "session not found")
+        })?;
+        let root = session.client.root_path().to_string();
+        let path = resolve_remote_path(&root, &request.path);
+        session
+            .client
+            .file_count(&path, request.depth, request.exclusions)
+            .await
+            .map_err(|error| from_core_error(error, "count_files"))
     }
 
     // ---- file service (M8 §5.5) ----

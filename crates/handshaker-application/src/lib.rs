@@ -13,7 +13,8 @@ mod runtime;
 mod transfer;
 
 pub use dto::{
-    AdbDetailDto, ConnectRequest, CreateDirectoryRequest, DeletePathsRequest, DeleteResultDto,
+    AdbDetailDto, ConnectRequest, CountFilesRequest, CreateDirectoryRequest, DeletePathsRequest,
+    DeleteResultDto,
     DeviceDescriptor, DeviceId, DeviceInfoDto, FileEntryDto, ListDevicesRequest, ListFilesRequest,
     MovePathRequest, PingResultDto, RuntimeConfig, SessionId, SessionSnapshot, SessionState,
     StatFileRequest, TransportKind, UsbDetailDto,

@@ -20,10 +20,10 @@ use handshaker_core::{
 };
 
 use handshaker_application::{
-    BatchTransferItemDto, BatchTransferRequest, ConnectRequest, CreateDirectoryRequest,
-    DeletePathsRequest, DeviceDescriptor, DeviceId, FileEntryDto, HandShakerRuntime,
-    ListDevicesRequest, ListFilesRequest, MovePathRequest, PublicError, RuntimeConfig, SessionId,
-    StatFileRequest, TransferFailureDto, TransportKind, TreeTransferDto,
+    BatchTransferItemDto, BatchTransferRequest, ConnectRequest, CountFilesRequest,
+    CreateDirectoryRequest, DeletePathsRequest, DeviceDescriptor, DeviceId, FileEntryDto,
+    HandShakerRuntime, ListDevicesRequest, ListFilesRequest, MovePathRequest, PublicError,
+    RuntimeConfig, SessionId, StatFileRequest, TransferFailureDto, TransportKind, TreeTransferDto,
 };
 
 use crate::output::{Outcome, render};
@@ -1257,7 +1257,16 @@ async fn execute_connected(
             exclusions,
         }) => {
             let path = resolve_remote(&context.remote_cwd, path);
-            let count = client.file_count(&path, *depth, exclusions.clone()).await?;
+            let count = session
+                .runtime
+                .count_files(CountFilesRequest {
+                    session_id: session.session_id,
+                    path: path.clone(),
+                    depth: *depth,
+                    exclusions: exclusions.clone(),
+                })
+                .await
+                .map_err(app_error)?;
             Outcome::new(
                 "fs.count",
                 serde_json::json!({ "path": path, "count": count }),
