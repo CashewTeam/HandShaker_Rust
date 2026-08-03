@@ -70,6 +70,10 @@
 
 ## 6. 全量核对记录(HEAD 2965f64,工作树干净)
 
+> **历史快照**:本节记录 2965f64 时点的核对结果,表格中过期条目(如
+> Application API `"1.0.0"`、FFI 21 导出 ABI 1.1.0、`hs_create_directory`/
+> `hs_ping` 未导出、`generate-ffi-header.sh` 未建)反映当时状态;
+> 最新状态见 §8(M8.1 Phase A:ABI 1.2.0 / 23 导出 / Application preview)。
 > 核对范围:CLI 命令迁移矩阵、Application 冻结条款、FFI 导出与未完成条目、
 > Phase 7 脚本/产物。核对方式:逐命令/逐导出 grep 代码,与 §4/§5 记录比对。
 
@@ -211,3 +215,39 @@ connect/disconnect/get session、list files、subscribe/next/destroy。
 3. `device info/ping` 仍走 `session.client`(core);`ping` 的 FFI 面已补齐
    (hs_ping,ABI 1.2),CLI 侧可随后续 device 迁移一起处理。
 
+## 8. M8.1 Phase A 契约止血记录(审计 c71cf94 之后)
+
+> 依据 `docs/HandShaker_Rust_c71cf94_Swift_Delivery_Audit_and_Plan.md` Phase A;
+> 审计指出 FFI ABI 版本三处不一致(Header/docs 仍写 1.1.0,create directory
+> 标为未导出)与 Application v1「名义冻结、实际未冻结」问题。
+
+### 8.1 FFI ABI 单一事实来源(ABI 1.2.0)
+
+- `handshaker_ffi.h` 顶部注释 1.1.0 → 1.2.0,与 `ABI_VERSION_*` 常量一致;
+- `docs/ffi-v1.md` 升为 v1.2:函数矩阵补 `hs_create_directory`/`hs_ping`,
+  已导出/未导出清单修正(create 已导出;未导出改为 stat/move/delete、
+  batch、媒体、剪贴板、信任、同步);
+- 新增 `scripts/check-ffi-abi.py`:校验 Rust 导出与 Header 原型的符号、
+  参数类别、返回类别一致,ABI 常量与 Header 注释一致,snapshot 同步;
+- 新增 `docs/ffi-abi-snapshot.md`(23 个导出,由脚本生成,`--update` 刷新);
+- `scripts/generate-ffi-header.sh` 接入上述检查(默认校验,`--update` 更新
+  snapshot),保留 dist/apple/ staging;
+- Swift smoke 增加 `hs_abi_version_minor()==2`/`patch()==0` 断言
+  (C smoke 原已检查 major/minor);
+- CI(macos-arm64.yml)在 release 构建后运行 ABI 检查与
+  `scripts/run-ffi-smoke-tests.sh`(C + Swift)。
+
+### 8.2 Application API 改为 preview
+
+- `APPLICATION_API_VERSION`: `"1.0.0"` → `"1.0.0-preview.1"`;
+- `docs/application-api-v1.md`:标题改为「preview 契约」,冻结规则标注为
+  preview 期间的目标契约,列出正式冻结条件(移除 `session_client()`、
+  事件/传输语义确定、fixture 完整、文档同步);
+- 冻结前允许破坏性源码级修改并记录于此,不升 major。
+
+### 8.3 尚未处理(后续 Phase)
+
+- Phase B:Session Registry 锁跨 await、确定性 disconnect/shutdown、state_dir;
+- Phase C/D/E:事件桥接、传输进度、FFI 功能扩展;
+- 本记录仅覆盖 Phase A 契约与文档止血,不改变任何 Rust 行为代码
+  (除 `APPLICATION_API_VERSION` 常量字符串)。

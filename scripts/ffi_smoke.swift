@@ -47,6 +47,8 @@ struct DeviceDescriptor: Codable {
 
 func main() throws {
     guard hs_abi_version_major() == 1 else { throw NSError(domain: "abi", code: 1) }
+    guard hs_abi_version_minor() == 2 else { throw NSError(domain: "abi", code: 14) }
+    guard hs_abi_version_patch() == 0 else { throw NSError(domain: "abi", code: 15) }
 
     // RAII runtime; created and destroyed by the wrapper.
     let runtime = try RuntimeHandle()

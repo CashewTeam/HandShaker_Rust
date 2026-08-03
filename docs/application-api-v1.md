@@ -1,8 +1,12 @@
-# handshaker-application API v1(冻结契约)
+# handshaker-application API v1(preview 契约)
 
-> 版本:`APPLICATION_API_VERSION = "1.0.0"`(与 Rust crate 版本独立)
-> 里程碑:M8(M8.4 建立,M8.5/M8.6 冻结)
+> 版本:`APPLICATION_API_VERSION = "1.0.0-preview.1"`(与 Rust crate 版本独立)
+> 里程碑:M8(M8.4 建立,M8.5/M8.6 草案冻结);M8.1 Phase A 改为 preview
 > crate:`crates/handshaker-application`,包名 `handshaker-application`
+>
+> **当前状态:preview,不是稳定契约。** 冻结前允许破坏性源码级修改(如
+> `session_client()` 过渡入口的移除、事件/传输语义修正);下游消费者
+> (Swift/GTK/.NET)不得把 preview 版本当作稳定契约固化。
 
 ## 1. 目的与边界
 
@@ -14,8 +18,20 @@ FFI、UniFFI 或任何 UI 框架。
 - 调用方提供自己的 tokio runtime(所有接口 async)。
 - 一个进程可创建多个 Runtime;Runtime 不是全局单例。
 
-## 2. 冻结规则(v1)
+## 2. 冻结规则(v1,preview 期间作为目标契约)
 
+以下规则在 preview 阶段即为硬性要求,冻结后继续生效;preview 阶段允许的
+例外只有:为完成收口而删除临时过渡接口(如 `session_client()`)、修正
+事件/传输语义与文档,此类变更必须在此文档与 `docs/m8-migration.md` 记录。
+
+正式冻结(preview 后缀移除)的条件:
+
+- 移除 `session_client()` 过渡入口并完成 CLI 必要迁移;
+- 事件桥接、传输进度/取消/终态语义确定;
+- 公开 DTO/error/event fixture 完整;
+- 文档与代码同步(本文件、`docs/architecture.md`、README)。
+
+冻结规则正文:
 - 字段名称不随意重命名;
 - enum 判别值不复用(`TransportKind` 1/2/3、`SessionState` 1..=5、错误码分区);
 - ID 生命周期明确(`SessionId(u64)` 由 Runtime 单调分配,1 起);
@@ -46,7 +62,9 @@ FFI、UniFFI 或任何 UI 框架。
 | `ConnectRequest` | device(来自 `list_devices` 或同形构造) |
 | `ListFilesRequest` | session_id/path/depth |
 
-## 4. Runtime 接口
+## 4. Runtime 接口(preview,未冻结)
+
+当前为最小冻结面;M8.1 收口后将更新为完整列表。
 
 ```rust
 impl HandShakerRuntime {

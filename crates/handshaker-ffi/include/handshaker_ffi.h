@@ -1,7 +1,8 @@
-/* handshaker_ffi.h — stable C ABI for handshaker-application (M8 v1.1).
+/* handshaker_ffi.h — stable C ABI for handshaker-application (M8 v1.2).
  *
- * ABI version: 1.1.0 (independent of the Rust crate version). 1.1 adds the
- * transfer surface (hs_transfer_*); 1.0 symbols are unchanged.
+ * ABI version: 1.2.0 (independent of the Rust crate version). 1.2 adds
+ * hs_create_directory and hs_ping; 1.1 added the transfer surface
+ * (hs_transfer_*); 1.0 symbols are unchanged.
  *
  * Ownership rules:
  *  - Rust allocates; Rust frees. Buffers returned in HsCallResult must be

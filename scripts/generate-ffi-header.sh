@@ -2,31 +2,34 @@
 # Verify the handshaker-ffi C header stays in sync with the Rust exports and
 # stage the canonical header/modulemap under dist/apple/.
 #
-# Zero-dependency check: every `#[unsafe(no_mangle)] pub unsafe extern "C" fn
-# hs_*` in crates/handshaker-ffi/src/lib.rs must have a prototype in
-# crates/handshaker-ffi/include/handshaker_ffi.h.
+# Single source of truth (M8.1 Phase A):
+#   crates/handshaker-ffi/src/lib.rs            ABI_VERSION_* constants + exports
+#   crates/handshaker-ffi/include/handshaker_ffi.h   prototypes + version comment
+#   docs/ffi-abi-snapshot.md                    generated snapshot (committed)
+#   scripts/check-ffi-abi.py                    comparison logic
+#
+# Checks (default mode):
+#   - every exported `fn hs_*` in lib.rs has a header prototype;
+#   - header prototypes match Rust signatures (param count + type categories);
+#   - ABI_VERSION_* constants match the header top comment;
+#   - docs/ffi-abi-snapshot.md matches the current exports.
+#
+# Usage:
+#   scripts/generate-ffi-header.sh              verify + stage
+#   scripts/generate-ffi-header.sh --update     regenerate snapshot, then stage
 set -eu
 cd "$(dirname "$0")/.."
 
 LIB=crates/handshaker-ffi/src/lib.rs
 HDR=crates/handshaker-ffi/include/handshaker_ffi.h
+SNAPSHOT=docs/ffi-abi-snapshot.md
 
-# Extract exported symbol names (fn name on the no_mangle line's following
-# `pub unsafe extern "C" fn NAME`).
-missing=0
-while IFS= read -r sym; do
-    [ -z "$sym" ] && continue
-    if ! grep -q "${sym}(" "$HDR"; then
-        echo "missing header prototype: $sym" >&2
-        missing=$((missing + 1))
-    fi
-done <<EOF
-$(grep -A1 'no_mangle' "$LIB" | sed -n 's/.*extern "C" fn \([a-z0-9_]*\).*/\1/p')
-EOF
-
-if [ "$missing" -ne 0 ]; then
-    echo "header sync FAILED: $missing symbol(s) missing from $HDR" >&2
-    exit 1
+if [ "${1:-}" = "--update" ]; then
+    python3 scripts/check-ffi-abi.py --lib "$LIB" --header "$HDR" \
+        --snapshot "$SNAPSHOT"
+else
+    python3 scripts/check-ffi-abi.py --lib "$LIB" --header "$HDR" \
+        --check-snapshot "$SNAPSHOT"
 fi
 
 # Stage canonical header + modulemap alongside any built libraries.
@@ -34,4 +37,4 @@ DIST=dist/apple
 mkdir -p "$DIST"
 cp "$HDR" "$DIST/handshaker_ffi.h"
 cp crates/handshaker-ffi/include/module.modulemap "$DIST/module.modulemap"
-echo "header sync ok ($(grep -c 'no_mangle' "$LIB") exports; staged $DIST/handshaker_ffi.h)"
+echo "staged $DIST/handshaker_ffi.h (+ modulemap)"

@@ -31,3 +31,9 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release
+
+      - name: Verify FFI ABI/header/snapshot sync
+        run: scripts/generate-ffi-header.sh
+
+      - name: Run C and Swift smoke tests
+        run: scripts/run-ffi-smoke-tests.sh

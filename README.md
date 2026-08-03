@@ -20,7 +20,9 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
 - `plan.md`：当前后端实现状态、尚未实现的协议功能和完整开发计划。
 - `proto/smartsync.proto`：完整 SSP proto2 schema；构建时由 Prost 生成 Rust 类型，不提交生成文件。
 - `locales/zh-CN.json`：CLI、错误和诊断信息使用的中文语言资源；Rust 源码只引用稳定消息 key。
-- `src/`：可复用 Rust library、ADB/SSP 实现与 `handshaker` CLI。
+- `crates/`：Cargo Workspace——`handshaker-core`(协议/传输/Session)、
+  `handshaker-application`(UI 无关业务层,统一契约)、`handshaker-cli`
+  (`handshaker` 可执行文件)、`handshaker-ffi`(稳定 C ABI)。
 - `tools/capture/`：SSP 协议抓包验证工具（Python，经 adb forward 与真机对话并逐字节日志）。
 - `Android_jadx/`、`android_smali/`、`macos/`：本地保留的逆向与反编译资料，不纳入 Git 记录，也不会由本仓库重新分发。
 
@@ -55,19 +57,25 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
   `sync plan/run/watch/status`。
 - **USB AOA 连接（M7，0.6.0）**：传输层抽象（握手/帧读写泛型化，Session 对 TCP/USB 透明）；`rusb` 集成——枚举 accessory（0x18d1）与 Smartisan 常驻 accessory（0x29a9）设备、AOA identification（对照 Mac 版 `sendAOAStartupRequest`：请求码十进制 51/52/53、字符串 0 基 index、UTF-8 编码）与 `--usb [--serial <bus-ports>]` 直连（复用 ADB 裸握手）；`device list` 同时列出 ADB 与 USB 设备；真机完整业务验收通过（连接/文件/传输 MD5/剪贴板/重命名，单连接批量）。
 - **长连接批量会话（0.6.1）**：`handshaker batch` 从 stdin 逐行读取命令、在单个持久连接上顺序执行（心跳保活，规避手机端 accessory 会话单次性）；输出遵循 `--output`，命令级失败继续、致命错误中断、`exit`/`quit`/EOF 结束并 QUIT。
-- **Workspace 拆分与应用服务模型（M8，0.7.0）**：仓库改为 Cargo Workspace（`handshaker-core`/`handshaker-application`/`handshaker-cli`/`handshaker-ffi`），CLI 行为与 JSON 契约不变；冻结应用层 v1 契约（`HandShakerRuntime`、Session/Transfer/事件、`PublicError` 分区码，见 `docs/application-api-v1.md` 与 `docs/architecture.md`）；新增 `handshaker-ffi`（稳定 C ABI 1.0.0：Runtime/设备/连接/文件列表/事件订阅，panic 隔离 + Buffer 所有权，C 与 Swift smoke 测试通过，见 `docs/ffi-v1.md`）。
+- **Workspace 拆分与应用服务模型（M8，0.7.0）**：仓库改为 Cargo Workspace（`handshaker-core`/`handshaker-application`/`handshaker-cli`/`handshaker-ffi`），CLI 行为与 JSON 契约不变；建立应用层 v1 契约（`HandShakerRuntime`、Session/Transfer/事件、`PublicError` 分区码，当前为 preview 状态，见 `docs/application-api-v1.md` 与 `docs/architecture.md`）；新增 `handshaker-ffi`（稳定 C ABI 1.0.0：Runtime/设备/连接/文件列表/事件订阅，panic 隔离 + Buffer 所有权，C 与 Swift smoke 测试通过，见 `docs/ffi-v1.md`）。
 - **CLI 渐进迁移与 FFI 传输面（M8 后续，0.7.1）**：CLI 连接统一走 `HandShakerRuntime`（`session_client` 过渡 API 供未迁移命令复用同一连接，冻结前移除）；`fs ls/stat/exists/mkdir/mv` 与 `fs pull/push` 批量用例迁移到 Application（树枚举与路径逃逸防护保留在 core，CLI 只留参数/确认/展示；`rm`/`count` 因输出契约暂留 core）；`handshaker-ffi` 升至 ABI 1.1.0，导出 `hs_transfer_start_download/start_upload/cancel/get/list`，Swift smoke 覆盖传输面。
-- **FFI 补齐与 CLI 全量迁移(M8 收尾,0.7.2)**:`handshaker-ffi` 升至 ABI 1.2.0,
-  新增 `hs_create_directory` 与 `hs_ping`;CLI `fs rm/count`、`clipboard` 全量、
-  `media` 全量(photo/video/audio/thumbnail)迁移到 `HandShakerRuntime`
-  (Application `DeleteResultDto` 改为携带 `FileEntryDto`,fs.rm JSON 从路径数组
-  变为条目对象数组——兼容性变化见 `docs/m8-migration.md` §7.1);Phase 7 脚本
-  `generate-ffi-header.sh`/`build-ffi-linux.sh` 与 `dist/apple/` 产物;
-  shell/batch/watch/sync 评估保留 core(边界见 §7.2)。
+- **FFI 补齐与 CLI 常用命令迁移（0.7.2）**：`handshaker-ffi` 升至 ABI 1.2.0，
+  新增 `hs_create_directory` 与 `hs_ping`；CLI `fs rm/count`、`clipboard` 全量、
+  `media` 全量（photo/video/audio/thumbnail）迁移到 `HandShakerRuntime`
+  （Application `DeleteResultDto` 改为携带 `FileEntryDto`，fs.rm JSON 从路径数组
+  变为条目对象数组——兼容性变化见 `docs/m8-migration.md` §7.1）；Phase 7 脚本
+  `generate-ffi-header.sh`/`build-ffi-linux.sh` 与 `dist/apple/` 产物；
+  shell/batch/watch/sync 评估保留 core（边界见 §7.2，因此“全量迁移”不成立，
+  当前状态是常用命令已迁移、交互/长连接/同步仍走 Core）。
 - **CI clippy 清零（0.7.3）**：`clippy --all-targets --all-features -D warnings`
   全部告警修复（collapsible-if/match-result-ok/io-other-error/needless-borrow
   等，行为不变）；`BackendEvent::SessionStateChanged` 装箱为
   `Box<SessionSnapshot>`（serde JSON 输出不变，Application 事件 API 源码级调整）。
+- **M8.1 Phase A 契约止血（进行中）**：FFI ABI 单一事实来源建立——Header 注释、
+  `docs/ffi-v1.md` 与新增 `docs/ffi-abi-snapshot.md` 全部对齐 ABI 1.2.0；
+  `scripts/check-ffi-abi.py` 校验符号/签名/ABI 版本注释/snapshot 一致性，
+  CI 新增 ABI 检查与 C/Swift smoke；`APPLICATION_API_VERSION` 改为
+  `1.0.0-preview.1`（v1 契约收口前允许破坏性修改，见 `docs/application-api-v1.md`）。
 - 剪贴板/目录监控之外的推送发送侧仍属于后续里程碑。
 
 ## 命令行教程
@@ -727,17 +735,14 @@ adb forward --list
 
 不要自动删除无法确认归属的 forward。
 
-### 18. 当前 CLI 尚未支持
+### 18. 当前尚未支持
 
-- USB AOA；
-- 多文件和递归目录传输；
-- range 下载和断点续传；
-- 媒体库与缩略图；
-- 目录、剪贴板和媒体变更监控；
-- 照片同步。
+- 断点续传（library 仅提供一次性区间下载 `TransferOptions.offset`，CLI 未暴露）；
+- Swift/GTK/.NET GUI 前端（后端与 FFI 处于 M8.1 收口中，Swift 集成原型可开始）；
+- Linux/Windows 平台 FFI 交付（构建脚本已有，未进 CI 验证）。
 
 完整后续计划见 `plan.md`。
 
 > `GET_DEVICE_INFO` 中向手机报告的主机兼容身份固定为原版 macOS HandShaker
 > `2.5.6 / 408`，用于通过手机端最低主机版本检查；它与本项目自身的 CLI/Cargo
-> 版本 `0.5.0` 相互独立。
+> 版本 `0.7.x` 相互独立。

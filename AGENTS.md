@@ -520,10 +520,12 @@ Application 公开 API 不得出现：
 当前代码中的：
 
 ```rust
-APPLICATION_API_VERSION = "1.0.0"
+APPLICATION_API_VERSION = "1.0.0-preview.1"
 ```
 
-与 Cargo Workspace 版本独立。
+与 Cargo Workspace 版本独立。当前为 preview 状态：v1 契约收口前允许
+破坏性源码级修改（如移除 `session_client()` 过渡入口），正式冻结后
+才移除 `-preview.N` 后缀并执行 major 递增规则。
 
 任何公开契约变化必须判断：
 

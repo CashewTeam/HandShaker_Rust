@@ -38,7 +38,7 @@ handshaker-core(协议、传输、会话)
 - CLI 保留为自动化/调试/无 GUI 入口,输出模型(JSON envelope、退出码)留在 CLI;
 - GUI 只通过 Application/FFI 消费,不接触 Prost、sid、帧、forward 清理。
 
-## 3. 应用服务模型(冻结 v1)
+## 3. 应用服务模型(preview v1)
 
 - `HandShakerRuntime`(非单例,可多实例):create/shutdown(幂等)、
   list_devices、connect/disconnect/get_session_snapshot、list_files、
@@ -53,7 +53,8 @@ handshaker-core(协议、传输、会话)
 
 ## 4. FFI 契约(v1)
 
-见 `docs/ffi-v1.md`。要点:ABI 1.0.0 独立版本;Rust 分配 Rust 释放;
+见 `docs/ffi-v1.md`。要点:ABI 1.2.0 独立版本(Rust 常量/Header/文档/snapshot
+由 `scripts/generate-ffi-header.sh` 校验一致);Rust 分配 Rust 释放;
 所有函数 catch panic;NULL 句柄稳定报错;短操作同步阻塞调用线程
 (调用方在后台线程);事件队列拉取,无跨语言回调。
 
@@ -61,6 +62,8 @@ handshaker-core(协议、传输、会话)
 
 - 协议能力与 M7 一致(ADB/WiFi/USB、文件、剪贴板、媒体、同步、watch);
 - USB accessory 会话单次性、Linux udev、Windows 评估均未变(见 docs/23);
-- CLI fs/clipboard/media/sync/watch 命令仍直连 core(渐进迁移中,
-  `device list` 已走 Application);FFI 导出为最小闭环(设备/会话/文件/事件),
-  传输任务 API 已就绪未导出。
+- CLI fs/clipboard/media 命令已走 Application(渐进迁移中,`device info/ping`/
+  discover/trust/sync/watch 仍直连 core,见 `docs/m8-migration.md` §7);
+  FFI 已导出 23 个符号(设备/会话/文件/传输/事件/ABI 1.2 的
+  `hs_create_directory`/`hs_ping`),stat/move/delete、媒体、剪贴板、
+  信任、批量传输待按需追加。
