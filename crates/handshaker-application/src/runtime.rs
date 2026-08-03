@@ -521,7 +521,15 @@ impl HandShakerRuntime {
         Ok(self.inner.transfers.list())
     }
 
-    async fn session_client(&self, session_id: SessionId) -> AppResult<Arc<HandShakerClient>> {
+    /// Transition API for the M8 CLI migration: hands a not-yet-migrated
+    /// command (or an in-flight transfer task) the core client of an open
+    /// session without opening a second connection. Leaks a core type on
+    /// purpose and is removed once the CLI migration is complete (before the
+    /// v1 freeze is lifted).
+    pub async fn session_client(
+        &self,
+        session_id: SessionId,
+    ) -> AppResult<Arc<HandShakerClient>> {
         let guard = self.inner.sessions.lock().await;
         guard
             .get(&session_id)

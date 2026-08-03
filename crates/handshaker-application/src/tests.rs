@@ -90,6 +90,11 @@ async fn unknown_session_errors_are_stable() {
         .await
         .expect_err("missing session");
     assert_eq!(error.code, PublicErrorCode::SessionNotFound);
+    let error = match runtime.session_client(SessionId(42)).await {
+        Err(error) => error,
+        Ok(_) => panic!("expected missing session"),
+    };
+    assert_eq!(error.code, PublicErrorCode::SessionNotFound);
 }
 
 #[test]

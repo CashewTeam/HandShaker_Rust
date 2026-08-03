@@ -108,6 +108,19 @@ pub struct PublicError {
     pub operation: Option<String>,
 }
 
+impl std::fmt::Display for PublicError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (&self.detail, &self.operation) {
+            (Some(detail), Some(operation)) => {
+                write!(formatter, "{}: {detail} ({operation})", self.code.as_str())
+            }
+            (Some(detail), None) => write!(formatter, "{}: {detail}", self.code.as_str()),
+            (None, Some(operation)) => write!(formatter, "{} ({operation})", self.code.as_str()),
+            (None, None) => formatter.write_str(self.code.as_str()),
+        }
+    }
+}
+
 impl PublicError {
     pub fn new(code: PublicErrorCode, message: impl Into<String>) -> Self {
         Self {

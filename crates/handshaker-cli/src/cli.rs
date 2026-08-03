@@ -20,6 +20,11 @@ use handshaker_core::{
     plan_diff, sync_config,
 };
 
+use handshaker_application::{
+    ConnectRequest, DeviceDescriptor, DeviceId, HandShakerRuntime, ListDevicesRequest,
+    PublicError, RuntimeConfig, SessionId, TransportKind,
+};
+
 use crate::output::{Outcome, render, render_batch_progress};
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -667,15 +672,15 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         }
     }
 
-    let client = connect(&cli).await?;
+    let app = connect(&cli).await?;
     let context = CommandContext {
-        remote_cwd: client.root_path().to_string(),
+        remote_cwd: app.client.root_path().to_string(),
         local_cwd: env::current_dir()?,
         in_shell: false,
     };
     let command = command_name(&cli.command);
-    let outcome = execute_connected(&cli.command, &client, &context, cli.yes, cli.output).await;
-    let close = client.close().await;
+    let outcome = execute_connected(&cli.command, &app, &context, cli.yes, cli.output).await;
+    let close = close_session(app).await;
     match outcome {
         Ok(outcome) => {
             close?;
@@ -765,22 +770,141 @@ fn watch_envelope(info: &DeviceInfo, event: &ClientEvent) -> serde_json::Value {
     })
 }
 
-async fn connect(cli: &Cli) -> Result<HandShakerClient> {
+/// CLI-owned view of an open application session: business services
+/// (runtime), the session id, and the transition client for commands that
+/// are not yet migrated to the application layer (M8 Phase 3).
+pub(crate) struct AppSession {
+    pub runtime: Arc<HandShakerRuntime>,
+    pub session_id: SessionId,
+    pub client: Arc<HandShakerClient>,
+}
+
+/// Build the runtime configuration from CLI options.
+fn runtime_config(cli: &Cli) -> RuntimeConfig {
+    RuntimeConfig {
+        adb_path: PathBuf::from("adb"),
+        default_timeout: cli.timeout,
+        heartbeat_interval: Duration::from_secs(10),
+        state_dir: None,
+        wire_log: cli.wire_log.clone(),
+        event_capacity: 1024,
+    }
+}
+
+/// Resolve the CLI connection target to an application `DeviceDescriptor`.
+/// Mirrors core `ConnectionTarget` semantics: an explicit ADB serial is
+/// looked up among online devices; without one, the single online ADB device
+/// is auto-selected (0/multiple -> DeviceSelection, exit 3); USB uses the
+/// accessory location; WiFi uses `IP:PORT`.
+async fn select_device_descriptor(
+    cli: &Cli,
+    runtime: &HandShakerRuntime,
+) -> Result<DeviceDescriptor> {
+    if cli.usb {
+        let location = cli.serial.clone().unwrap_or_default();
+        return Ok(DeviceDescriptor {
+            id: DeviceId(location.clone()),
+            display_name: if location.is_empty() {
+                None
+            } else {
+                Some(location.clone())
+            },
+            model: None,
+            transport: TransportKind::UsbAccessory,
+            transport_address: location,
+            available: true,
+            adb: None,
+            usb: None,
+        });
+    }
+    if let Some(address) = cli.wifi {
+        return Ok(DeviceDescriptor {
+            id: DeviceId(format!("wifi:{address}")),
+            display_name: Some(address.to_string()),
+            model: None,
+            transport: TransportKind::Wifi,
+            transport_address: address.to_string(),
+            available: true,
+            adb: None,
+            usb: None,
+        });
+    }
+    let devices = runtime
+        .list_devices(ListDevicesRequest {
+            include_adb: true,
+            include_wifi: false,
+            include_usb: false,
+            wifi_browse_timeout: Duration::from_secs(3),
+        })
+        .await
+        .map_err(app_error)?;
+    let online: Vec<_> = devices.into_iter().filter(|d| d.available).collect();
+    match &cli.serial {
+        Some(serial) => online.into_iter().find(|d| &d.id.0 == serial).ok_or_else(|| {
+            Error::DeviceSelection(i18n::format("adb.device_unavailable", &[serial]))
+        }),
+        None => match online.len() {
+            0 => Err(Error::DeviceSelection(
+                i18n::text("adb.no_online_device").to_string(),
+            )),
+            1 => Ok(online.into_iter().next().expect("one device")),
+            count => Err(Error::DeviceSelection(i18n::format(
+                "adb.multiple_devices",
+                &[&count.to_string()],
+            ))),
+        },
+    }
+}
+
+/// Map an application-layer error onto the CLI error taxonomy. Connect-class
+/// failures collapse into `Transport` (exit 4); device-selection errors are
+/// raised directly by the CLI selector, so this path only sees connect-class
+/// failures.
+fn app_error(error: PublicError) -> Error {
+    Error::Transport(error.to_string())
+}
+
+/// Unified close for an application session: drop the CLI's client handle so
+/// the runtime's disconnect takes sole ownership and sends QUIT, then removes
+/// the session from the registry (idempotent).
+async fn close_session(app: AppSession) -> Result<()> {
+    let AppSession {
+        runtime,
+        session_id,
+        client,
+    } = app;
+    drop(client);
+    runtime
+        .disconnect(session_id)
+        .await
+        .map_err(app_error)
+}
+
+async fn connect(cli: &Cli) -> Result<AppSession> {
     if cli.wifi.is_some() {
         // First connects and resets require acting on the phone; give a hint
         // before the handshake blocks waiting for the trust dialog.
         eprintln!("{}", ZhCn.text(MessageKey::WifiTrustHint));
     }
-    let target = connection_target(cli);
-    HandShakerClient::connect(
-        target,
-        ClientOptions {
-            timeout: cli.timeout,
-            wire_log: cli.wire_log.clone(),
-            ..Default::default()
-        },
-    )
-    .await
+    let runtime = Arc::new(
+        HandShakerRuntime::create(runtime_config(cli))
+            .await
+            .map_err(app_error)?,
+    );
+    let device = select_device_descriptor(cli, &runtime).await?;
+    let session_id = runtime
+        .connect(ConnectRequest { device })
+        .await
+        .map_err(app_error)?;
+    let client = runtime
+        .session_client(session_id)
+        .await
+        .map_err(app_error)?;
+    Ok(AppSession {
+        runtime,
+        session_id,
+        client,
+    })
 }
 
 /// Connect for `watch`, enabling every phone-side push callback so directory,
@@ -1032,12 +1156,13 @@ fn parse_socket_addr(value: &str) -> std::result::Result<SocketAddr, String> {
 
 async fn execute_connected(
     command: &Command,
-    client: &HandShakerClient,
+    session: &AppSession,
     context: &CommandContext,
     yes: bool,
     format: OutputFormat,
 ) -> Result<Outcome> {
     let localizer = ZhCn;
+    let client = &session.client;
     let outcome = match command {
         Command::Device(DeviceCommand::List) => {
             return device_list(Duration::from_secs(30)).await;
@@ -2192,7 +2317,7 @@ fn thumbnail_file_name(target: &str, index: usize) -> String {
 }
 
 async fn run_shell(cli: &Cli) -> Result<()> {
-    let client = connect(cli).await?;
+    let app = connect(cli).await?;
     let localizer = ZhCn;
     let mut editor = DefaultEditor::new().map_err(|error| {
         Error::LocalIo(i18n::format(
@@ -2201,6 +2326,7 @@ async fn run_shell(cli: &Cli) -> Result<()> {
         ))
     })?;
     println!("{}", localizer.text(MessageKey::ShellWelcome));
+    let client = &app.client;
     let mut context = CommandContext {
         remote_cwd: client.root_path().to_string(),
         local_cwd: env::current_dir()?,
@@ -2330,7 +2456,7 @@ async fn run_shell(cli: &Cli) -> Result<()> {
         let operation = tokio::select! {
             result = execute_connected(
                 &parsed.command,
-                &client,
+                &app,
                 &context,
                 parsed.yes,
                 OutputFormat::Human,
@@ -2366,7 +2492,7 @@ async fn run_shell(cli: &Cli) -> Result<()> {
             }
         }
     }
-    let close = client.close().await;
+    let close = close_session(app).await;
     println!("{}", localizer.text(MessageKey::ShellBye));
     if let Some(error) = command_error {
         return Err(error);
@@ -2382,8 +2508,9 @@ async fn run_shell(cli: &Cli) -> Result<()> {
 /// stderr and the run continues, except transport/handshake/timeout/protocol
 /// errors which abort. Exits non-zero when any command failed.
 async fn run_batch(cli: &Cli) -> Result<()> {
-    let client = connect(cli).await?;
+    let app = connect(cli).await?;
     let localizer = ZhCn;
+    let client = &app.client;
     let mut context = CommandContext {
         remote_cwd: client.root_path().to_string(),
         local_cwd: env::current_dir()?,
@@ -2498,7 +2625,7 @@ async fn run_batch(cli: &Cli) -> Result<()> {
             failed += 1;
             continue;
         }
-        match execute_connected(&parsed.command, &client, &context, parsed.yes, cli.output).await {
+        match execute_connected(&parsed.command, &app, &context, parsed.yes, cli.output).await {
             Ok(outcome) => {
                 if let Err(error) = render(&outcome, cli.output) {
                     // Output write failure (e.g. EPIPE when piping stdout to
@@ -2531,7 +2658,7 @@ async fn run_batch(cli: &Cli) -> Result<()> {
             }
         }
     }
-    let close = client.close().await;
+    let close = close_session(app).await;
     // Abort-class errors (transport/handshake/timeout/protocol, stdin or
     // render failures) take precedence over the per-command failure summary so
     // scripts can tell an aborted run from a completed one.
