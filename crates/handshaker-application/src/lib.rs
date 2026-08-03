@@ -6,6 +6,7 @@
 //! - `HandShakerRuntime` is the single entry point for GUI/bindings;
 //! - public DTOs and error codes are the v1 contract (see docs).
 
+mod discovery;
 mod dto;
 mod error;
 mod event;
@@ -13,6 +14,7 @@ mod media;
 mod runtime;
 mod transfer;
 
+pub use discovery::{DeviceDiscoveryResult, DeviceDiscoveryWarning};
 pub use dto::{
     AdbDetailDto, ClipboardEntryDto, ConnectRequest, CountFilesRequest, CreateDirectoryRequest,
     DeletePathsRequest, DeleteResultDto, DeviceDescriptor, DeviceId, DeviceInfoDto, FileEntryDto,

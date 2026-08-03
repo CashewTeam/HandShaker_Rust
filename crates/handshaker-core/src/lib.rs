@@ -28,7 +28,7 @@ pub fn list_usb_accessories() -> Result<Vec<UsbAccessory>> {
     transport::usb::list_accessories()
 }
 
-pub use transport::usb::UsbAccessory;
+pub use transport::usb::{AccessoryMode, UsbAccessory};
 
 pub use cancellation::{CancellationInfo, CancellationOrigin, CancellationToken, RequestOptions};
 pub use client::{ClientOptions, ConnectionTarget, EventCallbacks, HandShakerClient, PingResult};

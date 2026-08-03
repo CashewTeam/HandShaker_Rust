@@ -393,6 +393,109 @@ fn device_descriptor_json_contract_is_stable() {
     assert_eq!(decoded, device);
 }
 
+// ---- Phase D / D1: device discovery diagnostics ----
+
+#[tokio::test]
+async fn discover_devices_with_all_transports_disabled_is_empty_and_clean() {
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    let result = runtime
+        .discover_devices(crate::dto::ListDevicesRequest {
+            include_adb: false,
+            include_wifi: false,
+            include_usb: false,
+            wifi_browse_timeout: Duration::from_millis(1),
+        })
+        .await
+        .expect("disabled discovery is not an error");
+    assert!(result.devices.is_empty());
+    assert!(result.warnings.is_empty());
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn discover_devices_reports_missing_adb_as_warning() {
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    // test_config uses an adb path that cannot exist: the sweep must succeed
+    // and surface the ADB failure as a structured warning, never swallow it.
+    let result = runtime
+        .discover_devices(crate::dto::ListDevicesRequest {
+            include_adb: true,
+            include_wifi: false,
+            include_usb: false,
+            wifi_browse_timeout: Duration::from_millis(1),
+        })
+        .await
+        .expect("adb failure must not fail the whole sweep");
+    assert!(result.devices.is_empty());
+    assert_eq!(result.warnings.len(), 1);
+    let warning = &result.warnings[0];
+    assert_eq!(warning.transport, TransportKind::Adb);
+    assert_eq!(warning.error.code, PublicErrorCode::AdbUnavailable);
+    assert_eq!(
+        warning.error.operation.as_deref(),
+        Some("discover_devices.adb")
+    );
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn discover_devices_after_shutdown_returns_runtime_closed() {
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    runtime.shutdown().await.expect("shutdown");
+    let error = runtime
+        .discover_devices(crate::dto::ListDevicesRequest {
+            include_adb: false,
+            include_wifi: false,
+            include_usb: false,
+            wifi_browse_timeout: Duration::from_millis(1),
+        })
+        .await
+        .expect_err("must be closed");
+    assert_eq!(error.code, PublicErrorCode::RuntimeClosed);
+}
+
+#[test]
+fn discovery_result_json_contract_is_stable() {
+    let result = crate::discovery::DeviceDiscoveryResult {
+        devices: vec![DeviceDescriptor {
+            id: DeviceId("wifi-endpoint:handshaker_ssp_:192.168.2.47:45656".into()),
+            display_name: Some("Android-2.local".into()),
+            model: None,
+            transport: TransportKind::Wifi,
+            transport_address: "192.168.2.47:45656".into(),
+            available: true,
+            adb: None,
+            usb: None,
+        }],
+        warnings: vec![crate::discovery::DeviceDiscoveryWarning {
+            transport: TransportKind::Adb,
+            error: crate::error::PublicError::new(
+                PublicErrorCode::AdbUnavailable,
+                "adb unavailable",
+            )
+            .operation("discover_devices.adb"),
+        }],
+    };
+    let json = serde_json::to_value(&result).expect("serialize");
+    // Field names and enum tokens are the frozen contract.
+    assert_eq!(json["devices"][0]["transport"], "wifi");
+    assert_eq!(
+        json["devices"][0]["id"],
+        "wifi-endpoint:handshaker_ssp_:192.168.2.47:45656"
+    );
+    assert_eq!(json["warnings"][0]["transport"], "adb");
+    assert_eq!(json["warnings"][0]["error"]["code"], "adb_unavailable");
+    let decoded: crate::discovery::DeviceDiscoveryResult =
+        serde_json::from_value(json).expect("deserialize");
+    assert_eq!(decoded, result);
+}
+
 #[test]
 fn session_state_json_contract_is_stable() {
     let states = [

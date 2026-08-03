@@ -15,9 +15,14 @@ use handshaker_core::{
     MediaKind, MediaLibraryChange, RemoteFile,
 };
 
+use crate::discovery::{
+    DeviceDiscoveryResult, DeviceDiscoveryWarning, adb_device_to_descriptor,
+    deduplicate_discovered_devices, sort_discovered_devices, usb_device_to_descriptor,
+    wifi_device_to_descriptor,
+};
 use crate::dto::{
     ClipboardEntryDto, ConnectRequest, CountFilesRequest, CreateDirectoryRequest,
-    DeletePathsRequest, DeleteResultDto, DeviceDescriptor, DeviceId, DeviceInfoDto, FileEntryDto,
+    DeletePathsRequest, DeleteResultDto, DeviceDescriptor, DeviceInfoDto, FileEntryDto,
     ListDevicesRequest, ListFilesRequest, MediaChangeDto, MediaChangeItemDto, MediaKindDto,
     MovePathRequest, PingResultDto, RemoteFileChangeDto, RemoteFileChangeKind, RuntimeConfig,
     SessionId, SessionSnapshot, SessionState, StatFileRequest, TransportKind,
@@ -214,98 +219,68 @@ impl HandShakerRuntime {
         Ok(())
     }
 
-    /// List devices across the enabled transports.
+    /// Discover devices across the enabled transports with per-transport
+    /// diagnostics (Phase D / D1). A single broken transport never fails the
+    /// whole sweep: its failure is reported as a structured warning next to
+    /// the devices other transports found. Whole-request errors (runtime
+    /// closed) still return `Err`.
+    pub async fn discover_devices(
+        &self,
+        request: ListDevicesRequest,
+    ) -> AppResult<DeviceDiscoveryResult> {
+        self.ensure_open()?;
+        let mut devices = Vec::new();
+        let mut warnings = Vec::new();
+
+        if request.include_adb {
+            match HandShakerClient::list_adb_devices_with_timeout(
+                &self.inner.config.adb_path,
+                self.inner.config.default_timeout,
+            )
+            .await
+            {
+                Ok(list) => devices.extend(list.into_iter().map(adb_device_to_descriptor)),
+                Err(error) => warnings.push(DeviceDiscoveryWarning {
+                    transport: TransportKind::Adb,
+                    error: from_core_error(error, "discover_devices.adb"),
+                }),
+            }
+        }
+
+        if request.include_wifi {
+            match HandShakerClient::discover_wifi_devices(request.wifi_browse_timeout).await {
+                Ok(list) => devices.extend(list.into_iter().map(wifi_device_to_descriptor)),
+                Err(error) => warnings.push(DeviceDiscoveryWarning {
+                    transport: TransportKind::Wifi,
+                    error: from_core_error(error, "discover_devices.wifi"),
+                }),
+            }
+        }
+
+        if request.include_usb {
+            match handshaker_core::list_usb_accessories() {
+                Ok(list) => devices.extend(list.into_iter().map(usb_device_to_descriptor)),
+                Err(error) => warnings.push(DeviceDiscoveryWarning {
+                    transport: TransportKind::UsbAccessory,
+                    error: from_core_error(error, "discover_devices.usb"),
+                }),
+            }
+        }
+
+        deduplicate_discovered_devices(&mut devices);
+        sort_discovered_devices(&mut devices);
+
+        Ok(DeviceDiscoveryResult { devices, warnings })
+    }
+
+    /// Preview-period compatibility wrapper over [`Self::discover_devices`]:
+    /// returns only the devices, dropping per-transport warnings. Removed
+    /// before the v1 freeze once callers have migrated to `discover_devices`.
     pub async fn list_devices(
         &self,
         request: ListDevicesRequest,
     ) -> AppResult<Vec<DeviceDescriptor>> {
-        self.ensure_open()?;
-        let mut devices = Vec::new();
-        if request.include_adb {
-            let adb_devices = HandShakerClient::list_adb_devices_with_timeout(
-                &self.inner.config.adb_path,
-                self.inner.config.default_timeout,
-            )
-            .await;
-            match adb_devices {
-                Ok(list) => {
-                    for device in list {
-                        devices.push(DeviceDescriptor {
-                            id: DeviceId(device.serial.clone()),
-                            display_name: Some(device.serial.clone()),
-                            model: device.model.clone(),
-                            transport: TransportKind::Adb,
-                            transport_address: device.serial.clone(),
-                            available: device.state == "device",
-                            adb: Some(crate::dto::AdbDetailDto {
-                                state: device.state.clone(),
-                                product: device.product.clone(),
-                                model: device.model.clone(),
-                                device: device.device.clone(),
-                            }),
-                            usb: None,
-                        });
-                    }
-                }
-                Err(error) => {
-                    // ADB missing/broken is a partial failure: surface as a
-                    // non-fatal device-list entry only if no other transport
-                    // can report; otherwise keep the error as detail-less.
-                    let _ = error;
-                }
-            }
-        }
-        if request.include_wifi
-            && let Ok(list) =
-                HandShakerClient::discover_wifi_devices(request.wifi_browse_timeout).await
-        {
-            for device in list {
-                let address = device
-                    .addresses
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| device.host.clone());
-                devices.push(DeviceDescriptor {
-                    id: DeviceId(format!("wifi:{}:{}", address, device.port)),
-                    display_name: Some(device.host.clone()),
-                    model: None,
-                    transport: TransportKind::Wifi,
-                    transport_address: format!("{address}:{}", device.port),
-                    available: true,
-                    adb: None,
-                    usb: None,
-                });
-            }
-        }
-        if request.include_usb {
-            let accessories = handshaker_core::list_usb_accessories()
-                .map_err(|error| from_core_error(error, "list_devices"))?;
-            for accessory in accessories {
-                devices.push(DeviceDescriptor {
-                    id: DeviceId(accessory.location.clone()),
-                    display_name: accessory
-                        .serial
-                        .clone()
-                        .or(Some(accessory.location.clone())),
-                    model: None,
-                    transport: TransportKind::UsbAccessory,
-                    transport_address: format!(
-                        "0x{:04x}:0x{:04x}",
-                        accessory.vendor_id, accessory.product_id
-                    ),
-                    available: true,
-                    adb: None,
-                    usb: Some(crate::dto::UsbDetailDto {
-                        bus_number: accessory.bus_number,
-                        serial: accessory.serial.clone(),
-                        vendor_id: accessory.vendor_id,
-                        product_id: accessory.product_id,
-                        mode: format!("{:?}", accessory.mode),
-                    }),
-                });
-            }
-        }
-        Ok(devices)
+        Ok(self.discover_devices(request).await?.devices)
     }
 
     /// Open a session for the requested device.
