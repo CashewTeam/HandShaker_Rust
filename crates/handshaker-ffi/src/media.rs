@@ -256,15 +256,6 @@ pub unsafe extern "C" fn hs_media_thumbnail(
                 thumbnail_error: false,
             })
             .collect();
-        let thumbnails = match runtime._tokio.block_on(async {
-            runtime
-                .app
-                .get_thumbnails(SessionId(session_id), &images, &videos, &audio_albums)
-                .await
-        }) {
-            Ok(thumbnails) => thumbnails,
-            Err(error) => return err(&error),
-        };
         // Cache key is per-device (review fix): two phones sharing the same
         // remote path must not collide. The phone uuid (stable identity) is
         // preferred; the session id is the fallback for snapshots without it.
@@ -282,69 +273,141 @@ pub unsafe extern "C" fn hs_media_thumbnail(
             Err(_) => session_id.to_string(),
         };
         let cache_dir = ffi_try!(thumbnail_cache_dir(runtime, "media_thumbnail"));
-        let mut out_images = Vec::new();
-        for image in &thumbnails.images {
-            if let (Some(path), Some(bytes)) = (&image.path, &image.thumbnail) {
-                if bytes.is_empty() {
-                    continue;
+        // Every requested entry, flattened with its cache kind.
+        let requested: Vec<(String, String)> = images
+            .iter()
+            .filter_map(|image| image.path.clone().map(|path| ("image".to_string(), path)))
+            .chain(
+                videos
+                    .iter()
+                    .filter_map(|video| video.path.clone().map(|path| ("video".to_string(), path))),
+            )
+            .chain(
+                audio_albums
+                    .iter()
+                    .filter_map(|album| album.path.clone().map(|path| ("audio".to_string(), path))),
+            )
+            .collect();
+        // All-hit fast path (review fix): when every requested thumbnail is
+        // already cached, skip the device round-trip entirely — the cache is
+        // a cache, not just a write-skipper.
+        let cached_entries: Vec<(String, String, String, u64)> = if !requested.is_empty()
+            && requested
+                .iter()
+                .all(|(kind, path)| cache_path_for(&cache_dir, kind, &device_key, path).exists())
+        {
+            requested
+                .iter()
+                .map(|(kind, path)| {
+                    let cache_path = cache_path_for(&cache_dir, kind, &device_key, path);
+                    let size = std::fs::metadata(&cache_path)
+                        .map(|meta| meta.len())
+                        .unwrap_or(0);
+                    (
+                        kind.clone(),
+                        path.clone(),
+                        cache_path.display().to_string(),
+                        size,
+                    )
+                })
+                .collect()
+        } else {
+            let thumbnails = match runtime._tokio.block_on(async {
+                runtime
+                    .app
+                    .get_thumbnails(SessionId(session_id), &images, &videos, &audio_albums)
+                    .await
+            }) {
+                Ok(thumbnails) => thumbnails,
+                Err(error) => return err(&error),
+            };
+            let mut entries = Vec::new();
+            for image in &thumbnails.images {
+                if let (Some(path), Some(bytes)) = (&image.path, &image.thumbnail) {
+                    if bytes.is_empty() {
+                        continue;
+                    }
+                    let cache_path = ffi_try!(cache_thumbnail(
+                        &cache_dir,
+                        "image",
+                        &device_key,
+                        path,
+                        bytes,
+                        "media_thumbnail"
+                    ));
+                    entries.push((
+                        "image".to_string(),
+                        path.clone(),
+                        cache_path,
+                        bytes.len() as u64,
+                    ));
                 }
-                let cache_path = ffi_try!(cache_thumbnail(
-                    &cache_dir,
-                    "image",
-                    &device_key,
-                    path,
-                    bytes,
-                    "media_thumbnail"
-                ));
-                out_images.push(serde_json::json!({
-                    "path": path,
-                    "cache_path": cache_path,
-                    "size": bytes.len(),
-                }));
             }
-        }
-        let mut out_videos = Vec::new();
-        for video in &thumbnails.videos {
-            if let (Some(path), Some(bytes)) = (&video.path, &video.thumbnail) {
-                if bytes.is_empty() {
-                    continue;
+            for video in &thumbnails.videos {
+                if let (Some(path), Some(bytes)) = (&video.path, &video.thumbnail) {
+                    if bytes.is_empty() {
+                        continue;
+                    }
+                    let cache_path = ffi_try!(cache_thumbnail(
+                        &cache_dir,
+                        "video",
+                        &device_key,
+                        path,
+                        bytes,
+                        "media_thumbnail"
+                    ));
+                    entries.push((
+                        "video".to_string(),
+                        path.clone(),
+                        cache_path,
+                        bytes.len() as u64,
+                    ));
                 }
-                let cache_path = ffi_try!(cache_thumbnail(
-                    &cache_dir,
-                    "video",
-                    &device_key,
-                    path,
-                    bytes,
-                    "media_thumbnail"
-                ));
-                out_videos.push(serde_json::json!({
-                    "path": path,
-                    "cache_path": cache_path,
-                    "size": bytes.len(),
-                }));
             }
-        }
-        let mut out_audio_albums = Vec::new();
-        for album in &thumbnails.audio_albums {
-            if let (Some(path), Some(bytes)) = (&album.path, &album.thumbnail) {
-                if bytes.is_empty() {
-                    continue;
+            for album in &thumbnails.audio_albums {
+                if let (Some(path), Some(bytes)) = (&album.path, &album.thumbnail) {
+                    if bytes.is_empty() {
+                        continue;
+                    }
+                    let cache_path = ffi_try!(cache_thumbnail(
+                        &cache_dir,
+                        "audio",
+                        &device_key,
+                        path,
+                        bytes,
+                        "media_thumbnail"
+                    ));
+                    entries.push((
+                        "audio".to_string(),
+                        path.clone(),
+                        cache_path,
+                        bytes.len() as u64,
+                    ));
                 }
-                let cache_path = ffi_try!(cache_thumbnail(
-                    &cache_dir,
-                    "audio",
-                    &device_key,
-                    path,
-                    bytes,
-                    "media_thumbnail"
-                ));
-                out_audio_albums.push(serde_json::json!({
-                    "path": path,
-                    "cache_path": cache_path,
-                    "size": bytes.len(),
-                }));
             }
-        }
+            entries
+        };
+        let out_images: Vec<serde_json::Value> = cached_entries
+            .iter()
+            .filter(|(kind, _, _, _)| kind == "image")
+            .map(|(_, path, cache_path, size)| {
+                serde_json::json!({ "path": path, "cache_path": cache_path, "size": size })
+            })
+            .collect();
+        let out_videos: Vec<serde_json::Value> = cached_entries
+            .iter()
+            .filter(|(kind, _, _, _)| kind == "video")
+            .map(|(_, path, cache_path, size)| {
+                serde_json::json!({ "path": path, "cache_path": cache_path, "size": size })
+            })
+            .collect();
+        let out_audio_albums: Vec<serde_json::Value> = cached_entries
+            .iter()
+            .filter(|(kind, _, _, _)| kind == "audio")
+            .map(|(_, path, cache_path, size)| {
+                serde_json::json!({ "path": path, "cache_path": cache_path, "size": size })
+            })
+            .collect();
         ok(&serde_json::json!({
             "images": out_images,
             "videos": out_videos,
@@ -409,13 +472,23 @@ fn default_state_dir() -> Option<PathBuf> {
     }
 }
 
+/// The on-disk cache path for one thumbnail (stable across calls).
+fn cache_path_for(cache_dir: &Path, kind: &str, device_key: &str, remote_path: &str) -> PathBuf {
+    let device = sanitize_cache_component(device_key);
+    cache_dir.join(format!(
+        "{device}-{kind}-{:016x}.thumb",
+        fnv1a64(remote_path)
+    ))
+}
+
 /// Write one thumbnail to the cache (or reuse the existing file) and return
 /// its absolute path as a string. The file name is
 /// `<device_key>-<kind>-<fnv1a64(remote_path) hex>.thumb`; the hash is a
 /// simple stable 64-bit FNV-1a (no new dependencies) and the device key
 /// keeps distinct phones from colliding on equal remote paths. Writes are
-/// atomic (temp file + rename) so concurrent callers never observe a
-/// half-written cache entry.
+/// atomic (temp file + rename) with a unique temp suffix so concurrent
+/// callers never observe a half-written cache entry or clobber each
+/// other's temp file.
 fn cache_thumbnail(
     cache_dir: &Path,
     kind: &str,
@@ -424,11 +497,20 @@ fn cache_thumbnail(
     bytes: &[u8],
     operation: &str,
 ) -> Result<String, HsCallResult> {
-    let device = sanitize_cache_component(device_key);
-    let file_name = format!("{device}-{kind}-{:016x}.thumb", fnv1a64(remote_path));
-    let tmp_name = format!("{file_name}.tmp");
-    let path = cache_dir.join(&file_name);
+    let path = cache_path_for(cache_dir, kind, device_key, remote_path);
     if !path.exists() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let tmp_name = format!(
+            "{}.{}.{}.tmp",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("thumb"),
+            std::process::id(),
+            nanos
+        );
         let tmp = cache_dir.join(tmp_name);
         std::fs::write(&tmp, bytes).map_err(|error| {
             err(

@@ -81,7 +81,7 @@ pub unsafe extern "C" fn hs_runtime_diagnostics(runtime: *mut c_void) -> HsCallR
             "active_sessions": active_sessions,
             "active_transfers": active_transfers,
             "capabilities": [
-                "files", "clipboard", "trust", "media", "batch", "sync",
+                "files", "clipboard", "trust", "media", "batch",
                 "monitor", "events", "discovery", "diagnostics",
             ],
         }))
@@ -114,7 +114,13 @@ fn adb_probe(adb_path: &str) -> (bool, Option<String>) {
                 return (false, None);
             }
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
-            Err(_) => return (false, None),
+            // A try_wait error still leaves the child behind: kill + reap so
+            // a rare poll failure cannot leak a zombie (review fix).
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return (false, None);
+            }
         }
     };
     if !status.success() {
@@ -199,7 +205,6 @@ mod tests {
             "trust",
             "media",
             "batch",
-            "sync",
             "monitor",
             "events",
             "discovery",

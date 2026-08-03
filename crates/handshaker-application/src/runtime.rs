@@ -1191,7 +1191,7 @@ impl HandShakerRuntime {
                                 PublicErrorCode::RemoteIo
                             },
                             format!(
-                                "{} of {} plan items failed",
+                                "{} file(s) failed across {} plan items",
                                 result.failures.len(),
                                 item_count
                             ),
