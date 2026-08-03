@@ -123,6 +123,12 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
   探测/会话与传输计数/能力列表）。Application 相应新增
   `start_batch_download/start_batch_upload`/`session_count` 与
   TransferSnapshot 扩展（serde 兼容）。
+- **M8.2 Photo-sync FFI（已完成，ABI 1.4.0，50 个导出符号）**：
+  `hs_sync_plan`/`hs_sync_start`（后台运行立即返回 profile_id）/
+  `hs_sync_status`/`hs_sync_stop`/`hs_sync_start_watch`/`hs_sync_stop_watch`；
+  进度用 status 轮询或事件订阅（SyncWatchApplied/TransferUpdated/
+  Warning），编排由调用方完成（plan → start → poll/events →
+  start_watch → stop_watch/stop），每个调用都是短调用。
 - 剪贴板/目录监控之外的推送发送侧仍属于后续里程碑。
 
 ## 命令行教程
