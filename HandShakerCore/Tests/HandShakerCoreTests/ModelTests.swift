@@ -241,17 +241,17 @@ final class ModelTests: XCTestCase {
     }
 
     func testMediaLibraryShapeDecodes() throws {
-        // PhotoLibraryDto shape (ffi/src/media.rs:43): images with
-        // thumbnail as base64 JSON bytes.
+        // PhotoLibraryDto shape (ffi/src/media.rs:43): thumbnail bytes
+        // travel as a JSON number array (Rust Vec<u8> serde output).
         let json = """
         {"images":[{"path":"/a.jpg","size":100,"starred":true,"thumbnail_error":false, \
-        "thumbnail":"AQID"}],"albums":[{"path":"/alb","album_id":1,"name":"A", \
+        "thumbnail":[1,2,3]}],"albums":[{"path":"/alb","album_id":1,"name":"A", \
         "cover_image":{"path":"/a.jpg","size":0,"starred":false,"thumbnail_error":false}}],\
         "camera_album_id":5}
         """
         let library = try decoder.decode(PhotoLibrary.self, from: Data(json.utf8))
         XCTAssertEqual(library.images.count, 1)
-        XCTAssertEqual(library.images[0].thumbnail, Data([1, 2, 3]))
+        XCTAssertEqual(library.images[0].thumbnailData, Data([1, 2, 3]))
         XCTAssertEqual(library.images[0].starred, true)
         XCTAssertEqual(library.albums[0].name, "A")
         XCTAssertEqual(library.albums[0].coverImage?.path, "/a.jpg")

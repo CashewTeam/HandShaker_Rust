@@ -28,9 +28,9 @@ public struct ImageFile: Codable, Sendable, Equatable {
     public let mediaID: UInt64?
     public let albumID: UInt64?
     public let mimeType: String?
-    /// Thumbnail bytes (JSON base64); only present in thumbnail fetches,
-    /// not in library snapshots.
-    public let thumbnail: Data?
+    /// Thumbnail bytes. Rust serializes `Vec<u8>` as a JSON number array
+    /// (never base64); `thumbnailData` offers the byte view.
+    public let thumbnail: [UInt8]?
     public let albumName: String?
     public let dateTaken: UInt64?
     public let latitude: String?
@@ -39,6 +39,9 @@ public struct ImageFile: Codable, Sendable, Equatable {
     public let title: String?
     public let thumbnailError: Bool
     public let starred: Bool
+
+    /// Byte view of `thumbnail` (the JSON wire format is a number array).
+    public var thumbnailData: Data? { thumbnail.map(Data.init) }
 
     private enum CodingKeys: String, CodingKey {
         case path
@@ -105,9 +108,12 @@ public struct VideoFile: Codable, Sendable, Equatable {
     public let mediaID: UInt64?
     public let albumID: UInt64?
     public let mimeType: String?
-    public let thumbnail: Data?
+    public let thumbnail: [UInt8]?
     public let thumbnailError: Bool
     public let duration: Double?
+
+    /// Byte view of `thumbnail` (the JSON wire format is a number array).
+    public var thumbnailData: Data? { thumbnail.map(Data.init) }
 
     private enum CodingKeys: String, CodingKey {
         case path
@@ -196,8 +202,11 @@ public struct AudioAlbum: Codable, Sendable, Equatable {
     public let artistID: UInt64?
     public let artist: String?
     public let year: UInt32?
-    public let thumbnail: Data?
+    public let thumbnail: [UInt8]?
     public let thumbnailError: Bool
+
+    /// Byte view of `thumbnail` (the JSON wire format is a number array).
+    public var thumbnailData: Data? { thumbnail.map(Data.init) }
 
     private enum CodingKeys: String, CodingKey {
         case path
@@ -315,6 +324,15 @@ public struct MediaChange: Codable, Sendable, Equatable {
     public let added: [MediaChangeItem]
     public let deleted: [MediaChangeItem]
     public let updated: [MediaChangeItem]
+
+    /// Public memberwise initializer (the synthesized one is internal and
+    /// invisible to the test target).
+    public init(mediaKind: MediaKind, added: [MediaChangeItem], deleted: [MediaChangeItem], updated: [MediaChangeItem]) {
+        self.mediaKind = mediaKind
+        self.added = added
+        self.deleted = deleted
+        self.updated = updated
+    }
 
     private enum CodingKeys: String, CodingKey {
         case mediaKind = "media_kind"
