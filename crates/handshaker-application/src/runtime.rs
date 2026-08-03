@@ -346,13 +346,17 @@ impl HandShakerRuntime {
         let device_info_shared = Arc::new(std::sync::RwLock::new(device_info_to_dto(&device_info)));
         // Forward core typed events to the runtime EventHub for the whole
         // session lifetime (M8.1 Phase C / C1). The task captures only the
-        // descriptor + shared device-info DTO + hub, never the session or
-        // client Arc, so `close_session`'s `Arc::try_unwrap` still works.
+        // descriptor + shared device-info DTO + a Weak RuntimeInner, never
+        // the session or client Arc, so `close_session`'s `Arc::try_unwrap`
+        // still works. The Weak runtime lets an unexpected event-stream close
+        // mark an otherwise-idle session as failed.
         let event_task = tokio::spawn(run_event_bridge(
             client.subscribe_events(EventFilter::all()),
+            id,
             request.device.clone(),
             device_info_shared.clone(),
             self.inner.event_hub.clone(),
+            Arc::downgrade(&self.inner),
         ));
         let session = Arc::new(ActiveSession {
             client: Arc::new(client),
@@ -430,13 +434,29 @@ impl HandShakerRuntime {
         // Cancel the session's transfers; wait bounded for the tasks so they
         // release their client Arcs before the explicit close below.
         let joins = self.inner.transfers.cancel_for_session(session_id);
-        for join in joins {
-            let _ = tokio::time::timeout(SESSION_CLOSE_DEADLINE, join).await;
+        let mut aborted_transfer_tasks = 0usize;
+        for mut join in joins {
+            if tokio::time::timeout(SESSION_CLOSE_DEADLINE, &mut join)
+                .await
+                .is_err()
+            {
+                // A deadline is not proof that a task stopped. Abort it and
+                // await the cancellation so no transfer task can keep the
+                // client alive after disconnect/shutdown returns.
+                join.abort();
+                let _ = join.await;
+                aborted_transfer_tasks += 1;
+            }
         }
 
         // Snapshot fields before consuming the session for the explicit close.
         let closed_snapshot = session.snapshot(session_id, SessionState::Closed);
-        let mut warning: Option<PublicError> = None;
+        let mut warning = (aborted_transfer_tasks > 0).then(|| {
+            PublicError::new(
+                PublicErrorCode::Internal,
+                format!("aborted {aborted_transfer_tasks} transfer task(s) after close deadline"),
+            )
+        });
         let mut close_error: Option<PublicError> = None;
         match Arc::try_unwrap(session) {
             Ok(active) => {
@@ -1094,20 +1114,42 @@ pub(crate) fn connection_lost_code(code: PublicErrorCode) -> bool {
 /// events never panic the hub — they map to safe `Warning`s.
 async fn run_event_bridge(
     mut subscription: EventSubscription,
+    session_id: SessionId,
     device: DeviceDescriptor,
     device_info: Arc<std::sync::RwLock<DeviceInfoDto>>,
     event_hub: EventHub,
+    runtime: std::sync::Weak<RuntimeInner>,
 ) {
     loop {
         match subscription.recv().await {
-            Ok(event) => event_hub.publish(bridge_client_event(event, &device, &device_info)),
+            Ok(event) => event_hub.publish(bridge_client_event(
+                event,
+                session_id,
+                &device,
+                &device_info,
+            )),
             Err(EventStreamError::Lagged { missed }) => {
                 event_hub.publish(BackendEvent::Warning(PublicError::new(
                     PublicErrorCode::InvalidState,
                     format!("core event stream lagged; missed {missed} events"),
                 )));
             }
-            Err(EventStreamError::Closed) => return,
+            Err(EventStreamError::Closed) => {
+                // During explicit disconnect/shutdown the session has already
+                // been removed from the registry, so this is a no-op. If the
+                // phone/transport disappears while idle, the entry is still
+                // present and must transition Ready -> Failed immediately.
+                if let Some(runtime) = runtime.upgrade() {
+                    mark_connection_lost(
+                        &runtime.sessions,
+                        &runtime.transfers,
+                        session_id,
+                        &runtime.event_hub,
+                    )
+                    .await;
+                }
+                return;
+            }
         }
     }
 }
@@ -1118,6 +1160,7 @@ async fn run_event_bridge(
 /// or wire payloads across the application boundary.
 pub(crate) fn bridge_client_event(
     event: ClientEvent,
+    session_id: SessionId,
     device: &DeviceDescriptor,
     device_info: &std::sync::RwLock<DeviceInfoDto>,
 ) -> BackendEvent {
@@ -1127,9 +1170,13 @@ pub(crate) fn bridge_client_event(
             if let Ok(mut guard) = device_info.write() {
                 *guard = dto;
             }
-            BackendEvent::DeviceUpdated(device.clone())
+            BackendEvent::DeviceUpdated {
+                session_id,
+                device: device.clone(),
+            }
         }
         ClientEvent::ClipboardChanged(entries) => BackendEvent::ClipboardChanged {
+            session_id,
             entries: entries
                 .into_iter()
                 .map(|entry| ClipboardEntryDto {
@@ -1138,37 +1185,44 @@ pub(crate) fn bridge_client_event(
                 })
                 .collect(),
         },
-        ClientEvent::MediaLibraryChanged(change) => {
-            BackendEvent::MediaChanged(media_change_to_dto(change))
-        }
-        ClientEvent::DirectoryChanged(events) => {
-            BackendEvent::RemoteFileChanged(RemoteFileChangeDto {
+        ClientEvent::MediaLibraryChanged(change) => BackendEvent::MediaChanged {
+            session_id,
+            change: media_change_to_dto(change),
+        },
+        ClientEvent::DirectoryChanged(events) => BackendEvent::RemoteFileChanged {
+            session_id,
+            change: RemoteFileChangeDto {
                 change_kind: RemoteFileChangeKind::DirectoryChanged,
                 paths: events
                     .into_iter()
                     .filter_map(|event| event.file.map(|file| file.path))
                     .collect(),
-            })
-        }
-        ClientEvent::FileChanged(changes) => BackendEvent::RemoteFileChanged(RemoteFileChangeDto {
-            change_kind: RemoteFileChangeKind::FileChanged,
-            paths: changes
-                .into_iter()
-                .filter_map(|change| change.file.map(|file| file.path))
-                .collect(),
-        }),
-        ClientEvent::PhotoSyncChanged(change) => {
-            BackendEvent::RemoteFileChanged(RemoteFileChangeDto {
+            },
+        },
+        ClientEvent::FileChanged(changes) => BackendEvent::RemoteFileChanged {
+            session_id,
+            change: RemoteFileChangeDto {
+                change_kind: RemoteFileChangeKind::FileChanged,
+                paths: changes
+                    .into_iter()
+                    .filter_map(|change| change.file.map(|file| file.path))
+                    .collect(),
+            },
+        },
+        ClientEvent::PhotoSyncChanged(change) => BackendEvent::RemoteFileChanged {
+            session_id,
+            change: RemoteFileChangeDto {
                 change_kind: RemoteFileChangeKind::PhotoSyncChanged,
                 paths: change.files.into_iter().map(|file| file.path).collect(),
-            })
-        }
-        ClientEvent::SyncMonitorChanged(_) => {
-            BackendEvent::RemoteFileChanged(RemoteFileChangeDto {
+            },
+        },
+        ClientEvent::SyncMonitorChanged(_) => BackendEvent::RemoteFileChanged {
+            session_id,
+            change: RemoteFileChangeDto {
                 change_kind: RemoteFileChangeKind::SyncMonitorChanged,
                 paths: Vec::new(),
-            })
-        }
+            },
+        },
         ClientEvent::RequestCancelled(_) => BackendEvent::Warning(PublicError::new(
             PublicErrorCode::RemoteCancelled,
             "phone requested cancellation outside an active request",

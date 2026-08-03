@@ -334,7 +334,11 @@ impl TransferRegistry {
         &self,
         session_id: SessionId,
     ) -> Vec<tokio::task::JoinHandle<()>> {
-        let entries: Vec<(TransferId, CancellationToken)> = {
+        // Join-handle ownership is independent of the public transfer state.
+        // A task can already be marked Cancelled while it is still unwinding
+        // and holding a session client Arc (for example shutdown first calls
+        // cancel()). Always collect every entry for this session.
+        let entries: Vec<(TransferId, CancellationToken, bool)> = {
             let guard = self
                 .transfers
                 .lock()
@@ -350,22 +354,24 @@ impl TransferRegistry {
                         snapshot.state,
                         TransferState::Completed | TransferState::Failed | TransferState::Cancelled
                     );
-                    (snapshot.session_id == session_id && !terminal)
-                        .then(|| (snapshot.id, entry.cancel.clone()))
+                    (snapshot.session_id == session_id)
+                        .then(|| (snapshot.id, entry.cancel.clone(), terminal))
                 })
                 .collect()
         };
         let mut joins = Vec::new();
-        for (id, token) in entries {
+        for (id, token, terminal) in entries {
             token.cancel();
             // Transition after dropping the registry lock (std Mutex is not
             // re-entrant); publish the terminal event synchronously so the
             // transfer events precede the caller's session-level events
             // (M8.1 Phase C / C5 "terminal events first").
-            if let Some(snapshot) = self.transition(id, TransferState::Cancelled) {
+            if !terminal && let Some(snapshot) = self.transition(id, TransferState::Cancelled) {
                 self.event_hub
                     .publish(BackendEvent::TransferUpdated(snapshot));
             }
+            // Take a still-owned task handle even when its public snapshot is
+            // already terminal. The close path must join or abort that task.
             let join = {
                 let guard = self
                     .transfers
@@ -602,5 +608,35 @@ mod tests {
         assert_eq!(snapshot.state, TransferState::Cancelled);
         assert_eq!(snapshot.transferred_bytes, 5000);
         assert!(snapshot.finished_at_ms.is_some());
+    }
+
+    #[tokio::test]
+    async fn cancel_for_session_takes_join_after_public_terminal_state() {
+        // Regression: shutdown may call cancel() before close_session(). The
+        // snapshot is already Cancelled, but the background task can still
+        // own the client and therefore its JoinHandle must still be returned.
+        let registry = test_registry();
+        let entry = registry.register(registry.snapshot_for(
+            SessionId(1),
+            TransferDirectionDto::Download,
+            "/a".to_string(),
+            "/b".to_string(),
+        ));
+        let id = entry.snapshot.lock().unwrap().id;
+        let handle = tokio::spawn(async { std::future::pending::<()>().await });
+        *entry
+            .join
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(handle);
+
+        registry.cancel(id).expect("pre-cancel");
+        assert_eq!(registry.get(id).unwrap().state, TransferState::Cancelled);
+
+        let mut joins = registry.cancel_for_session(SessionId(1));
+        assert_eq!(joins.len(), 1, "terminal snapshot must not hide live task");
+        let join = joins.pop().unwrap();
+        join.abort();
+        let _ = join.await;
+        assert!(registry.cancel_for_session(SessionId(1)).is_empty());
     }
 }

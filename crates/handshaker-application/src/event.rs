@@ -24,7 +24,10 @@ pub enum BackendEvent {
     RuntimeStarted,
     RuntimeStopping,
     DeviceAdded(DeviceDescriptor),
-    DeviceUpdated(DeviceDescriptor),
+    DeviceUpdated {
+        session_id: SessionId,
+        device: DeviceDescriptor,
+    },
     DeviceRemoved {
         device_id: DeviceId,
     },
@@ -38,12 +41,19 @@ pub enum BackendEvent {
     },
     /// Clipboard history pushed by the phone.
     ClipboardChanged {
+        session_id: SessionId,
         entries: Vec<ClipboardEntryDto>,
     },
     /// A media library change pushed by the phone.
-    MediaChanged(MediaChangeDto),
+    MediaChanged {
+        session_id: SessionId,
+        change: MediaChangeDto,
+    },
     /// A remote file change (directory monitor / sync) pushed by the phone.
-    RemoteFileChanged(RemoteFileChangeDto),
+    RemoteFileChanged {
+        session_id: SessionId,
+        change: RemoteFileChangeDto,
+    },
     Warning(crate::error::PublicError),
 }
 

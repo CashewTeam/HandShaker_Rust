@@ -826,7 +826,9 @@ fn bridge_client_event_maps_known_core_events() {
         apk_version_name: None,
         root_path: "/storage/emulated/0".to_string(),
     });
-    let bridge = |event| crate::runtime::bridge_client_event(event, &device, &device_info);
+    let session_id = SessionId(7);
+    let bridge =
+        |event| crate::runtime::bridge_client_event(event, session_id, &device, &device_info);
 
     // Clipboard change -> DTO payload.
     let event = bridge(handshaker_core::ClientEvent::ClipboardChanged(vec![
@@ -836,7 +838,11 @@ fn bridge_client_event_maps_known_core_events() {
         },
     ]));
     match event {
-        BackendEvent::ClipboardChanged { entries } => {
+        BackendEvent::ClipboardChanged {
+            session_id: source,
+            entries,
+        } => {
+            assert_eq!(source, session_id);
             assert_eq!(entries.len(), 1);
             assert_eq!(entries[0].text, "hello");
             assert_eq!(entries[0].timestamp_ms, 123);
@@ -860,7 +866,11 @@ fn bridge_client_event_maps_known_core_events() {
         },
     ));
     match event {
-        BackendEvent::MediaChanged(change) => {
+        BackendEvent::MediaChanged {
+            session_id: source,
+            change,
+        } => {
+            assert_eq!(source, session_id);
             assert_eq!(change.media_kind, crate::dto::MediaKindDto::Photo);
             assert_eq!(change.added.len(), 1);
             assert_eq!(change.added[0].media_id, Some(7));
@@ -877,7 +887,11 @@ fn bridge_client_event_maps_known_core_events() {
         },
     ]));
     match event {
-        BackendEvent::RemoteFileChanged(change) => {
+        BackendEvent::RemoteFileChanged {
+            session_id: source,
+            change,
+        } => {
+            assert_eq!(source, session_id);
             assert_eq!(
                 change.change_kind,
                 crate::dto::RemoteFileChangeKind::DirectoryChanged
@@ -895,7 +909,11 @@ fn bridge_client_event_maps_known_core_events() {
         },
     ]));
     match event {
-        BackendEvent::RemoteFileChanged(change) => {
+        BackendEvent::RemoteFileChanged {
+            session_id: source,
+            change,
+        } => {
+            assert_eq!(source, session_id);
             assert_eq!(
                 change.change_kind,
                 crate::dto::RemoteFileChangeKind::FileChanged
@@ -914,7 +932,11 @@ fn bridge_client_event_maps_known_core_events() {
         },
     ));
     match event {
-        BackendEvent::RemoteFileChanged(change) => {
+        BackendEvent::RemoteFileChanged {
+            session_id: source,
+            change,
+        } => {
+            assert_eq!(source, session_id);
             assert_eq!(
                 change.change_kind,
                 crate::dto::RemoteFileChangeKind::PhotoSyncChanged
@@ -931,7 +953,11 @@ fn bridge_client_event_maps_known_core_events() {
         },
     ));
     match event {
-        BackendEvent::RemoteFileChanged(change) => {
+        BackendEvent::RemoteFileChanged {
+            session_id: source,
+            change,
+        } => {
+            assert_eq!(source, session_id);
             assert_eq!(
                 change.change_kind,
                 crate::dto::RemoteFileChangeKind::SyncMonitorChanged
@@ -993,7 +1019,11 @@ fn bridge_client_event_maps_known_core_events() {
         },
     ));
     match event {
-        BackendEvent::DeviceUpdated(updated) => {
+        BackendEvent::DeviceUpdated {
+            session_id: source,
+            device: updated,
+        } => {
+            assert_eq!(source, session_id);
             assert_eq!(updated.id, device.id);
         }
         other => panic!("expected DeviceUpdated, got {other:?}"),
@@ -1088,6 +1118,7 @@ fn backend_event_change_payloads_serialize_with_stable_kinds() {
     assert_eq!(json["device_id"], "adb:x");
 
     let json = serde_json::to_value(BackendEvent::ClipboardChanged {
+        session_id: SessionId(3),
         entries: vec![crate::dto::ClipboardEntryDto {
             text: "hi".to_string(),
             timestamp_ms: 1,
@@ -1095,29 +1126,36 @@ fn backend_event_change_payloads_serialize_with_stable_kinds() {
     })
     .unwrap();
     assert_eq!(json["kind"], "clipboard_changed");
+    assert_eq!(json["session_id"], 3);
     assert_eq!(json["entries"][0]["text"], "hi");
     assert_eq!(json["entries"][0]["timestamp_ms"], 1);
 
-    let json = serde_json::to_value(BackendEvent::MediaChanged(crate::dto::MediaChangeDto {
-        media_kind: crate::dto::MediaKindDto::Audio,
-        added: vec![],
-        deleted: vec![],
-        updated: vec![],
-    }))
+    let json = serde_json::to_value(BackendEvent::MediaChanged {
+        session_id: SessionId(3),
+        change: crate::dto::MediaChangeDto {
+            media_kind: crate::dto::MediaKindDto::Audio,
+            added: vec![],
+            deleted: vec![],
+            updated: vec![],
+        },
+    })
     .unwrap();
     assert_eq!(json["kind"], "media_changed");
-    assert_eq!(json["media_kind"], "audio");
+    assert_eq!(json["session_id"], 3);
+    assert_eq!(json["change"]["media_kind"], "audio");
 
-    let json = serde_json::to_value(BackendEvent::RemoteFileChanged(
-        crate::dto::RemoteFileChangeDto {
+    let json = serde_json::to_value(BackendEvent::RemoteFileChanged {
+        session_id: SessionId(3),
+        change: crate::dto::RemoteFileChangeDto {
             change_kind: crate::dto::RemoteFileChangeKind::FileChanged,
             paths: vec!["/x".to_string()],
         },
-    ))
+    })
     .unwrap();
     assert_eq!(json["kind"], "remote_file_changed");
-    assert_eq!(json["change_kind"], "file_changed");
-    assert_eq!(json["paths"][0], "/x");
+    assert_eq!(json["session_id"], 3);
+    assert_eq!(json["change"]["change_kind"], "file_changed");
+    assert_eq!(json["change"]["paths"][0], "/x");
 
     // Every variant must round-trip through its stable JSON shape.
     for value in [
@@ -1130,20 +1168,28 @@ fn backend_event_change_payloads_serialize_with_stable_kinds() {
             device_id: DeviceId("adb:x".into()),
         })
         .unwrap(),
-        serde_json::to_value(BackendEvent::ClipboardChanged { entries: vec![] }).unwrap(),
-        serde_json::to_value(BackendEvent::MediaChanged(crate::dto::MediaChangeDto {
-            media_kind: crate::dto::MediaKindDto::Audio,
-            added: vec![],
-            deleted: vec![],
-            updated: vec![],
-        }))
+        serde_json::to_value(BackendEvent::ClipboardChanged {
+            session_id: SessionId(3),
+            entries: vec![],
+        })
         .unwrap(),
-        serde_json::to_value(BackendEvent::RemoteFileChanged(
-            crate::dto::RemoteFileChangeDto {
+        serde_json::to_value(BackendEvent::MediaChanged {
+            session_id: SessionId(3),
+            change: crate::dto::MediaChangeDto {
+                media_kind: crate::dto::MediaKindDto::Audio,
+                added: vec![],
+                deleted: vec![],
+                updated: vec![],
+            },
+        })
+        .unwrap(),
+        serde_json::to_value(BackendEvent::RemoteFileChanged {
+            session_id: SessionId(3),
+            change: crate::dto::RemoteFileChangeDto {
                 change_kind: crate::dto::RemoteFileChangeKind::DirectoryChanged,
                 paths: vec![],
             },
-        ))
+        })
         .unwrap(),
     ] {
         let decoded: BackendEvent = serde_json::from_value(value).expect("decode event");
@@ -1153,8 +1199,8 @@ fn backend_event_change_payloads_serialize_with_stable_kinds() {
                 | BackendEvent::ConnectionLost { .. }
                 | BackendEvent::DeviceRemoved { .. }
                 | BackendEvent::ClipboardChanged { .. }
-                | BackendEvent::MediaChanged(_)
-                | BackendEvent::RemoteFileChanged(_)
+                | BackendEvent::MediaChanged { .. }
+                | BackendEvent::RemoteFileChanged { .. }
         ));
     }
 }
