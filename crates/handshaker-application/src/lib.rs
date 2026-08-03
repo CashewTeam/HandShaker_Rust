@@ -37,7 +37,8 @@ pub use media::{
 };
 pub use runtime::{HandShakerRuntime, normalize_remote_path, resolve_remote_path};
 pub use sync::{
-    SyncActionDto, SyncConflictDto, SyncPlanDto, SyncProfileDto, SyncRunResultDto, SyncStatusDto,
+    SyncActionDto, SyncConflictDto, SyncLedgerStatusDto, SyncPlanDto, SyncProfileDto,
+    SyncRunResultDto, SyncStatusDto,
 };
 pub use transfer::{
     BatchTransferItemDto, BatchTransferRequest, BatchTransferResultDto, DownloadRequest,
@@ -53,9 +54,9 @@ mod tests;
 /// above (independent of the Rust crate version).
 ///
 /// Current status: `preview` — the v1 contract is still being finalized
-/// (M8.1 Phase A: `session_client()` transition entry, event/transfer
-/// semantics, documentation and fixtures). Breaking source-level changes are
-/// allowed until the freeze; consumers must not treat preview versions as
-/// stable. The freeze will drop the `-preview.N` suffix (see
-/// `docs/application-api-v1.md`).
+/// (Phase D: `session_client()` transition entry removed with the last CLI
+/// call site; event/transfer semantics, documentation and fixtures). Breaking
+/// source-level changes are allowed until the freeze; consumers must not
+/// treat preview versions as stable. The freeze will drop the
+/// `-preview.N` suffix (see `docs/application-api-v1.md`).
 pub const APPLICATION_API_VERSION: &str = "1.0.0-preview.1";

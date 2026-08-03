@@ -54,6 +54,10 @@ pub enum BackendEvent {
         session_id: SessionId,
         change: RemoteFileChangeDto,
     },
+    /// One debounced sync-watch batch was applied incrementally (Phase D /
+    /// D6): carries the batch result so GUIs and the CLI can render progress
+    /// without polling. `Warning` follows when the batch hit failures.
+    SyncWatchApplied(crate::sync::SyncRunResultDto),
     Warning(crate::error::PublicError),
 }
 

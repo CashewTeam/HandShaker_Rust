@@ -38,8 +38,8 @@ use crate::media::{
     VideoFileDto, VideoLibraryDto, dto_to_audio_album, dto_to_image_file, dto_to_video_file,
 };
 use crate::sync::{
-    SyncJob, SyncPlanDto, SyncProfileDto, SyncRunResultDto, SyncStatusDto, one_entry_diff,
-    snapshot_to_remote_files, sync_plan_to_dto, sync_run_result_to_dto,
+    SyncJob, SyncLedgerStatusDto, SyncPlanDto, SyncProfileDto, SyncRunResultDto, SyncStatusDto,
+    one_entry_diff, snapshot_to_remote_files, sync_plan_to_dto, sync_run_result_to_dto,
 };
 use crate::transfer::{
     BatchTransferItemDto, BatchTransferRequest, BatchTransferResultDto, DownloadRequest,
@@ -702,6 +702,24 @@ impl HandShakerRuntime {
                 .stat(&path)
                 .await
                 .map(|file| file.map(remote_file_to_dto))
+        })
+        .await
+    }
+
+    /// Register or unregister a phone-side directory monitor (Phase D /
+    /// D6-adjacent): the phone pushes `FileChanged` events for the path
+    /// while the monitor is on; the events arrive over the runtime event
+    /// hub as `BackendEvent::RemoteFileChanged`.
+    pub async fn monitor_folder(
+        &self,
+        session_id: SessionId,
+        path: String,
+        enabled: bool,
+    ) -> AppResult<()> {
+        self.request(session_id, "monitor_folder", |client| async move {
+            let root = client.root_path().to_string();
+            let path = resolve_remote_path(&root, &path);
+            client.monitor_folder(&path, enabled).await
         })
         .await
     }
@@ -1548,15 +1566,6 @@ impl HandShakerRuntime {
         Ok(self.inner.transfers.list())
     }
 
-    /// Transition API for the M8 CLI migration: hands a not-yet-migrated
-    /// command (or an in-flight transfer task) the core client of an open
-    /// session without opening a second connection. Leaks a core type on
-    /// purpose and is removed once the CLI migration is complete (before the
-    /// v1 freeze is lifted).
-    pub async fn session_client(&self, session_id: SessionId) -> AppResult<Arc<HandShakerClient>> {
-        self.session_client_arc(session_id).await
-    }
-
     /// Short critical section: clone the session's client Arc, then drop the
     /// registry lock before any network await (M8.1 Phase B / B1).
     async fn session_client_arc(&self, session_id: SessionId) -> AppResult<Arc<HandShakerClient>> {
@@ -1638,19 +1647,50 @@ impl HandShakerRuntime {
     /// `<state_dir>/sync/<device_uuid>.json` — the same layout the CLI used
     /// with the core default config dir, so existing ledgers keep working.
     /// `pub(crate)` only so tests can assert the resolved path.
+    /// Directory that roots sync ledgers (and every other state file):
+    /// the configured `state_dir`, or the core default config directory.
+    fn sync_config_dir(&self) -> AppResult<std::path::PathBuf> {
+        match &self.inner.config.state_dir {
+            Some(dir) => Ok(dir.clone()),
+            None => handshaker_core::default_config_dir()
+                .map_err(|error| from_core_error(error, "sync.store")),
+        }
+    }
+
     pub(crate) fn sync_store_for(
         &self,
         profile: &SyncProfileDto,
     ) -> AppResult<handshaker_core::SyncStore> {
-        let config_dir = match &self.inner.config.state_dir {
-            Some(dir) => dir.clone(),
-            None => handshaker_core::default_config_dir()
-                .map_err(|error| from_core_error(error, "sync.store"))?,
-        };
         Ok(handshaker_core::SyncStore::discover(
-            &config_dir,
+            &self.sync_config_dir()?,
             &profile.device_uuid,
         ))
+    }
+
+    /// Ledger summary for `sync status` (Phase D / D6): files/bytes the
+    /// local ledger tracks for one device. No session required — the ledger
+    /// is local state rooted at the configured `state_dir`.
+    pub async fn sync_ledger_status(&self, device_uuid: &str) -> AppResult<SyncLedgerStatusDto> {
+        self.ensure_open()?;
+        if device_uuid.trim().is_empty() {
+            return Err(PublicError::new(
+                PublicErrorCode::InvalidArgument,
+                "device_uuid must not be empty",
+            )
+            .operation("sync.status"));
+        }
+        let store = handshaker_core::SyncStore::discover(&self.sync_config_dir()?, device_uuid);
+        let snapshot = store
+            .load()
+            .map_err(|error| from_core_error(error, "sync.status"))?
+            .unwrap_or_default();
+        let files = snapshot.files.len() as u64;
+        let bytes: u64 = snapshot.files.values().map(|record| record.size).sum();
+        Ok(SyncLedgerStatusDto {
+            device_uuid: device_uuid.to_string(),
+            files,
+            bytes,
+        })
     }
 
     /// Short critical section: clone the job Arc, then drop the registry
@@ -2147,11 +2187,16 @@ impl HandShakerRuntime {
             }
             match self.apply_watch_batch(&job.profile, &batch).await {
                 Ok(result) => {
-                    job.set_last_result(result);
+                    job.set_last_result(result.clone());
                     job.set_status(|status| {
                         status.last_run_at_ms = Some(now_ms());
                         status.last_error = None;
                     });
+                    // Let GUI/CLI render progress without polling (Phase D /
+                    // D6): the batch result travels as a backend event.
+                    self.inner
+                        .event_hub
+                        .publish(BackendEvent::SyncWatchApplied(result));
                 }
                 Err(error) => {
                     job.set_status(|status| status.last_error = Some(error));

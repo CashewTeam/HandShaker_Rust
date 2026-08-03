@@ -92,6 +92,17 @@ pub struct SyncRunResultDto {
     pub conflicts: Vec<String>,
 }
 
+/// Ledger summary for the `sync status` command: how many files and bytes
+/// the local ledger tracks for one device. Read without a session (the
+/// ledger is local state); the ledger path follows the configured
+/// `state_dir`, byte-compatible with the legacy CLI location.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncLedgerStatusDto {
+    pub device_uuid: String,
+    pub files: u64,
+    pub bytes: u64,
+}
+
 // ---- job registry entry ----
 
 /// One registered sync job per profile id. The run task and the watch task

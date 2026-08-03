@@ -11,11 +11,8 @@ use rustyline::error::ReadlineError;
 use serde::Serialize;
 
 use handshaker_core::{
-    ClientEvent, ClipboardEntry, DeviceInfo, Error, EventFilter, EventStreamError,
-    HandShakerClient, RemoteFile, Result, StateStore, SyncConfig, SyncDiff, SyncRunResult,
-    SyncSnapshot, SyncStore, apply_file_change, check_conflicts, default_config_dir, execute_plan,
+    ClipboardEntry, Error, HandShakerClient, Result,
     i18n::{self, Localizer, MessageKey, ZhCn},
-    plan_diff, sync_config,
 };
 
 use handshaker_application::{
@@ -23,8 +20,9 @@ use handshaker_application::{
     CreateDirectoryRequest, DeletePathsRequest, DeviceDescriptor, DeviceId, DeviceInfoDto,
     FileConflictKind, FileEntryDto, HandShakerRuntime, ListDevicesRequest, ListFilesRequest,
     MovePathRequest, PlanDownloadRequest, PlanUploadRequest, PublicError, RemoveTrustRequest,
-    ResetWifiTrustRequest, RuntimeConfig, SessionId, StatFileRequest, TransferFailureDto,
-    TransportKind, TreeTransferDto, TrustRecordDto,
+    ResetWifiTrustRequest, RuntimeConfig, SessionId, SessionSnapshot, StatFileRequest, SyncPlanDto,
+    SyncProfileDto, SyncRunResultDto, TransferFailureDto, TransportKind, TreeTransferDto,
+    TrustRecordDto,
 };
 
 use crate::output::{Outcome, render};
@@ -713,8 +711,9 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
     }
 
     let app = connect(&cli).await?;
+    let snapshot = session_snapshot(&app).await?;
     let context = CommandContext {
-        remote_cwd: app.client.root_path().to_string(),
+        remote_cwd: snapshot.device_info.root_path,
         local_cwd: env::current_dir()?,
         in_shell: false,
     };
@@ -734,22 +733,19 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
 /// `watch`: register directory monitors and stream backend events until
 /// Ctrl-C or the event hub closes.
 ///
-/// Migration (M8 Phase 2 / B): the connection and the event stream run
-/// through `HandShakerRuntime` — events are delivered via
-/// `subscribe_events()` and serialized as application `BackendEvent` instead
-/// of the core `ClientEvent`. Directory-monitor registration still uses the
-/// core client (`AppSession.client`) because the application layer has no
-/// `monitor_folder` service yet; the event *source* is unchanged (the core
-/// observer), only the delivery path moved.
+/// Migration (M8 Phase 2 / B + Phase D): the connection, the monitor
+/// registration and the event stream all run through `HandShakerRuntime` —
+/// `monitor_folder()` registers the phone-side directory observers and
+/// events are delivered via `subscribe_events()` as application
+/// `BackendEvent` (serialized as `data` in the watch envelope).
 ///
 /// Mapping notes for the runtime bridge (see `bridge_client_event` in
 /// handshaker-application): `DirectoryChanged`/`FileChanged`/`PhotoSyncChanged`
-/// are already bridged to `BackendEvent::RemoteFileChanged`, so watch keeps
+/// are bridged to `BackendEvent::RemoteFileChanged`, so watch keeps
 /// receiving directory-monitor events. Two details are not carried over the
 /// bridge: the per-event `FileEventKind` (create/delete/...) of directory
 /// events and the `FileChangeStatus` of sync changes — both surface as
-/// `change_kind` + `paths` (+ `files`/`statuses` once the bridge fills them)
-/// in `RemoteFileChangeDto`.
+/// `change_kind` + `paths` (+ `files`/`statuses` in `RemoteFileChangeDto`).
 async fn watch(cli: &Cli) -> Result<()> {
     let app = connect(cli).await?;
     let localizer = ZhCn;
@@ -757,34 +753,42 @@ async fn watch(cli: &Cli) -> Result<()> {
         unreachable!("watch command");
     };
     for (index, path) in paths.iter().enumerate() {
-        if let Err(error) = app.client.monitor_folder(path, true).await {
+        if let Err(error) = app
+            .runtime
+            .monitor_folder(app.session_id, path.clone(), true)
+            .await
+        {
             // Unregister everything registered before the failing entry. The
             // phone treats duplicate unregister calls as idempotent no-ops,
             // so repeated --path values are safe to unregister twice.
             for registered in paths.iter().take(index) {
-                let _ = app.client.monitor_folder(registered, false).await;
+                let _ = app
+                    .runtime
+                    .monitor_folder(app.session_id, registered.clone(), false)
+                    .await;
             }
             let _ = app.runtime.shutdown().await;
-            return Err(error);
+            return Err(app_error(error));
         }
     }
     if !paths.is_empty() {
         eprintln!("{}", localizer.text(MessageKey::WatchRegistered));
     }
     // Envelope device identity comes from the connected phone; fetch it per
-    // event so a phone-initiated device-info update is reflected (review
-    // fix: the old pre-migration loop re-read it every event). During the
-    // migration the core client still owns it; once the runtime exposes a
-    // snapshot-based source this can move off the transition client.
+    // event so a phone-initiated device-info update is reflected.
     let mut events = app.runtime.subscribe_events();
     loop {
         tokio::select! {
             event = events.recv() => match event {
                 Ok(envelope) => {
-                    let device = app.client.device_info().clone();
+                    let snapshot = app
+                        .runtime
+                        .get_session_snapshot(app.session_id)
+                        .await
+                        .map_err(app_error)?;
                     match cli.output {
                         OutputFormat::Jsonl => {
-                            let envelope = watch_envelope(&device, &envelope.event);
+                            let envelope = watch_envelope(&snapshot.device_info, &envelope.event);
                             println!("{envelope}");
                         }
                         _ => println!(
@@ -818,7 +822,10 @@ async fn watch(cli: &Cli) -> Result<()> {
                 // watching, shut the runtime down, then report the user
                 // interrupt.
                 for path in paths {
-                    let _ = app.client.monitor_folder(path, false).await;
+                    let _ = app
+                        .runtime
+                        .monitor_folder(app.session_id, path.clone(), false)
+                        .await;
                 }
                 let _ = app.runtime.shutdown().await;
                 return Err(Error::Interrupted);
@@ -831,7 +838,7 @@ async fn watch(cli: &Cli) -> Result<()> {
 /// `command`, `device`, `event`, `data`, `warnings`) is preserved; `data`
 /// now carries the application-layer `BackendEvent` (migrated from the core
 /// `ClientEvent`).
-fn watch_envelope(info: &DeviceInfo, event: &BackendEvent) -> serde_json::Value {
+fn watch_envelope(info: &DeviceInfoDto, event: &BackendEvent) -> serde_json::Value {
     serde_json::json!({
         "schema_version": 1,
         "ok": true,
@@ -848,11 +855,22 @@ fn watch_envelope(info: &DeviceInfo, event: &BackendEvent) -> serde_json::Value 
 
 /// CLI-owned view of an open application session: business services
 /// (runtime), the session id, and the transition client for commands that
-/// are not yet migrated to the application layer (M8 Phase 3).
+/// CLI-owned view of an open application session (Phase D): the business
+/// services live in the runtime; the session id addresses it. No core
+/// client is kept here anymore — every migrated command goes through the
+/// runtime, and `session_client()` was removed with the last call site.
 pub(crate) struct AppSession {
     pub runtime: Arc<HandShakerRuntime>,
     pub session_id: SessionId,
-    pub client: Arc<HandShakerClient>,
+}
+
+/// Fresh session snapshot helper for the shell/batch/one-shot command
+/// contexts (Phase D: no core client is kept on `AppSession` anymore).
+async fn session_snapshot(app: &AppSession) -> Result<SessionSnapshot> {
+    app.runtime
+        .get_session_snapshot(app.session_id)
+        .await
+        .map_err(app_error)
 }
 
 /// Build the runtime configuration from CLI options.
@@ -987,16 +1005,13 @@ fn app_error(error: PublicError) -> Error {
     }
 }
 
-/// Unified close for an application session: drop the CLI's client handle so
-/// the runtime's disconnect takes sole ownership and sends QUIT, then removes
-/// the session from the registry (idempotent).
+/// Unified close for an application session: runtime disconnect sends QUIT
+/// and removes the session from the registry (idempotent).
 async fn close_session(app: AppSession) -> Result<()> {
     let AppSession {
         runtime,
         session_id,
-        client,
     } = app;
-    drop(client);
     runtime.disconnect(session_id).await.map_err(app_error)
 }
 
@@ -1016,14 +1031,9 @@ async fn connect(cli: &Cli) -> Result<AppSession> {
         .connect(ConnectRequest { device })
         .await
         .map_err(app_error)?;
-    let client = runtime
-        .session_client(session_id)
-        .await
-        .map_err(app_error)?;
     Ok(AppSession {
         runtime,
         session_id,
-        client,
     })
 }
 
@@ -1274,7 +1284,6 @@ async fn execute_connected(
     format: OutputFormat,
 ) -> Result<Outcome> {
     let localizer = ZhCn;
-    let client = &session.client;
     let outcome = match command {
         Command::Device(DeviceCommand::List) => {
             return device_list(Duration::from_secs(30)).await;
@@ -1949,10 +1958,17 @@ async fn execute_connected(
             return media_command(session, context, command).await;
         }
         Command::Sync(command) => {
-            return sync_command(client, context, command, format).await;
+            return sync_command(session, context, command, format).await;
         }
     };
-    Ok(outcome.with_device(client.device_info()))
+    // Phase D: the device summary now comes from the application snapshot
+    // (DeviceInfoDto), the last core-client reference in the connected path.
+    let snapshot = session
+        .runtime
+        .get_session_snapshot(session.session_id)
+        .await
+        .map_err(app_error)?;
+    Ok(outcome.with_device(&snapshot.device_info))
 }
 
 /// Default preview cap for `media` listings: a functional preview of a large
@@ -1963,44 +1979,53 @@ const DEFAULT_MEDIA_PREVIEW_LIMIT: usize = 50;
 const DEFAULT_SYNC_ROOT: &str = "/storage/emulated/0/DCIM/Camera";
 
 /// Photo sync commands: plan / run / watch / status (phone -> host, one-way).
+/// `sync` commands (Phase D / D6): everything runs through the runtime
+/// SyncService — profile construction, diff, execution and watch are the
+/// application's job; the CLI keeps confirmation, output-dir validation and
+/// the legacy JSON shapes. The phone UUID doubles as the stable profile id
+/// and keys the ledger path (same location as the legacy CLI).
 async fn sync_command(
-    client: &HandShakerClient,
+    app: &AppSession,
     context: &CommandContext,
     command: &SyncCommand,
     format: OutputFormat,
 ) -> Result<Outcome> {
+    let snapshot = app
+        .runtime
+        .get_session_snapshot(app.session_id)
+        .await
+        .map_err(app_error)?;
+    let device_uuid = sync_device_uuid_from_info(&snapshot.device_info)?;
     match command {
         SyncCommand::Status => {
-            let device_uuid = sync_device_uuid(client)?;
-            let store = SyncStore::discover(&default_config_dir()?, &device_uuid);
-            let snapshot = store.load()?.unwrap_or_default();
-            let files = snapshot.files.len();
-            let bytes: u64 = snapshot.files.values().map(|record| record.size).sum();
+            let status = app
+                .runtime
+                .sync_ledger_status(&device_uuid)
+                .await
+                .map_err(app_error)?;
             let data = serde_json::json!({
-                "device_uuid": device_uuid,
-                "files": files,
-                "bytes": bytes,
+                "device_uuid": status.device_uuid,
+                "files": status.files,
+                "bytes": status.bytes,
             });
             let human = i18n::format(
                 "sync.status_line",
-                &[&files.to_string(), &bytes.to_string()],
+                &[&status.files.to_string(), &status.bytes.to_string()],
             );
             Outcome::new("sync.status", data, human)
         }
         SyncCommand::Plan { root, output_dir } => {
             let output_dir = required_output_dir(output_dir, context)?;
-            let config = sync_config_for(client, root.as_deref(), &output_dir)?;
-            let store = SyncStore::discover(&default_config_dir()?, &config.device_uuid);
-            let snapshot = store.load()?.unwrap_or_default();
-            let (diff, conflicts) = plan_for(client, &config, &snapshot).await?;
+            let profile = sync_profile_for(app, &device_uuid, root.as_deref(), &output_dir);
+            let plan = app.runtime.plan_sync(profile).await.map_err(app_error)?;
             let data = serde_json::json!({
-                "added": diff.added,
-                "info_modified": diff.info_modified,
-                "deleted": diff.deleted,
-                "conflicts": conflicts,
-                "total": diff.added.len() + diff.info_modified.len() + diff.deleted.len(),
+                "added": plan.downloads.iter().map(|a| a.remote_path.clone()).collect::<Vec<_>>(),
+                "info_modified": plan.metadata_updates.iter().map(|a| a.remote_path.clone()).collect::<Vec<_>>(),
+                "deleted": plan.deletions.iter().map(|a| a.remote_path.clone()).collect::<Vec<_>>(),
+                "conflicts": plan.conflicts.iter().map(|c| c.local_path.clone()).collect::<Vec<_>>(),
+                "total": plan.downloads.len() + plan.metadata_updates.len() + plan.deletions.len(),
             });
-            let human = plan_human(&diff, &conflicts);
+            let human = plan_human(&plan);
             Outcome::new("sync.plan", data, human)
         }
         SyncCommand::Run {
@@ -2009,21 +2034,18 @@ async fn sync_command(
             yes: run_yes,
         } => {
             let output_dir = required_output_dir(output_dir, context)?;
-            let config = sync_config_for(client, root.as_deref(), &output_dir)?;
+            let profile = sync_profile_for(app, &device_uuid, root.as_deref(), &output_dir);
             confirm(i18n::text("sync.confirm_run"), *run_yes, format)?;
-            let store = SyncStore::discover(&default_config_dir()?, &config.device_uuid);
-            let snapshot = store.load()?.unwrap_or_default();
-            // Single PHOTO_SYNC_REQUEST(37): fetch state and diff in one pass
-            // (a second 37 would be rejected while the phone is SYNCING; an
-            // up-front SYNC_MONITOR(false) reset is NOT sent — on-device it
-            // left the phone answering 37 with a heartbeat, 2026-08-03).
-            let phone_files = photo_sync_files(client, &config, &snapshot).await?;
-            let diff = plan_diff(&phone_files, &snapshot);
-            let conflicts = check_conflicts(&diff, &snapshot);
-            let (result, updated) =
-                execute_plan(client, &config, &phone_files, &diff, &snapshot, &conflicts).await?;
-            store.save(&updated)?;
-            let _ = client.sync_monitor(false).await?;
+            // start_sync validates executability and runs the plan in the
+            // background; the CLI waits (Ctrl-C stops the run).
+            let profile_id = app.runtime.start_sync(profile).await.map_err(app_error)?;
+            wait_sync_run(app, &profile_id).await?;
+            let result = app
+                .runtime
+                .last_sync_result(&profile_id)
+                .await
+                .map_err(app_error)?
+                .ok_or_else(|| Error::Protocol("sync run finished without a result".to_string()))?;
             let data = serde_json::json!({
                 "downloaded": result.downloaded,
                 "deleted": result.deleted,
@@ -2039,77 +2061,66 @@ async fn sync_command(
             yes: watch_yes,
         } => {
             let output_dir = required_output_dir(output_dir, context)?;
-            let config = sync_config_for(client, root.as_deref(), &output_dir)?;
+            let profile = sync_profile_for(app, &device_uuid, root.as_deref(), &output_dir);
             confirm(i18n::text("sync.confirm_run"), *watch_yes, format)?;
-            let store = SyncStore::discover(&default_config_dir()?, &config.device_uuid);
-            let snapshot = store.load()?.unwrap_or_default();
-            // Single PHOTO_SYNC_REQUEST(37) (a second one would be rejected
-            // while the phone is SYNCING; no up-front reset — see Run).
-            let phone_files = photo_sync_files(client, &config, &snapshot).await?;
-            let diff = plan_diff(&phone_files, &snapshot);
-            let conflicts = check_conflicts(&diff, &snapshot);
-            let (result, mut updated) =
-                execute_plan(client, &config, &phone_files, &diff, &snapshot, &conflicts).await?;
-            store.save(&updated)?;
-            if !result.failures.is_empty() {
-                eprintln!(
-                    "{}",
-                    i18n::format("sync.run_failures", &[&result.failures.len().to_string()])
-                );
-            }
-            // Enter real-time mode; a rejection here is a real error because
-            // we just synced (the phone must be in SYNCING state now).
-            if !client.sync_monitor(true).await? {
-                return Err(Error::Protocol(
-                    i18n::text("sync.monitor_rejected").to_string(),
-                ));
-            }
-            let mut events = client.subscribe_events(EventFilter::all());
+            // Full sync first (the phone must be in SYNCING state for the
+            // monitor to be accepted), then switch to incremental watch.
+            let profile_id = app.runtime.start_sync(profile).await.map_err(app_error)?;
+            wait_sync_run(app, &profile_id).await?;
+            app.runtime
+                .start_sync_watch(&profile_id)
+                .await
+                .map_err(app_error)?;
+            // Event-driven output: each applied debounced batch arrives as
+            // BackendEvent::SyncWatchApplied; failures surface as Warning.
+            let mut events = app.runtime.subscribe_events();
             loop {
                 tokio::select! {
                     event = events.recv() => match event {
-                        Ok(ClientEvent::FileChanged(changes)) => {
-                            let mut failures = 0_usize;
-                            for change in &changes {
-                                match apply_file_change(client, &config, change, &mut updated).await {
-                                    Ok(part) => failures += part.failures.len(),
-                                    Err(_) => failures += 1,
+                        Ok(envelope) => match envelope.event {
+                            BackendEvent::SyncWatchApplied(ref result) => {
+                                let applied = result.downloaded.len() + result.deleted.len();
+                                let failures = result.failures.len();
+                                if format == OutputFormat::Jsonl {
+                                    let snapshot = app
+                                        .runtime
+                                        .get_session_snapshot(app.session_id)
+                                        .await
+                                        .map_err(app_error)?;
+                                    let envelope =
+                                        sync_watch_envelope(&snapshot.device_info, result);
+                                    println!("{envelope}");
+                                } else {
+                                    println!(
+                                        "{}",
+                                        i18n::format(
+                                            "sync.watch_applied",
+                                            &[&applied.to_string(), &failures.to_string()]
+                                        )
+                                    );
                                 }
+                                let _ = io::stdout().flush();
                             }
-                            let _ = store.save(&updated);
-                            if format == OutputFormat::Jsonl {
-                                let envelope = sync_watch_envelope(client, changes.len(), failures);
-                                println!("{envelope}");
-                            } else {
-                                println!(
-                                    "{}",
-                                    i18n::format(
-                                        "sync.watch_applied",
-                                        &[
-                                            &changes.len().to_string(),
-                                            &failures.to_string(),
-                                        ]
-                                    )
-                                );
+                            BackendEvent::Warning(ref error) => {
+                                eprintln!("{}", sanitize_human(&error.message));
                             }
-                            let _ = io::stdout().flush();
-                        }
-                        Ok(_) => {}
-                        Err(EventStreamError::Lagged { missed }) => {
+                            _ => {}
+                        },
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
                             eprintln!(
                                 "{}",
                                 i18n::format("watch.lagged", &[&missed.to_string()])
                             );
                         }
-                        Err(EventStreamError::Closed) => {
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            let _ = app.runtime.stop_sync_watch(&profile_id).await;
                             return Err(Error::Transport(
                                 i18n::text("watch.disconnected").to_string(),
                             ));
                         }
                     },
                     _ = tokio::signal::ctrl_c() => {
-                        let _ = client.sync_monitor(false).await;
-                        let _ = store.save(&updated);
+                        let _ = app.runtime.stop_sync_watch(&profile_id).await;
                         return Err(Error::Interrupted);
                     }
                 }
@@ -2118,9 +2129,53 @@ async fn sync_command(
     }
 }
 
-fn sync_device_uuid(client: &HandShakerClient) -> Result<String> {
-    let device_uuid = client
-        .device_info()
+/// Build the sync profile for the current session. The phone UUID is the
+/// stable profile id; the remote root defaults to the camera folder (legacy
+/// behavior) and the local root is the validated output directory.
+fn sync_profile_for(
+    app: &AppSession,
+    device_uuid: &str,
+    root: Option<&str>,
+    output_dir: &Path,
+) -> SyncProfileDto {
+    SyncProfileDto {
+        id: device_uuid.to_string(),
+        session_id: app.session_id,
+        device_uuid: device_uuid.to_string(),
+        remote_root: root.unwrap_or(DEFAULT_SYNC_ROOT).to_string(),
+        local_root: output_dir.display().to_string(),
+        enabled: true,
+    }
+}
+
+/// Block until a started sync run finishes: poll the job status; Ctrl-C
+/// stops the run and reports the user interrupt. A run that ended with an
+/// error returns it (the ledger was left untouched in that case).
+async fn wait_sync_run(app: &AppSession, profile_id: &str) -> Result<()> {
+    loop {
+        let status = app
+            .runtime
+            .get_sync_status(profile_id)
+            .await
+            .map_err(app_error)?;
+        if !status.running {
+            if let Some(error) = status.last_error {
+                return Err(app_error(error));
+            }
+            return Ok(());
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+            _ = tokio::signal::ctrl_c() => {
+                let _ = app.runtime.stop_sync(profile_id).await;
+                return Err(Error::Interrupted);
+            }
+        }
+    }
+}
+
+fn sync_device_uuid_from_info(info: &DeviceInfoDto) -> Result<String> {
+    let device_uuid = info
         .phone_id
         .clone()
         .ok_or_else(|| Error::Protocol(i18n::text("sync.device_uuid_missing").to_string()))?;
@@ -2144,103 +2199,34 @@ fn required_output_dir(output_dir: &Option<PathBuf>, context: &CommandContext) -
     Ok(resolve_local(&context.local_cwd, output_dir))
 }
 
-fn sync_config_for(
-    client: &HandShakerClient,
-    root: Option<&str>,
-    output_dir: &Path,
-) -> Result<SyncConfig> {
-    let device_uuid = sync_device_uuid(client)?;
-    let state = StateStore::discover()?.load_or_create()?;
-    Ok(sync_config(
-        &device_uuid,
-        root.unwrap_or(DEFAULT_SYNC_ROOT),
-        &output_dir.display().to_string(),
-        &state.host_uuid.to_string(),
-    ))
-}
-
-/// Build the ledger file list to send as the previous snapshot, then ask the
-/// phone for its current state and return the raw photo list.
-async fn photo_sync_files(
-    client: &HandShakerClient,
-    config: &SyncConfig,
-    snapshot: &SyncSnapshot,
-) -> Result<Vec<RemoteFile>> {
-    let ledger: Vec<RemoteFile> = snapshot
-        .files
-        .iter()
-        .map(|(path, record)| RemoteFile {
-            path: path.clone(),
-            size: record.size,
-            created_at: None,
-            modified_at: record.modified_at,
-            is_directory: false,
-            checksum: record.checksum.clone(),
-            is_trash: None,
-            id: None,
-            ext_data: record.ext_data.clone(),
-        })
-        .collect();
-    let result = client.photo_sync(&config.pc_id, &ledger).await?;
-    if result.is_success == Some(false) {
-        return Err(Error::Protocol(
-            i18n::text("sync.photo_sync_rejected").to_string(),
-        ));
-    }
-    // The phone answers with its whole photo library; keep only entries under
-    // the configured sync root. Component-boundary match (Path::strip_prefix
-    // is segment-wise, so a sibling like DCIM/Camera2 does not match
-    // phone_root DCIM/Camera); local_destination re-checks on every use.
-    Ok(result
-        .files
-        .into_iter()
-        .filter(|file| {
-            Path::new(&file.path)
-                .strip_prefix(Path::new(&config.phone_root))
-                .is_ok()
-        })
-        .collect())
-}
-
-async fn plan_for(
-    client: &HandShakerClient,
-    config: &SyncConfig,
-    snapshot: &SyncSnapshot,
-) -> Result<(SyncDiff, Vec<String>)> {
-    let phone_files = photo_sync_files(client, config, snapshot).await?;
-    let diff = plan_diff(&phone_files, snapshot);
-    let conflicts = check_conflicts(&diff, snapshot);
-    Ok((diff, conflicts))
-}
-
-fn plan_human(diff: &SyncDiff, conflicts: &[String]) -> String {
+fn plan_human(plan: &SyncPlanDto) -> String {
     let mut lines = Vec::new();
     lines.push(i18n::format(
         "sync.plan_added",
-        &[&diff.added.len().to_string()],
+        &[&plan.downloads.len().to_string()],
     ));
-    if !diff.info_modified.is_empty() {
+    if !plan.metadata_updates.is_empty() {
         lines.push(i18n::format(
             "sync.plan_info",
-            &[&diff.info_modified.len().to_string()],
+            &[&plan.metadata_updates.len().to_string()],
         ));
     }
-    if !diff.deleted.is_empty() {
+    if !plan.deletions.is_empty() {
         lines.push(i18n::format(
             "sync.plan_deleted",
-            &[&diff.deleted.len().to_string()],
+            &[&plan.deletions.len().to_string()],
         ));
     }
-    if !conflicts.is_empty() {
+    if !plan.conflicts.is_empty() {
         lines.push(i18n::format(
             "sync.plan_conflicts",
-            &[&conflicts.len().to_string()],
+            &[&plan.conflicts.len().to_string()],
         ));
     }
     lines.join("\n")
 }
 
-fn run_human(result: &SyncRunResult) -> String {
+fn run_human(result: &SyncRunResultDto) -> String {
     let mut lines = Vec::new();
     lines.push(i18n::format(
         "sync.run_done",
@@ -2264,23 +2250,19 @@ fn run_human(result: &SyncRunResult) -> String {
     lines.join("\n")
 }
 
-fn sync_watch_envelope(
-    client: &HandShakerClient,
-    applied: usize,
-    failures: usize,
-) -> serde_json::Value {
+fn sync_watch_envelope(info: &DeviceInfoDto, result: &SyncRunResultDto) -> serde_json::Value {
     serde_json::json!({
         "schema_version": 1,
         "ok": true,
         "command": "sync.watch",
         "device": {
-            "serial": client.device_info().serial,
-            "name": client.device_info().name,
+            "serial": info.serial,
+            "name": info.name,
         },
         "event": "sync.watch",
         "data": {
-            "applied": applied,
-            "failures": failures,
+            "applied": result.downloaded.len() + result.deleted.len(),
+            "failures": result.failures.len(),
         },
         "warnings": [],
     })
@@ -2622,9 +2604,10 @@ async fn run_shell(cli: &Cli) -> Result<()> {
         ))
     })?;
     println!("{}", localizer.text(MessageKey::ShellWelcome));
-    let client = &app.client;
+    let snapshot = session_snapshot(&app).await?;
+    let shell_serial = snapshot.device_info.serial.clone();
     let mut context = CommandContext {
-        remote_cwd: client.root_path().to_string(),
+        remote_cwd: snapshot.device_info.root_path,
         local_cwd: env::current_dir()?,
         in_shell: true,
     };
@@ -2633,7 +2616,7 @@ async fn run_shell(cli: &Cli) -> Result<()> {
         let prompt = i18n::format(
             "shell.prompt",
             &[
-                &sanitize_human(&client.device_info().serial),
+                &sanitize_human(&shell_serial),
                 &sanitize_human(&context.remote_cwd),
             ],
         );
@@ -2813,9 +2796,9 @@ async fn run_shell(cli: &Cli) -> Result<()> {
 async fn run_batch(cli: &Cli) -> Result<()> {
     let app = connect(cli).await?;
     let localizer = ZhCn;
-    let client = &app.client;
+    let snapshot = session_snapshot(&app).await?;
     let mut context = CommandContext {
-        remote_cwd: client.root_path().to_string(),
+        remote_cwd: snapshot.device_info.root_path,
         local_cwd: env::current_dir()?,
         in_shell: true,
     };
@@ -3514,10 +3497,10 @@ mod tests {
                 timestamp_ms: 42,
             }],
         };
-        let device = DeviceInfo {
+        let device = DeviceInfoDto {
             serial: "serial-1".to_string(),
             name: Some("phone".to_string()),
-            ..DeviceInfo::default()
+            ..DeviceInfoDto::default()
         };
         let envelope = super::watch_envelope(&device, &event);
         assert_eq!(envelope["schema_version"], 1);

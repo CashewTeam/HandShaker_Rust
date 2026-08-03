@@ -210,11 +210,6 @@ async fn unknown_session_errors_are_stable() {
         .await
         .expect_err("missing session");
     assert_eq!(error.code, PublicErrorCode::SessionNotFound);
-    let error = match runtime.session_client(SessionId(42)).await {
-        Err(error) => error,
-        Ok(_) => panic!("expected missing session"),
-    };
-    assert_eq!(error.code, PublicErrorCode::SessionNotFound);
     let error = runtime
         .ping(SessionId(42))
         .await
@@ -2504,6 +2499,82 @@ async fn start_sync_without_session_returns_session_not_found() {
         .expect_err("must fail");
     assert_eq!(error.code, PublicErrorCode::SessionNotFound);
     runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn sync_ledger_status_reads_configured_state_dir() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = test_config();
+    config.state_dir = Some(temp.path().to_path_buf());
+    let runtime = HandShakerRuntime::create(config).await.expect("create");
+    let profile = sync_profile("photos", 1);
+    // Seed a ledger through the real store, then verify the summary.
+    let store = runtime.sync_store_for(&profile).expect("store");
+    let mut snapshot = SyncSnapshot::default();
+    snapshot.files.insert(
+        "/a.jpg".to_string(),
+        handshaker_core::SyncFileRecord {
+            size: 100,
+            modified_at: None,
+            checksum: Some("abc".to_string()),
+            ext_data: None,
+            local_path: "/tmp/a.jpg".to_string(),
+            local_sha256: None,
+        },
+    );
+    snapshot.files.insert(
+        "/b.bin".to_string(),
+        handshaker_core::SyncFileRecord {
+            size: 50,
+            modified_at: None,
+            checksum: None,
+            ext_data: None,
+            local_path: "/tmp/b.bin".to_string(),
+            local_sha256: None,
+        },
+    );
+    store.save(&snapshot).expect("save");
+
+    let status = runtime
+        .sync_ledger_status(&profile.device_uuid)
+        .await
+        .expect("status");
+    assert_eq!(status.device_uuid, "dev-1");
+    assert_eq!(status.files, 2);
+    assert_eq!(status.bytes, 150);
+
+    // An empty uuid is refused; a missing ledger reports zero, never an error.
+    let error = runtime
+        .sync_ledger_status("")
+        .await
+        .expect_err("empty uuid");
+    assert_eq!(error.code, PublicErrorCode::InvalidArgument);
+    let status = runtime
+        .sync_ledger_status("no-such-device")
+        .await
+        .expect("missing ledger is zero");
+    assert_eq!(status.files, 0);
+    assert_eq!(status.bytes, 0);
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[test]
+fn sync_watch_applied_event_json_is_stable() {
+    let result = crate::sync::SyncRunResultDto {
+        downloaded: vec!["/a.jpg".to_string()],
+        deleted: Vec::new(),
+        failures: Vec::new(),
+        conflicts: Vec::new(),
+    };
+    let json = serde_json::to_value(crate::event::BackendEvent::SyncWatchApplied(result.clone()))
+        .expect("serialize");
+    assert_eq!(json["kind"], "sync_watch_applied");
+    assert_eq!(json["downloaded"][0], "/a.jpg");
+    let decoded: crate::event::BackendEvent = serde_json::from_value(json).expect("deserialize");
+    assert_eq!(
+        decoded,
+        crate::event::BackendEvent::SyncWatchApplied(result)
+    );
 }
 
 #[tokio::test]

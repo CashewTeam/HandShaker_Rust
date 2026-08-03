@@ -3,8 +3,9 @@ use std::io::{self, Write};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use handshaker_application::DeviceInfoDto;
 use handshaker_core::{
-    DeviceInfo, Error, Result,
+    Error, Result,
     i18n::{self, Localizer, MessageKey, ZhCn},
 };
 
@@ -40,7 +41,7 @@ impl Outcome {
         })
     }
 
-    pub fn with_device(mut self, info: &DeviceInfo) -> Self {
+    pub fn with_device(mut self, info: &DeviceInfoDto) -> Self {
         self.device = Some(DeviceSummary {
             serial: info.serial.clone(),
             name: info.name.clone(),
