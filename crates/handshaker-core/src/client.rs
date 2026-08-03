@@ -171,9 +171,18 @@ impl HandShakerClient {
         crate::discovery::discover_wifi_devices(browse_timeout).await
     }
 
-    /// List locally persisted WiFi trust records (derived keys are never exposed).
+    /// List locally persisted WiFi trust records (derived keys are never
+    /// exposed), using the default state store.
     pub async fn list_trusted_devices() -> Result<Vec<TrustRecordInfo>> {
-        let state = StateStore::discover()?.load_or_create()?;
+        Self::list_trusted_devices_with_store(StateStore::discover()?).await
+    }
+
+    /// List locally persisted WiFi trust records with an explicit state
+    /// store, which controls where trust records live (Phase D / D3).
+    pub async fn list_trusted_devices_with_store(
+        state_store: StateStore,
+    ) -> Result<Vec<TrustRecordInfo>> {
+        let state = state_store.load_or_create()?;
         Ok(state
             .trust
             .iter()
@@ -185,9 +194,19 @@ impl HandShakerClient {
             .collect())
     }
 
-    /// Remove the local trust record for a device; returns whether one existed.
+    /// Remove the local trust record for a device (default state store);
+    /// returns whether one existed.
     pub async fn remove_trusted_device(device_uuid: &str) -> Result<bool> {
-        StateStore::discover()?.remove_trust(device_uuid)
+        Self::remove_trusted_device_with_store(StateStore::discover()?, device_uuid).await
+    }
+
+    /// Remove the local trust record for a device with an explicit state
+    /// store (Phase D / D3); returns whether one existed.
+    pub async fn remove_trusted_device_with_store(
+        state_store: StateStore,
+        device_uuid: &str,
+    ) -> Result<bool> {
+        state_store.remove_trust(device_uuid)
     }
 
     /// Connect over WiFi, send TRUST_REMOVE to clear the phone-side record,
@@ -200,7 +219,7 @@ impl HandShakerClient {
         expected_device_uuid: &str,
         options: ClientOptions,
     ) -> Result<()> {
-        Self::reset_wifi_trust_with_store(
+        Self::reset_wifi_trust_with_state_store(
             address,
             expected_device_uuid,
             options,
@@ -209,7 +228,9 @@ impl HandShakerClient {
         .await
     }
 
-    async fn reset_wifi_trust_with_store(
+    /// Reset WiFi trust with an explicit state store (Phase D / D3), so the
+    /// caller's `state_dir` controls where records live.
+    pub async fn reset_wifi_trust_with_state_store(
         address: SocketAddr,
         expected_device_uuid: &str,
         options: ClientOptions,
@@ -2171,7 +2192,7 @@ mod tests {
         let fake = FakeWifiSsp::start().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let store = StateStore::at(temp.path().join("state.json"));
-        HandShakerClient::reset_wifi_trust_with_store(
+        HandShakerClient::reset_wifi_trust_with_state_store(
             fake.address(),
             WIFI_DEVICE_UUID,
             options(),
@@ -2185,7 +2206,7 @@ mod tests {
         let fake = FakeWifiSsp::start().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let store = StateStore::at(temp.path().join("state.json"));
-        let error = HandShakerClient::reset_wifi_trust_with_store(
+        let error = HandShakerClient::reset_wifi_trust_with_state_store(
             fake.address(),
             "wrong-device",
             options(),

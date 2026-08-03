@@ -38,6 +38,10 @@ use crate::transfer::{
     TransferDirectionDto, TransferFailureDto, TransferId, TransferRegistry, TransferSnapshot,
     TransferState, TreeTransferDto, UploadRequest, request_options, transfer_options,
 };
+use crate::trust::{
+    RemoveTrustRequest, RemoveTrustResult, ResetWifiTrustRequest, TrustRecordDto,
+    parse_phone_device_id,
+};
 
 use tokio::sync::broadcast;
 
@@ -219,6 +223,84 @@ impl HandShakerRuntime {
         Ok(())
     }
 
+    /// Core options derived from this runtime's configuration (Phase D / D5
+    /// helper): every connection, reset and future sync uses the configured
+    /// timeout, heartbeat, wire log and adb path.
+    fn client_options(&self) -> ClientOptions {
+        ClientOptions {
+            timeout: self.inner.config.default_timeout,
+            heartbeat_interval: self.inner.config.heartbeat_interval,
+            wire_log: self.inner.config.wire_log.clone(),
+            adb_path: self.inner.config.adb_path.clone(),
+        }
+    }
+
+    /// State store rooted at the runtime's configured `state_dir` (Phase D /
+    /// D3): trust, host UUID and future sync ledgers must all live where the
+    /// caller configured them. Without a configured dir the core default
+    /// config directory is used.
+    fn state_store(&self) -> AppResult<handshaker_core::StateStore> {
+        match &self.inner.config.state_dir {
+            Some(dir) => Ok(handshaker_core::StateStore::from_dir(dir)),
+            None => handshaker_core::StateStore::discover()
+                .map_err(|error| from_core_error(error, "state_store")),
+        }
+    }
+
+    // ---- trust service (Phase D / D3) ----
+
+    /// List locally persisted WiFi trust records. Derived keys never cross
+    /// the application boundary.
+    pub async fn list_trust_records(&self) -> AppResult<Vec<TrustRecordDto>> {
+        self.ensure_open()?;
+        let records = HandShakerClient::list_trusted_devices_with_store(self.state_store()?)
+            .await
+            .map_err(|error| from_core_error(error, "trust.list"))?;
+        Ok(records
+            .into_iter()
+            .map(|record| TrustRecordDto {
+                device_id: DeviceId(format!("phone:{}", record.device_uuid)),
+                device_name: record.device_name,
+                updated_at_ms: record.updated_at.saturating_mul(1000),
+            })
+            .collect())
+    }
+
+    /// Remove the local trust record for one device. Only the local record is
+    /// touched; the phone-side trust is cleared with [`Self::reset_wifi_trust`].
+    pub async fn remove_trust_record(
+        &self,
+        request: RemoveTrustRequest,
+    ) -> AppResult<RemoveTrustResult> {
+        self.ensure_open()?;
+        let uuid = parse_phone_device_id(&request.device_id)?;
+        let removed = HandShakerClient::remove_trusted_device_with_store(self.state_store()?, uuid)
+            .await
+            .map_err(|error| from_core_error(error, "trust.remove"))?;
+        Ok(RemoveTrustResult { removed })
+    }
+
+    /// Clear the phone-side WiFi trust for a device, then delete the local
+    /// record. The connected phone must report the expected UUID; a mismatch
+    /// aborts the reset instead of touching a different device.
+    pub async fn reset_wifi_trust(&self, request: ResetWifiTrustRequest) -> AppResult<()> {
+        self.ensure_open()?;
+        let address = request.endpoint.parse().map_err(|_| {
+            PublicError::new(PublicErrorCode::InvalidArgument, "invalid wifi endpoint")
+                .operation("trust.reset")
+        })?;
+        let uuid = parse_phone_device_id(&request.expected_device_id)?;
+
+        HandShakerClient::reset_wifi_trust_with_state_store(
+            address,
+            uuid,
+            self.client_options(),
+            self.state_store()?,
+        )
+        .await
+        .map_err(|error| from_core_error(error, "trust.reset"))
+    }
+
     /// Discover devices across the enabled transports with per-transport
     /// diagnostics (Phase D / D1). A single broken transport never fails the
     /// whole sweep: its failure is reported as a structured warning next to
@@ -287,20 +369,11 @@ impl HandShakerRuntime {
     pub async fn connect(&self, request: ConnectRequest) -> AppResult<SessionId> {
         self.ensure_open()?;
         let target = connection_target_for(&request.device)?;
-        let options = ClientOptions {
-            timeout: self.inner.config.default_timeout,
-            heartbeat_interval: self.inner.config.heartbeat_interval,
-            wire_log: self.inner.config.wire_log.clone(),
-            adb_path: self.inner.config.adb_path.clone(),
-        };
+        let options = self.client_options();
         // state_dir must really control where trust records and the host
-        // UUID live (M8.1 Phase B / B4): explicit dir when configured,
-        // otherwise the core default config directory.
-        let state_store = match &self.inner.config.state_dir {
-            Some(dir) => handshaker_core::StateStore::from_dir(dir),
-            None => handshaker_core::StateStore::discover()
-                .map_err(|error| from_core_error(error, "connect"))?,
-        };
+        // UUID live (M8.1 Phase B / B4 + Phase D / D3): explicit dir when
+        // configured, otherwise the core default config directory.
+        let state_store = self.state_store()?;
         let client = HandShakerClient::connect_with_state(
             target,
             options,

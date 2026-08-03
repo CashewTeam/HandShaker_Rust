@@ -13,6 +13,7 @@ mod event;
 mod media;
 mod runtime;
 mod transfer;
+mod trust;
 
 pub use discovery::{DeviceDiscoveryResult, DeviceDiscoveryWarning};
 pub use dto::{
@@ -34,6 +35,7 @@ pub use transfer::{
     TransferDirectionDto, TransferFailureDto, TransferId, TransferRegistry, TransferSnapshot,
     TransferState, TreeTransferDto, UploadRequest,
 };
+pub use trust::{RemoveTrustRequest, RemoveTrustResult, ResetWifiTrustRequest, TrustRecordDto};
 
 #[cfg(test)]
 mod tests;

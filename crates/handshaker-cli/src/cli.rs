@@ -23,7 +23,8 @@ use handshaker_application::{
     BatchTransferItemDto, BatchTransferRequest, ConnectRequest, CountFilesRequest,
     CreateDirectoryRequest, DeletePathsRequest, DeviceDescriptor, DeviceId, FileEntryDto,
     HandShakerRuntime, ListDevicesRequest, ListFilesRequest, MovePathRequest, PublicError,
-    RuntimeConfig, SessionId, StatFileRequest, TransferFailureDto, TransportKind, TreeTransferDto,
+    RemoveTrustRequest, ResetWifiTrustRequest, RuntimeConfig, SessionId, StatFileRequest,
+    TransferFailureDto, TransportKind, TreeTransferDto, TrustRecordDto,
 };
 
 use crate::output::{Outcome, render};
@@ -664,16 +665,21 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
         let outcome = device_discover(&cli).await?;
         return render(&outcome, cli.output);
     }
-    if matches!(cli.command, Command::Trust(TrustCommand::List)) {
-        let outcome = trust_list().await?;
-        return render(&outcome, cli.output);
-    }
-    if matches!(cli.command, Command::Trust(TrustCommand::Remove { .. })) {
-        let outcome = trust_remove(&cli).await?;
-        return render(&outcome, cli.output);
-    }
-    if matches!(cli.command, Command::Trust(TrustCommand::Reset { .. })) {
-        let outcome = trust_reset(&cli).await?;
+    if matches!(cli.command, Command::Trust(_)) {
+        // Trust commands need the runtime's state store (Phase D / D3): the
+        // runtime roots trust records at the configured state dir.
+        let runtime = Arc::new(
+            HandShakerRuntime::create(runtime_config(&cli))
+                .await
+                .map_err(app_error)?,
+        );
+        let outcome = match &cli.command {
+            Command::Trust(TrustCommand::List) => trust_list(&runtime).await?,
+            Command::Trust(TrustCommand::Remove { .. }) => trust_remove(&cli, &runtime).await?,
+            Command::Trust(TrustCommand::Reset { .. }) => trust_reset(&cli, &runtime).await?,
+            _ => unreachable!("trust branch only runs for trust commands"),
+        };
+        let _ = runtime.shutdown().await;
         return render(&outcome, cli.output);
     }
     if matches!(cli.command, Command::Shell) {
@@ -1112,7 +1118,7 @@ async fn device_discover(cli: &Cli) -> Result<Outcome> {
     Outcome::new("device.discover", devices, human)
 }
 
-fn human_trust_records(records: &[handshaker_core::TrustRecordInfo]) -> String {
+fn human_trust_records(records: &[TrustRecordDto]) -> String {
     let localizer = ZhCn;
     if records.is_empty() {
         return localizer.text(MessageKey::TrustNone).to_string();
@@ -1121,19 +1127,48 @@ fn human_trust_records(records: &[handshaker_core::TrustRecordInfo]) -> String {
     lines.extend(records.iter().map(|record| {
         format!(
             "{}\t{}",
-            record.device_uuid,
+            trust_device_uuid(record),
             record.device_name.as_deref().unwrap_or("-")
         )
     }));
     lines.join("\n")
 }
 
-async fn trust_list() -> Result<Outcome> {
-    let records = HandShakerClient::list_trusted_devices().await?;
-    Outcome::new("trust.list", records.clone(), human_trust_records(&records))
+/// The raw phone UUID of a trust record (the application DTO carries it as
+/// the stable `phone:<uuid>` device id).
+fn trust_device_uuid(record: &TrustRecordDto) -> &str {
+    record
+        .device_id
+        .0
+        .strip_prefix("phone:")
+        .unwrap_or(&record.device_id.0)
 }
 
-async fn trust_remove(cli: &Cli) -> Result<Outcome> {
+/// Legacy `trust list` JSON payload, byte-compatible with the pre-migration
+/// output (device_uuid / device_name / updated_at in seconds).
+fn legacy_trust_records(records: &[TrustRecordDto]) -> serde_json::Value {
+    serde_json::json!(
+        records
+            .iter()
+            .map(|record| serde_json::json!({
+                "device_uuid": trust_device_uuid(record),
+                "device_name": record.device_name,
+                "updated_at": record.updated_at_ms / 1000,
+            }))
+            .collect::<Vec<_>>()
+    )
+}
+
+async fn trust_list(runtime: &HandShakerRuntime) -> Result<Outcome> {
+    let records = runtime.list_trust_records().await.map_err(app_error)?;
+    Outcome::new(
+        "trust.list",
+        legacy_trust_records(&records),
+        human_trust_records(&records),
+    )
+}
+
+async fn trust_remove(cli: &Cli, runtime: &HandShakerRuntime) -> Result<Outcome> {
     let device_uuid = match &cli.command {
         Command::Trust(TrustCommand::Remove { device_uuid }) => device_uuid,
         _ => unreachable!("trust_remove only runs for Trust::Remove"),
@@ -1143,8 +1178,13 @@ async fn trust_remove(cli: &Cli) -> Result<Outcome> {
         cli.yes,
         cli.output,
     )?;
-    let removed = HandShakerClient::remove_trusted_device(device_uuid).await?;
-    if !removed {
+    let result = runtime
+        .remove_trust_record(RemoveTrustRequest {
+            device_id: DeviceId(format!("phone:{device_uuid}")),
+        })
+        .await
+        .map_err(app_error)?;
+    if !result.removed {
         return Err(Error::Configuration(
             ZhCn.format(MessageKey::TrustMissing, &[device_uuid]),
         ));
@@ -1156,7 +1196,7 @@ async fn trust_remove(cli: &Cli) -> Result<Outcome> {
     )
 }
 
-async fn trust_reset(cli: &Cli) -> Result<Outcome> {
+async fn trust_reset(cli: &Cli, runtime: &HandShakerRuntime) -> Result<Outcome> {
     let device_uuid = match &cli.command {
         Command::Trust(TrustCommand::Reset { device_uuid }) => device_uuid,
         _ => unreachable!("trust_reset only runs for Trust::Reset"),
@@ -1169,20 +1209,18 @@ async fn trust_reset(cli: &Cli) -> Result<Outcome> {
         cli.yes,
         cli.output,
     )?;
-    HandShakerClient::reset_wifi_trust(address, device_uuid, client_options(cli)).await?;
+    runtime
+        .reset_wifi_trust(ResetWifiTrustRequest {
+            endpoint: address.to_string(),
+            expected_device_id: DeviceId(format!("phone:{device_uuid}")),
+        })
+        .await
+        .map_err(app_error)?;
     Outcome::new(
         "trust.reset",
         serde_json::json!({ "device_uuid": device_uuid, "address": address.to_string() }),
         ZhCn.format(MessageKey::TrustResetDone, &[device_uuid]),
     )
-}
-
-fn client_options(cli: &Cli) -> ClientOptions {
-    ClientOptions {
-        timeout: cli.timeout,
-        wire_log: cli.wire_log.clone(),
-        ..Default::default()
-    }
 }
 
 fn parse_socket_addr(value: &str) -> std::result::Result<SocketAddr, String> {

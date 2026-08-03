@@ -395,7 +395,7 @@ fn reconcile_phone_id_becomes_stable_device_id() {
     let info = crate::dto::DeviceInfoDto {
         serial: "s1".to_string(),
         phone_id: Some("9a3f-77ee".to_string()),
-        name: Some("我的手机".to_string()),
+        name: Some("My Phone".to_string()),
         model: Some("OD103".to_string()),
         brand: None,
         manufacturer: None,
@@ -416,7 +416,7 @@ fn reconcile_phone_id_becomes_stable_device_id() {
     );
     // Discovery id (endpoint) stays untouched; name/model are backfilled.
     assert_eq!(reconciled.id, discovered.id);
-    assert_eq!(reconciled.display_name.as_deref(), Some("我的手机"));
+    assert_eq!(reconciled.display_name.as_deref(), Some("My Phone"));
     assert_eq!(reconciled.model.as_deref(), Some("OD103"));
     // The discovery endpoint id must not be confused with the stable id.
     assert_ne!(reconciled.stable_id.as_ref(), Some(&reconciled.id));
@@ -682,6 +682,173 @@ fn discovery_result_json_contract_is_stable() {
     let decoded: crate::discovery::DeviceDiscoveryResult =
         serde_json::from_value(json).expect("deserialize");
     assert_eq!(decoded, result);
+}
+
+// ---- Phase D / D3: trust service ----
+
+/// Write a core `State` file with the given trust records into a state dir,
+/// so tests exercise the real `state.json` layout (schema_version 1, host
+/// UUID, BTreeMap keyed by device UUID).
+fn write_state_file(dir: &std::path::Path, trust: serde_json::Value) {
+    let state = serde_json::json!({
+        "schema_version": 1,
+        "host_uuid": "00000000-0000-0000-0000-000000000001",
+        "trust": trust,
+    });
+    std::fs::write(dir.join("state.json"), state.to_string()).expect("write state.json");
+}
+
+fn test_config_with_dir(dir: &std::path::Path) -> RuntimeConfig {
+    let mut config = test_config();
+    config.state_dir = Some(dir.to_path_buf());
+    config
+}
+
+#[tokio::test]
+async fn trust_records_list_uses_configured_state_dir() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_state_file(
+        temp.path(),
+        serde_json::json!({
+            "uuid-1": { "device_name": "Phone A", "derived_key": "c2VjcmV0", "updated_at": 1700000000 },
+            "uuid-2": { "device_name": null, "derived_key": "ZGVy", "updated_at": 1700000001 },
+        }),
+    );
+    let runtime = HandShakerRuntime::create(test_config_with_dir(temp.path()))
+        .await
+        .expect("create");
+    let records = runtime.list_trust_records().await.expect("list trust");
+    assert_eq!(records.len(), 2);
+    let first = records
+        .iter()
+        .find(|r| r.device_id.0 == "phone:uuid-1")
+        .expect("uuid-1");
+    assert_eq!(first.device_name.as_deref(), Some("Phone A"));
+    assert_eq!(first.updated_at_ms, 1_700_000_000_000);
+    let second = records
+        .iter()
+        .find(|r| r.device_id.0 == "phone:uuid-2")
+        .expect("uuid-2");
+    assert_eq!(second.device_name, None);
+    // Derived keys must never cross the application boundary.
+    let json = serde_json::to_value(&records).expect("serialize");
+    assert!(!json.to_string().contains("derived_key"));
+    assert!(!json.to_string().contains("c2VjcmV0"));
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn remove_trust_record_only_touches_configured_state_dir() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_state_file(
+        temp.path(),
+        serde_json::json!({
+            "uuid-1": { "device_name": "Phone A", "derived_key": "c2VjcmV0", "updated_at": 1700000000 },
+        }),
+    );
+    let runtime = HandShakerRuntime::create(test_config_with_dir(temp.path()))
+        .await
+        .expect("create");
+    let result = runtime
+        .remove_trust_record(crate::trust::RemoveTrustRequest {
+            device_id: DeviceId("phone:uuid-1".to_string()),
+        })
+        .await
+        .expect("remove");
+    assert!(result.removed);
+    // Removing again reports it was already gone.
+    let result = runtime
+        .remove_trust_record(crate::trust::RemoveTrustRequest {
+            device_id: DeviceId("phone:uuid-1".to_string()),
+        })
+        .await
+        .expect("remove again");
+    assert!(!result.removed);
+    let records = runtime.list_trust_records().await.expect("list");
+    assert!(records.is_empty());
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn remove_trust_rejects_malformed_device_id() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_state_file(temp.path(), serde_json::json!({}));
+    let runtime = HandShakerRuntime::create(test_config_with_dir(temp.path()))
+        .await
+        .expect("create");
+    for raw in ["uuid-1", "phone:", "adb:serial"] {
+        let error = runtime
+            .remove_trust_record(crate::trust::RemoveTrustRequest {
+                device_id: DeviceId(raw.to_string()),
+            })
+            .await
+            .expect_err("must reject");
+        assert_eq!(error.code, PublicErrorCode::InvalidArgument);
+    }
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn trust_api_after_shutdown_returns_runtime_closed() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_state_file(temp.path(), serde_json::json!({}));
+    let runtime = HandShakerRuntime::create(test_config_with_dir(temp.path()))
+        .await
+        .expect("create");
+    runtime.shutdown().await.expect("shutdown");
+    let error = runtime
+        .list_trust_records()
+        .await
+        .expect_err("must be closed");
+    assert_eq!(error.code, PublicErrorCode::RuntimeClosed);
+    let error = runtime
+        .remove_trust_record(crate::trust::RemoveTrustRequest {
+            device_id: DeviceId("phone:uuid-1".to_string()),
+        })
+        .await
+        .expect_err("must be closed");
+    assert_eq!(error.code, PublicErrorCode::RuntimeClosed);
+    let error = runtime
+        .reset_wifi_trust(crate::trust::ResetWifiTrustRequest {
+            endpoint: "192.168.2.47:45656".to_string(),
+            expected_device_id: DeviceId("phone:uuid-1".to_string()),
+        })
+        .await
+        .expect_err("must be closed");
+    assert_eq!(error.code, PublicErrorCode::RuntimeClosed);
+}
+
+#[test]
+fn trust_record_dto_json_contract_is_stable() {
+    let record = crate::trust::TrustRecordDto {
+        device_id: DeviceId("phone:uuid-1".to_string()),
+        device_name: Some("Phone A".to_string()),
+        updated_at_ms: 1_700_000_000_000,
+    };
+    let json = serde_json::to_value(&record).expect("serialize");
+    assert_eq!(json["device_id"], "phone:uuid-1");
+    assert_eq!(json["device_name"], "Phone A");
+    assert_eq!(json["updated_at_ms"], 1_700_000_000_000u64);
+    let decoded: crate::trust::TrustRecordDto = serde_json::from_value(json).expect("deserialize");
+    assert_eq!(decoded, record);
+}
+
+#[tokio::test]
+async fn reset_wifi_trust_rejects_invalid_endpoint() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_state_file(temp.path(), serde_json::json!({}));
+    let runtime = HandShakerRuntime::create(test_config_with_dir(temp.path()))
+        .await
+        .expect("create");
+    let error = runtime
+        .reset_wifi_trust(crate::trust::ResetWifiTrustRequest {
+            endpoint: "not-an-endpoint".to_string(),
+            expected_device_id: DeviceId("phone:uuid-1".to_string()),
+        })
+        .await
+        .expect_err("invalid endpoint");
+    assert_eq!(error.code, PublicErrorCode::InvalidArgument);
+    runtime.shutdown().await.expect("shutdown");
 }
 
 #[test]
