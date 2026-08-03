@@ -415,7 +415,7 @@ impl HandShakerRuntime {
             .await
             .map_err(|error| from_core_error(error, "delete_paths"))?;
         Ok(DeleteResultDto {
-            deleted: deleted.into_iter().map(|file| file.path).collect(),
+            deleted: deleted.into_iter().map(remote_file_to_dto).collect(),
         })
     }
 

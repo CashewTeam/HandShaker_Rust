@@ -11,7 +11,7 @@ use rustyline::error::ReadlineError;
 use serde::Serialize;
 
 use handshaker_core::{
-    ClientEvent, ClientOptions, ConnectionTarget, DeleteOptions, DeviceInfo, Error, EventCallbacks,
+    ClientEvent, ClientOptions, ConnectionTarget, DeviceInfo, Error, EventCallbacks,
     EventFilter, EventStreamError, HandShakerClient, RemoteFile, Result, StateStore, SyncConfig,
     SyncDiff, SyncRunResult, SyncSnapshot, SyncStore, apply_file_change, check_conflicts,
     default_config_dir, execute_plan,
@@ -21,9 +21,9 @@ use handshaker_core::{
 
 use handshaker_application::{
     BatchTransferItemDto, BatchTransferRequest, ConnectRequest, CreateDirectoryRequest,
-    DeviceDescriptor, DeviceId, FileEntryDto, HandShakerRuntime, ListDevicesRequest,
-    ListFilesRequest, MovePathRequest, PublicError, RuntimeConfig, SessionId, StatFileRequest,
-    TransferFailureDto, TransportKind, TreeTransferDto,
+    DeletePathsRequest, DeviceDescriptor, DeviceId, FileEntryDto, HandShakerRuntime,
+    ListDevicesRequest, ListFilesRequest, MovePathRequest, PublicError, RuntimeConfig, SessionId,
+    StatFileRequest, TransferFailureDto, TransportKind, TreeTransferDto,
 };
 
 use crate::output::{Outcome, render};
@@ -1346,10 +1346,18 @@ async fn execute_connected(
                 .map(|path| resolve_remote(&context.remote_cwd, path))
                 .collect();
             for path in &paths {
-                let file = client.stat(path).await?.ok_or_else(|| Error::RemoteIo {
-                    code: None,
-                    message: localizer.format(MessageKey::RemoteMissing, &[path]),
-                })?;
+                let file = session
+                    .runtime
+                    .stat_file(StatFileRequest {
+                        session_id: session.session_id,
+                        path: path.clone(),
+                    })
+                    .await
+                    .map_err(app_error)?
+                    .ok_or_else(|| Error::RemoteIo {
+                        code: None,
+                        message: localizer.format(MessageKey::RemoteMissing, &[path]),
+                    })?;
                 if file.is_directory && !recursive {
                     return Err(Error::Usage(
                         localizer.format(MessageKey::DeleteRecursiveRequired, &[path]),
@@ -1361,19 +1369,21 @@ async fn execute_connected(
                 yes,
                 format,
             )?;
-            let deleted = client
-                .delete(
-                    &paths,
-                    DeleteOptions {
-                        trash: *trash,
-                        sync: false,
-                    },
-                )
-                .await?;
+            let deleted = session
+                .runtime
+                .delete_paths(DeletePathsRequest {
+                    session_id: session.session_id,
+                    paths: paths.clone(),
+                    trash: *trash,
+                    sync: false,
+                })
+                .await
+                .map_err(app_error)?;
+            let entries: Vec<_> = deleted.deleted.iter().map(cli_file_entry).collect();
             Outcome::new(
                 "fs.rm",
-                &deleted,
-                localizer.format(MessageKey::DeletedCount, &[&deleted.len().to_string()]),
+                &entries,
+                localizer.format(MessageKey::DeletedCount, &[&entries.len().to_string()]),
             )?
         }
         Command::Fs(FsCommand::Pull {

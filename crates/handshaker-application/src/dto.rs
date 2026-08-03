@@ -225,9 +225,11 @@ pub struct DeletePathsRequest {
     pub sync: bool,
 }
 
-/// Result of a delete request.
+/// Result of a delete request. `deleted` carries the confirmed deleted
+/// entries in `FileEntryDto` shape (mirrors core `RemoteFile`), so callers
+/// can render the same JSON contract as the legacy core response.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DeleteResultDto {
-    /// Paths the phone confirmed deleted.
-    pub deleted: Vec<String>,
+    /// Entries the phone confirmed deleted (post-delete snapshot shape).
+    pub deleted: Vec<FileEntryDto>,
 }
