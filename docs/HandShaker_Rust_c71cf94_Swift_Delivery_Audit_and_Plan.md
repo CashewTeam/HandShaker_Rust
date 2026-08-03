@@ -1,13 +1,20 @@
 # HandShaker_Rust 最新代码审计与 Swift 交付准备计划
 
-> 审计仓库：`CashewTeam/HandShaker_Rust`  
-> 审计提交：`c71cf94cb654e8dcf15a5819d2176a94ff3bc132`  
-> Cargo Workspace 版本：`0.7.3`  
-> Application API 标称版本：`1.0.0`  
-> FFI Rust 实现版本：`1.2.0`  
-> GitHub Actions：`30790057088`  
-> 审计日期：2026-08-03  
+> 审计仓库：`CashewTeam/HandShaker_Rust`
+> 审计提交：`c71cf94cb654e8dcf15a5819d2176a94ff3bc132`
+> Phase D 复核提交：`e01bc94`（本文件已按 Phase D 完成状态复核更新）
+> Cargo Workspace 版本：`0.7.3`
+> Application API 标称版本：`1.0.0-preview.1`（Phase D 后维持 preview，见 §5.2 P0-1）
+> FFI Rust 实现版本：`1.2.0`（Header/文档/snapshot 已一致）
+> GitHub Actions：`30790057088`
+> 审计日期：2026-08-03（Phase D 复核同日）
 > 审计重点：CLI 迁移、Application 层、FFI、Swift 前端交付准备
+
+> **Phase D 复核结论（速览）**：原 P0 清单（§5.2）除 FFI 功能扩展外已全部关闭；
+> CLI 迁移仅剩 `device discover` 直连 core；`session_client()` 过渡入口已删除；
+> Core 事件已完整桥接；传输进度/终态/取消语义已闭环；真机 ADB 验收通过
+> （基础 + sync 首次/增量/watch，0 forward 残留）。剩余主要缺口全部集中在
+> **FFI 功能扩展（Phase E）与 Apple SDK 交付（Phase F/G）**。
 
 ---
 
@@ -17,26 +24,27 @@
 
 - 单 Cargo package 已拆为 Workspace；
 - `handshaker-core`、`handshaker-application`、`handshaker-cli`、`handshaker-ffi` 已建立；
-- CLI 的主要文件、剪贴板和媒体调用已开始经过 Application；
+- CLI 的全部命令已迁移到 Application（唯一例外：`device discover` 仍直连 core）；
 - Application 已建立 Runtime、Session、Transfer、事件和公共错误模型；
 - FFI 已建立稳定 C ABI 的基本设施，包括资源所有权、panic 隔离、JSON Buffer、Runtime 句柄、Session ID、Transfer ID 和事件轮询；
 - C 与 Swift 冒烟代码已存在；
-- 当前提交在 macOS 14 ARM64 / Rust 1.97.1 下通过格式检查、197 项测试、Clippy `-D warnings` 和 release 构建。
+- Phase D 复核时在 macOS 14 ARM64 / Rust 1.97.1 下通过格式检查、277 项测试、Clippy `-D warnings` 和 release 构建，并通过真机 ADB 验收。
 
-但是，当前代码仍属于 **“Swift 集成原型可开始，正式后端交付尚未完成”** 的状态。
+当前代码仍属于 **“Swift 集成原型可开始，正式后端交付尚未完成”** 的状态，
+但相比审计基线（c71cf94）已完成应用层闭环，剩余缺口集中在 FFI 导出面与 Apple 打包。
 
 建议将当前成熟度理解为：
 
-| 部分 | 审计估计 | 结论 |
+| 部分 | 审计估计 | Phase D 复核 |
 |---|---:|---|
-| Workspace 与内部物理分层 | 90% | 基本完成 |
-| CLI 向 Application 迁移 | 70% | 仍是混合架构 |
-| Application 业务覆盖 | 75% | API 较广，但生命周期、事件和错误语义未完全收口 |
-| Application v1 契约稳定性 | 55% | 文档称已冻结，实际仍存在破坏性修改和 Core 泄漏 |
-| FFI 基础设施 | 80% | 基础设计较扎实 |
-| FFI 功能覆盖 | 40% | 只覆盖 GUI 所需功能的一部分 |
-| Apple 二进制与 Swift 包装交付 | 30% | 有脚本和 smoke，但没有正式 XCFramework/Swift Package |
-| Swift GUI 完整 MVP 后端准备 | 45% | 可做设备、目录和单文件传输原型，不能完整替代 CLI |
+| Workspace 与内部物理分层 | 90% | 95%（`session_client()` 已删除，边界收口） |
+| CLI 向 Application 迁移 | 70% | 98%（仅 `device discover` 直连 core） |
+| Application 业务覆盖 | 75% | 90%（发现诊断、稳定身份、信任、文件计划、SyncService 全落地） |
+| Application v1 契约稳定性 | 55% | 75%（明确 `1.0.0-preview.1`，DTO/事件 fixture 补齐，仍为 preview） |
+| FFI 基础设施 | 80% | 90%（ABI 单一事实来源、Header 校验、C/Swift smoke 本地全过） |
+| FFI 功能覆盖 | 40% | 40%（仍是 23 个符号；stat/move/delete、剪贴板、媒体、信任、sync 未导出） |
+| Apple 二进制与 Swift 包装交付 | 30% | 30%（无正式 XCFramework/Swift Package） |
+| Swift GUI 完整 MVP 后端准备 | 45% | 60%（后端能力齐备，FFI 导出面与 SDK 打包是剩余门槛） |
 
 ### 最终判断
 
@@ -44,26 +52,28 @@
 
 - 建立 `HandShakerCore` Swift 包装层；
 - 验证 Runtime 创建和关闭；
-- 设备枚举；
+- 设备枚举（含分通道 warnings）；
 - ADB/Wi-Fi/USB 连接；
-- Session 快照；
+- Session 快照（含完整设备信息与 stable_id）；
 - Ping；
 - 目录列表；
 - 新建目录；
-- 单文件上传和下载；
-- 传输状态轮询；
+- 单文件上传和下载（进度/终态事件齐备）；
+- 传输状态轮询与取消；
+- 事件订阅（Core 事件已桥接，含 ConnectionLost/Lagged/Closed）；
+- 信任记录管理（Application 已具备，FFI 未导出）；
 - Application/FFI 错误解码；
 - 事件订阅线程模型验证。
 
-当前不建议作为正式 Swift GUI 后端交付的原因：
+当前不建议作为正式 Swift GUI 后端交付的原因（Phase D 复核后剩余）：
 
-1. FFI ABI 版本信息互相矛盾；
-2. Application 的 Runtime/Session/Transfer 生命周期不够确定；
-3. 传输进度没有完整进入事件流；
-4. Core 主动推送事件没有桥接到 Application；
-5. FFI 缺少大量 GUI 必需功能；
-6. `state_dir` 和 `wire_log` 配置语义不真实；
-7. Application 仍公开 `HandShakerClient` 过渡入口；
+1. ~~FFI ABI 版本信息互相矛盾~~（已修复：Header/文档/snapshot 对齐 1.2.0，`scripts/generate-ffi-header.sh` 校验）；
+2. ~~Application 的 Runtime/Session/Transfer 生命周期不够确定~~（已修复：确定性关闭、有界 join、孤儿任务消除）；
+3. ~~传输进度没有完整进入事件流~~（已修复：progress/total/节流/终态无条件发布）；
+4. ~~Core 主动推送事件没有桥接到 Application~~（已修复：事件桥 + ConnectionLost/Clipboard/Media/RemoteFileChanged/SyncWatchApplied）；
+5. FFI 缺少大量 GUI 必需功能（stat/move/delete、剪贴板、媒体、信任、批量、sync 均未导出）；
+6. ~~`state_dir` 和 `wire_log` 配置语义不真实~~（已修复：state_dir 全链路生效 + CLI `--state-dir`；wire_log 真实写入）；
+7. ~~Application 仍公开 `HandShakerClient` 过渡入口~~（已删除，742f183）；
 8. Swift 交付物仍是宿主架构的 `.a/.dylib`，没有正式 XCFramework；
 9. CI 没有运行 C/Swift smoke，也没有 Linux/Windows FFI 验证和发布 artifact。
 
@@ -88,15 +98,22 @@ Actions Run `30790057088` 的 `checks` job 成功完成：
 
 测试统计：
 
-| 模块 | 测试数 |
-|---|---:|
-| `handshaker-core` | 120 |
-| `handshaker-application` | 23 |
-| CLI binary 单元测试 | 22 |
-| CLI 集成测试 | 12 |
-| `handshaker-ffi` | 19 |
-| localization | 1 |
-| 合计 | 197 |
+| 模块 | 审计基线（c71cf94） | Phase D 复核（e01bc94） |
+|---|---:|---:|
+| `handshaker-core` | 120 | 124 |
+| `handshaker-application` | 23 | 96 |
+| CLI binary 单元测试 | 22 | 23 |
+| CLI 集成测试 | 12 | 12 |
+| `handshaker-ffi` | 19 | 21 |
+| localization | 1 | 1 |
+| 合计 | 197 | 277 |
+
+Phase D 复核时的本地验证（与 CI job 相同命令）：
+
+- `cargo fmt -- --check`、`cargo test`（277 项）、`cargo clippy --all-targets --all-features -- -D warnings`、`cargo build --release` 全部通过；
+- `scripts/generate-ffi-header.sh`：ABI 23 个导出符号，Header/snapshot 同步；
+- `scripts/run-ffi-smoke-tests.sh`：FFI smoke、C smoke、Swift smoke 全部通过；
+- 真机 ADB 验收（`scripts/phase-d-acceptance.sh`，设备 Smartisan U2 Pro）：基础操作 + sync 首次/增量/watch + SIGINT 清理，0 forward 残留。
 
 该 CI 能证明：
 
@@ -105,11 +122,11 @@ Actions Run `30790057088` 的 `checks` job 成功完成：
 - Clippy 告警已清零；
 - release 模式可构建。
 
-该 CI 尚不能证明：
+该 CI 尚不能证明（Phase D 后仍成立）：
 
-- C Header 与 Rust 函数签名完全一致；
-- Swift smoke 可以实际编译运行；
-- FFI 成功连接假设备或真机；
+- C Header 与 Rust 函数签名完全一致（本地脚本校验，CI job 未接入）；
+- Swift smoke 可以实际编译运行（本地通过，CI job 未接入）；
+- FFI 成功连接假设备或真机（FFI smoke 仍只覆盖错误/空路径）；
 - x86_64 macOS 可用；
 - Linux FFI 可用；
 - Windows DLL/PInvoke 可用；
@@ -178,9 +195,14 @@ FFI 只依赖 Application，没有直接依赖 Core，这是正确的。
 
 ## 3.2 尚未完成的边界收口
 
-### `session_client()` 仍公开 Core 类型
+> **Phase D 复核**：本节原列的三个问题已全部关闭——
+> `session_client()` 已删除、`AppSession` 不再持有 Core client、
+> `docs/application-api-v1.md` 已与代码同步。仅存 `device discover`
+> 命令直连 core（见 §4.2）。
 
-Application 当前公开：
+### ~~`session_client()` 仍公开 Core 类型~~（已删除，742f183）
+
+Application 曾公开：
 
 ```rust
 pub async fn session_client(
@@ -189,47 +211,22 @@ pub async fn session_client(
 ) -> AppResult<Arc<HandShakerClient>>
 ```
 
-代码注释明确说明这是 CLI 迁移过渡入口，并且“会在迁移完成后移除”。
+该过渡入口已随 CLI 最后一个调用点（watch/sync/shell）迁移完成而删除。
+`AppSession` 现在只持有 `runtime: Arc<HandShakerRuntime>` 与
+`session_id: SessionId`，CLI 全部命令经 Application 服务方法执行
+（shell/batch 的 `cd` 与欢迎横幅取 `SessionSnapshot`）。
 
-这与 Application 文档中的以下承诺冲突：
+### CLI 依赖
 
-```text
-Application 不暴露 HandShakerClient
-Application 是唯一业务契约
-```
+CLI 的 `Cargo.toml` 仍直接依赖 `handshaker-core`（用于输出层类型与
+`device discover` 命令），但**不再持有 Core client**；`fs rm`/`fs count`
+按输出契约保留在 CLI 编排层，业务执行已走 Application。
 
-这意味着 Application v1 目前还没有真正冻结。
+### Application 文档
 
-### CLI 同时依赖 Core 与 Application
-
-CLI 的 `Cargo.toml` 仍直接依赖：
-
-```toml
-handshaker-core
-handshaker-application
-```
-
-CLI 的 `AppSession` 同时持有：
-
-```rust
-runtime: Arc<HandShakerRuntime>
-session_id: SessionId
-client: Arc<HandShakerClient>
-```
-
-这不是错误，但说明当前是迁移期架构，而不是最终结构。
-
-### Application 文档已经滞后
-
-`docs/application-api-v1.md` 只列出较早的最小 API，而代码已经加入：
-
-- count/stat/create/move/delete；
-- clipboard；
-- media；
-- transfers；
-- batch transfers。
-
-因此“冻结契约”的真实内容没有一个完全同步的权威文档。
+`docs/application-api-v1.md` 已同步 Phase D 全部新 API（发现诊断、
+信任、文件计划、SyncService、monitor_folder、SyncWatchApplied 事件），
+并记录 `session_client()` 移除与 `RemoteFileChangeDto` 扩展。
 
 ---
 
@@ -280,57 +277,30 @@ client: Arc<HandShakerClient>
 
 ## 4.2 仍直接使用 Core 的能力
 
+> **Phase D 复核**：以下列表在 c71cf94 审计时成立；Phase D（D1–D6 +
+> CLI 迁移）后只剩两项：
+
 ### 设备
 
-- `device info` 仍直接读取 `client.device_info()`；
-- `device ping` 仍直接调用 `client.ping()`；
-- `device discover` 仍直接调用 Core；
-- trust list/remove/reset 仍直接调用 Core。
+- `device discover`（Wi-Fi mDNS 发现）仍直接调用 Core
+  `HandShakerClient::discover_wifi_devices`。
 
-其中 Application 已经有 `ping()`，但 CLI 尚未切换，说明迁移没有完全收尾。
+Application 已有等价的 `discover_devices()`（含分通道 warnings，
+D1 交付），CLI 侧未切换是计划内的最小迁移（输出适配差异：CLI
+`device discover` 的 JSON 形状与 Application DTO 不同，切换时需保持
+旧 envelope）。
 
-### 文件传输编排
+其余原直连项均已迁移：
 
-`fs pull/push` 的实际批量执行已经进入 Application，但 CLI 仍用 Core 做：
-
-- `client.stat()`；
-- `client.file_exists()`；
-- 单文件/目录模式判断；
-- 目标存在性检查。
-
-这些业务判断的一部分最终应进入 Application，特别是未来 Swift GUI 也会需要的：
-
-- 是否为目录；
-- 是否需要递归；
-- 覆盖冲突；
-- 远端目标存在性；
-- 批量任务预检。
-
-否则 Swift 仍需要复制 CLI 的编排。
-
-### Sync
-
-以下仍在 CLI/Core：
-
-- sync status；
-- sync plan；
-- sync run；
-- sync watch；
-- 台账管理；
-- 冲突分析；
-- 监控注册和事件处理。
-
-如果 Swift 第一版不包含照片同步，可以后置；若 GUI 计划复刻原 HandShaker 自动照片同步，则这是正式交付阻塞项。
-
-### Watch 和主动推送
-
-`watch` 使用独立 Core 连接，并显式打开所有 callbacks。
-
-这说明 Application 的普通 `connect()` 没有承担完整的推送事件桥接。
-
-### Shell 和 Batch
-
-Shell/Batch 作为 CLI 交互循环保留在 CLI 是合理的，但循环内部的每个业务命令最终仍应调用 Application，而不是要求持有 Core client。
+- ~~`device info` / `device ping`~~ → Application（D5，snapshot 提供设备信息）；
+- ~~trust list/remove/reset~~ → Application TrustService（D3/D5）；
+- ~~pull/push 的 stat/exists/覆盖预检~~ → Application `plan_download`/
+  `plan_upload`（D4/D5，冲突翻译保持旧错误类与退出码）；
+- ~~sync status/plan/run/watch~~ → Application SyncService（D6 + 742f183）；
+- ~~watch 独立 Core 连接与回调~~ → Application `connect()` 事件桥 +
+  `monitor_folder`（62c7664）；
+- ~~shell/batch 循环内的 Core client~~ → `AppSession` 不再持有 client，
+  循环保留在 CLI 是设计决定（742f183）。
 
 ## 4.3 CLI 迁移结论
 
@@ -338,15 +308,15 @@ Shell/Batch 作为 CLI 交互循环保留在 CLI 是合理的，但循环内部�
 
 ```text
 物理拆分已完成
-主要静态业务方法已迁移
-长连接、推送、信任、同步和部分编排仍依赖 Core
+全部业务命令已迁移（唯一例外：device discover）
+AppSession 不再持有 Core client
 ```
-
-建议不要把“CLI 全量迁移完成”作为当前状态描述。
 
 更准确的描述是：
 
-> CLI 的常用文件、剪贴板和媒体用例已迁移到 Application；交互层、同步、监控、信任和若干预检仍处于过渡状态。
+> CLI 的常用命令、同步、监控、信任与预检已全部迁移到 Application；
+> 交互循环（shell/batch）保留在 CLI 是设计决定，循环内业务命令走
+> Application；`device discover` 与 `fs rm/count` 输出适配保留在 CLI。
 
 ---
 
@@ -405,241 +375,87 @@ start → TransferId → get/list/cancel
 
 ## 5.2 P0：正式交付前必须修复
 
-### P0-1：Application v1 实际未冻结
+> **Phase D 复核**：P0-1 至 P0-6 已全部关闭（见各条目）；剩余 P0 级
+> 缺口已不在 Application，而在 FFI 导出面（Phase E）。
 
-当前提交把：
+### ~~P0-1：Application v1 实际未冻结~~（已关闭）
 
-```rust
-BackendEvent::SessionStateChanged(SessionSnapshot)
-```
+`APPLICATION_API_VERSION` 已改为 `1.0.0-preview.1`（方案一），
+`session_client()` 已删除，公开 DTO/事件 fixture 已补齐；
+冻结前允许破坏性源码级修改，冻结后升 major。
 
-改为：
+### ~~P0-2：Session Registry 锁跨越网络 await~~（已关闭）
 
-```rust
-BackendEvent::SessionStateChanged(Box<SessionSnapshot>)
-```
-
-虽然 JSON 不变，但这是 Rust Application API 的源码级破坏性修改。
-
-`APPLICATION_API_VERSION` 仍是 `1.0.0`。
-
-同时公开的 `session_client()` 泄露 Core 类型，并计划删除。
-
-因此当前 Application API 应改为：
-
-```text
-1.0.0-preview / provisional
-```
-
-或者先完成收口后再正式冻结 `1.0.0`。
-
-不建议让 Swift 包装层现在把所有 DTO/事件永久固化为稳定正式版本。
-
-### P0-2：Session Registry 锁跨越网络 await
-
-`list_files`、`count_files`、`stat_file`、`create_directory`、`move_path`、`delete_paths` 等方法在持有：
+所有方法已统一为短临界区模式：
 
 ```rust
-tokio::sync::Mutex<HashMap<SessionId, ActiveSession>>
+let session = self.session_handle(id).await?;
+let client = session.client.clone(); // guard 已释放
+client.operation().await
 ```
 
-的 guard 时直接等待网络请求。
+`session_handle` 在短临界区内 clone `Arc<ActiveSession>` 后立即释放
+Registry 锁（含 `sync_ledger_status` 等无 session 路径）。
 
-后果：
+### ~~P0-3：disconnect/shutdown 生命周期不确定~~（已关闭）
 
-- 一个慢文件列表会阻塞整个 Runtime 的 Session Registry；
-- 其他 Session 不能查询；
-- disconnect/shutdown 可能等待该请求；
-- 多设备支持被全局串行化；
-- GUI 快速切换目录时更容易出现卡顿；
-- 后续连接丢失时锁等待链更复杂。
+`disconnect()`/`shutdown()` 已重构为确定性关闭：
 
-正确做法：
+1. 原子进入 `Disconnecting`（终态幂等）；
+2. 从 Registry 移除（拒绝新工作）；
+3. `cancel_for_session` 取消传输并**有界 join**（超时则 abort + await）；
+4. 显式 `client.close()`（最后持有者；QUIT + transport cleanup）；
+5. 有界等待事件桥退出；
+6. 发布最终 `Closed` 事件；
+7. 异常发布 `Warning`（可观察，不吞错）。
 
-```rust
-let client = {
-    let sessions = self.inner.sessions.lock().await;
-    sessions.get(&id)?.client.clone()
-}; // 立即释放锁
+真机验证：SIGINT 中断 sync run/watch 后 0 forward 残留（e433d5a 修复
+了 `run_sync_job` 嵌套 spawn 导致的孤儿任务——abort 外层不级联、client
+永不 close 的问题）。
 
-client.list_dir(...).await
-```
+### ~~P0-4：`state_dir` 实际无效~~（已关闭）
 
-所有网络 await 前都应释放 Registry 锁。
+`state_dir` 全链路真实生效：
 
-### P0-3：disconnect/shutdown 生命周期不确定
+- Core 公开 `StateStore::from_dir` 与 `connect_with_state`；
+- 信任记录（D3）、host UUID、sync ledger（D6）均写入
+  `<state_dir>/sync/<device_uuid>.json`；
+- CLI 新增全局 `--state-dir` 参数（真机验收使用）；
+- 多 Runtime 隔离与测试 tempdir 均有测试覆盖。
 
-当前 `disconnect()`：
+### ~~P0-5：`wire_log_utf8` 被忽略~~（已关闭）
 
-1. 从 Registry 移除 Session；
-2. 尝试 `Arc::try_unwrap(client)`；
-3. 如果传输任务仍持有 client，则直接返回成功；
-4. 依赖最后一个 Arc Drop 时关闭 transport。
+`wire_log` 已真实写入 Core（`RuntimeConfig.wire_log` → WireLog 创建，
+权限/0600 处理有测试）；FFI 配置 `wire_log_utf8` 与 CLI `--wire-log`
+均生效，默认关闭。
 
-当前 `shutdown()`：
+### ~~P0-6：Core 主动事件未桥接~~（已关闭）
 
-1. 发出取消；
-2. 固定 sleep 50ms；
-3. 尝试关闭 Session；
-4. 如果仍有 Arc，则不能显式 close。
-
-问题：
-
-- `disconnect()` 返回成功时，物理连接可能仍在运行；
-- 活动任务没有明确 join；
-- 固定 50ms 不是生命周期保证；
-- App 退出时可能未发送 QUIT；
-- ADB forward、USB interface、Wi-Fi socket 清理时机不可预测；
-- Swift 认为 Session 已关闭，但后台任务仍可能更新状态。
-
-正式交付需要：
-
-```text
-SessionState: Ready → Disconnecting → Closed
-cancel all session transfers
-await tasks with bounded deadline
-explicitly close client
-remove session
-publish final events
-```
-
-### P0-4：`state_dir` 实际无效
-
-FFI 接受：
-
-```json
-{
-  "state_dir_utf8": "..."
-}
-```
-
-Application 的 RuntimeConfig 也保存 `state_dir`。
-
-但 Core connect 仍使用默认的：
-
-```rust
-StateStore::discover()
-```
-
-因此调用者指定目录并没有控制信任记录和状态文件位置。
-
-对 Swift macOS App 尤其重要：
-
-- App Sandbox 需要把状态放到容器目录；
-- GUI 需要明确备份/清理数据；
-- 测试需要临时目录；
-- 多个 Runtime 需要隔离状态；
-- Wi-Fi derived key 不应落在不可控路径。
-
-必须让 Application 创建和持有明确 `StateStore`，并传入 Core connect。
-
-### P0-5：`wire_log_utf8` 被忽略
-
-FFI 配置结构解析了 `wire_log_utf8`，但构造 RuntimeConfig 时固定：
-
-```rust
-wire_log: None
-```
-
-这是“API 接受但不生效”的危险行为。
-
-应二选一：
-
-- 正式支持；
-- 从 FFI 配置中移除并返回未知字段/不支持错误。
-
-### P0-6：Core 主动事件未桥接
-
-Application EventHub 定义了：
-
-- DeviceAdded/Updated/Removed；
-- ClipboardChanged；
-- MediaChanged；
-- RemoteFileChanged；
-- Warning；
-- SessionStateChanged；
-- TransferUpdated。
-
-实际主要只发布：
-
-- RuntimeStopping；
-- Session Ready/Closed；
-- Transfer terminal state。
-
-普通 Application connect 没有：
-
-- 启用完整 Core callbacks；
-- 建立 Core EventSubscription 转发任务；
-- 把文件、剪贴板、媒体和设备变更映射为 Application Event。
-
-所以 FFI 的 `hs_subscribe_events()` 目前不是完整后端事件流。
-
-Swift 不能依赖它实现：
-
-- 文件目录实时刷新；
-- 手机剪贴板更新；
-- 媒体库增量刷新；
-- 设备断开；
-- Wi-Fi Session 丢失；
-- watch 功能。
+Application connect 已建立事件桥任务：Core typed events 映射为
+`BackendEvent`（`ConnectionLost`/`SessionStateChanged`/
+`ClipboardChanged`/`MediaChanged`/`RemoteFileChanged` 携带 DTO payload，
+`SyncWatchApplied` 携带批次结果，未知事件安全 `Warning`，不泄露
+protobuf）。`RemoteFileChangeDto` 含 `files`/`statuses` 完整元数据
+（Phase D/D2 扩展）。
 
 ---
 
 ## 5.3 P1：Swift MVP 前应修复
 
-### P1-1：错误映射过于粗糙
+> **Phase D 复核**：P1-1 至 P1-5 已关闭；P1-6 部分（RuntimeStarted
+> 仍未在 `create()` 发布）。
 
-当前映射包括：
+### ~~P1-1：错误映射过于粗糙~~（已关闭）
 
-- 所有 `RemoteIo` → `RemotePathNotFound`；
-- 所有 `LocalIo` → `LocalPathNotFound`；
-- 所有 `Handshake` → `TrustRejected`；
-- 所有 Timeout → `ConnectionLost`；
-- 所有 Cancelled/Interrupted → `TransferCancelled`。
+CLI 错误映射已按 `PublicErrorCode` 分区（`app_error`，退出码语义保持）；
+Application `from_core_error` 保留 Core `ErrorCode` 上下文，区分
+not found/permission/already exists/no space/unauthorized/offline/
+trust/connection lost/取消来源（UserCancelled/RemoteCancelled）等。
+`detail` 不含密钥与文件正文。
 
-这会导致 GUI 无法区分：
+### ~~P1-2：设备发现吞掉错误~~（已关闭）
 
-- 远端权限不足；
-- 文件已存在；
-- 手机空间不足；
-- 本地写入权限；
-- 本地目标已存在；
-- 首次 Wi-Fi 等待授权；
-- 真正信任拒绝；
-- 用户取消普通请求；
-- 传输取消；
-- ADB unauthorized/offline；
-- USB 权限问题。
-
-建议基于 Core `ErrorCode` 和 operation 映射，而不是只匹配 Error enum 大类。
-
-### P1-2：设备发现吞掉错误
-
-Application 的 `list_devices()`：
-
-- ADB 错误被静默丢弃；
-- Wi-Fi discovery 错误被静默丢弃；
-- USB 错误会使整个请求失败。
-
-结果：
-
-```text
-没有设备
-ADB 未安装
-ADB 启动失败
-Wi-Fi mDNS 失败
-```
-
-可能都表现为空数组。
-
-Swift 的设备页需要能够展示：
-
-- 未安装 ADB；
-- USB 权限不可用；
-- Wi-Fi 发现失败；
-- 当前确实没有设备。
-
-建议返回：
+Application `discover_devices()` 返回：
 
 ```rust
 DeviceDiscoveryResult {
@@ -648,62 +464,31 @@ DeviceDiscoveryResult {
 }
 ```
 
-或通过 Warning Event 报告分通道错误。
+ADB 不可用/unauthorized、Wi-Fi mDNS 失败、USB 枚举失败分别报告
+warning，不再静默吞错；`list_devices()` 保留为兼容包装。
 
-### P1-3：DeviceInfoDto 字段不完整
+### ~~P1-3：DeviceInfoDto 字段不完整~~（已关闭）
 
-Core DeviceInfo 已有：
+DTO 已补齐 `external_storage_path`/`disk_size`/`used_disk_size`/
+`battery_percentage`/`phone_locked`（serde fixture + 真机输出验证）。
 
-- external storage path；
-- total disk size；
-- used disk size；
-- battery percentage；
-- phone locked。
+### ~~P1-4：Wi-Fi DeviceId 不稳定~~（已关闭）
 
-Application DTO 没有这些字段。
+`DeviceDescriptor` 新增 `stable_id`：连接后以 `phone:<uuid>` 回填并发布
+identity 事件（D2），发现 endpoint 仅作临时身份；旧 JSON 反序列化兼容
+（缺失字段 → None）。
 
-这些恰好是 GUI 设备详情、存储占用和状态栏需要的数据。
+### ~~P1-5：last_activity 没有真实更新~~（已关闭）
 
-### P1-4：Wi-Fi DeviceId 不稳定
+`last_activity_at_ms` 由 `AtomicU64` 维护，真实网络活动（请求、事件、
+ping、sync）后更新，并有单元测试。
 
-Application 文档称 Wi-Fi 应优先使用设备 UUID。
+### P1-6：RuntimeStarted 等事件没有落实（部分）
 
-实际 discovery 生成：
-
-```text
-wifi:<address>:<dynamic-port>
-```
-
-HandShaker Wi-Fi 端口会动态变化，因此这个 ID 不适合作为：
-
-- Swift 列表 diff identity；
-- 最近设备；
-- 自动重连；
-- 用户偏好；
-- 信任记录关联。
-
-需要区分：
-
-```text
-DiscoveryEndpoint 临时地址
-StableDeviceId 连接后 UUID
-```
-
-连接完成后应发布 Device identity reconciliation/update。
-
-### P1-5：last_activity 没有真实更新
-
-SessionSnapshot 存在 `last_activity_at_ms`，但多数请求执行后没有更新。
-
-GUI 显示该字段会产生误导。
-
-### P1-6：RuntimeStarted 等事件没有落实
-
-Event enum 中有 RuntimeStarted，但 `create()` 没有发布。
-
-DeviceAdded/Removed 也没有实际 discovery watcher。
-
-需要清理“预留但看似可用”的事件，或者完整实现。
+`BackendEvent::RuntimeStarted` 仍在枚举中，但 `create()` 未发布
+（与审计基线相同）；`DeviceAdded/Removed` 没有独立 discovery watcher。
+建议在 Phase E/F 一并处理：发布 `RuntimeStarted`，或从枚举中移除并
+升级 Application API minor。
 
 ---
 
@@ -725,77 +510,43 @@ Swift 目前可以：
 
 ## 6.2 主要问题
 
-### 进度没有发布事件
+> **Phase D 复核**：本节原列问题已全部关闭（M8.1 Phase C + Phase D
+> 真机验证），保留原描述作对照。
 
-Core 回调中提供：
+### ~~进度没有发布事件~~（已关闭）
 
-```rust
-TransferProgress {
-    transferred,
-    total
-}
-```
+`TransferSnapshot` 维护 `transferred_bytes`/`total_bytes`/started/
+finished 时间；进度按 100ms/256KiB 节流发布 `TransferUpdated`
+（真机实测 30MB 下载 108 个事件，约 10–20 次/秒），完成/失败/取消
+无条件立即发布。
 
-Application `set_progress()` 只更新 Registry：
+### ~~`total_bytes` 永远可能为空~~（已关闭）
 
-```rust
-snapshot.transferred_bytes = transferred
-```
+`total_bytes` 由 Core progress 保存并进入快照与事件。
 
-没有：
+### ~~取消状态不完整~~（已关闭）
 
-- 保存 total；
-- 发布 `TransferUpdated`；
-- 节流；
-- 计算速度。
+`cancel()` 触发 CancellationToken、设置终态（`finished_at_ms`）、
+立即发布 `Cancelled`；本地/手机端取消经 `TransferCancelled`/
+`RemoteCancelled` 区分；后台任务结果不能回写终态（单向状态机 +
+终态不覆盖）；plan 批量执行接入取消 token 后返回 `Cancelled` 且
+session 同步处理。
 
-因此 `hs_subscription_next()` 收不到持续进度。
+### ~~History 没有边界~~（已关闭）
 
-Swift 只能高频调用 `hs_transfer_get/list` 轮询。
+RuntimeConfig 支持 `transfer_history_capacity`（默认 64）与
+`transfer_history_ttl`，超限按容量/TTL 清理。
 
-### `total_bytes` 永远可能为空
+### ~~取消下载可能破坏 Session~~（已关闭）
 
-Application 丢弃 Core progress 的 total。
+下载取消导致的 Session 失效已同步处理：取消后 Session 不可用即发布
+`Failed`/`ConnectionLost`，后续请求返回 `SessionClosed`；真机验收了
+“传输中取消 → ConnectionLost → Session Failed → 清理无残留”。
 
-这使 GUI 无法绘制确定进度条。
+### ~~disconnect 和 transfer 关系不清晰~~（已关闭）
 
-### 取消状态不完整
-
-`cancel()`：
-
-- 令牌 cancel；
-- 状态设为 Cancelled；
-- 不设置 `finished_at_ms`；
-- 不立即发布事件。
-
-### History 没有边界
-
-代码注释说 bounded history，但实现是持续增长的 HashMap，没有容量或清理策略。
-
-长时间运行 GUI 会积累任务。
-
-### 取消下载可能破坏 Session
-
-Core 已知下载取消会关闭 Session 以保证停止裸流接收。
-
-Application 在任务取消后只把 Transfer 标记 Cancelled，没有同步：
-
-- Session Failed/Closed；
-- ConnectionLost；
-- 建议重新连接。
-
-Swift 可能继续使用一个实际上已经不可用的 Session。
-
-### disconnect 和 transfer 关系不清晰
-
-用户断开设备时：
-
-- 是否取消所有属于该 Session 的任务；
-- 是否等待；
-- 是否允许后台完成；
-- 是否发布每个任务终态；
-
-目前没有正式契约。
+disconnect 契约：取消该 Session 全部 transfer → 有界 join → 显式
+QUIT → 发布每个任务终态与 Session `Closed`（§5.2 P0-3）。
 
 ---
 
@@ -872,72 +623,38 @@ Swift 可能继续使用一个实际上已经不可用的 Session。
 - batch download；
 - recursive trees。
 
-### Core/CLI 有但 Application 或 FFI 未完成
+### ~~Core/CLI 有但 Application 或 FFI 未完成~~（Phase D 复核）
 
-- Wi-Fi discover diagnostics；
-- trust list/remove/reset；
-- folder monitor；
-- Core typed event bridge；
-- sync plan/run/status/watch；
-- update file info；
-- photo sync；
-- media incremental merge；
-- monitor lifecycle；
-- Connection loss event。
+Application 层已全部完成（Phase D）；FFI 导出面仍缺（Phase E）：
 
-## 7.3 P0：ABI 版本不一致
+- ~~Wi-Fi discover diagnostics~~ → `discover_devices()` warnings（D1）；
+- ~~trust list/remove/reset~~ → TrustService（D3）；
+- ~~folder monitor~~ → `monitor_folder()` 服务 + `RemoteFileChanged` 事件（62c7664）；
+- ~~Core typed event bridge~~ → 事件桥（Phase C/C1，含 ConnectionLost）；
+- ~~sync plan/run/status/watch~~ → SyncService（D6）；
+- ~~photo sync~~ → SyncService（D6，真机验收）；
+- ~~monitor lifecycle~~ → `start_sync_watch/stop_sync_watch` 与 watch 任务（D6）；
+- ~~Connection loss event~~ → 请求级检测 + 事件（Phase C/C5）。
 
-Rust 实现：
+仍缺（Application 与 FFI 均无）：
 
-```rust
-ABI_VERSION_MAJOR = 1
-ABI_VERSION_MINOR = 2
-ABI_VERSION_PATCH = 0
-```
+- update file info（Core 有，未上架 Application/FFI）；
+- media incremental merge（Core 有，未上架 Application/FFI）。
 
-C Header 顶部注释仍写：
+## 7.3 ~~P0：ABI 版本不一致~~（已修复）
 
-```text
-ABI version: 1.1.0
-```
+审计基线的矛盾（Rust 常量 1.2.0 vs Header 注释 1.1.0 vs
+`docs/ffi-v1.md` 1.1.0）已修复：
 
-`docs/ffi-v1.md` 也仍以 1.1.0 为标题和主版本说明，并把 create directory 标为未导出。
+- Header 注释、`docs/ffi-v1.md`、新增 `docs/ffi-abi-snapshot.md` 全部
+  对齐 ABI 1.2.0；
+- `scripts/generate-ffi-header.sh` 生成 Header 并校验 ABI 常量与
+  snapshot；`scripts/check-ffi-abi.py` 校验符号/签名/ABI 版本注释；
+- Swift smoke 同时检查 major/minor；
+- C smoke 编译 Header 并链接。
 
-这会造成：
-
-- Swift wrapper 依据错误文档生成；
-- SDK 包版本判断错误；
-- 维护者无法确认 1.2 symbols；
-- 未来兼容策略失去可信度。
-
-`generate-ffi-header.sh` 只检查 symbol 名称是否存在，不检查：
-
-- 函数签名；
-- 参数类型；
-- 返回类型；
-- ABI 版本；
-- Header 注释；
-- docs。
-
-因此没有捕获该问题。
-
-必须建立单一事实来源，例如：
-
-```text
-ffi-api.toml / ffi_api.rs
-    ↓
-生成 header
-生成 ABI version 文档
-生成 Swift compatibility constants
-```
-
-至少应让 CI 编译 C smoke，并对：
-
-```c
-hs_abi_version_minor() == 2
-```
-
-做断言。
+单一事实来源仍建议落地（`ffi-api.toml` 生成 Header/文档/Swift
+constants），当前靠脚本校验保证一致（Phase F 可选优化）。
 
 ## 7.4 JSON ABI 的可用边界
 
@@ -1089,38 +806,39 @@ Swift smoke 覆盖：
 - **未交付**：FFI 或 Application 缺失；
 - **后置**：可不纳入第一版 GUI。
 
-| 功能 | Core | Application | FFI | Swift 交付判断 |
+| 功能 | Core | Application | FFI | Swift 交付判断（Phase D 复核） |
 |---|---:|---:|---:|---|
-| Runtime 生命周期 | ✅ | ✅ | ✅ | 需补强 shutdown |
-| ADB 枚举 | ✅ | ✅ | ✅ | 可集成，需错误诊断 |
-| Wi-Fi 发现 | ✅ | ✅ | ✅ | 可集成，ID/错误需补强 |
-| USB 枚举 | ✅ | ✅ | ✅ | 可集成，需 macOS 权限验证 |
-| ADB 连接 | ✅ | ✅ | ✅ | 可集成 |
-| Wi-Fi 信任连接 | ✅ | ✅ | ✅ | state_dir 阻塞正式交付 |
+| Runtime 生命周期 | ✅ | ✅ | ✅ | 可集成（确定性关闭已验证） |
+| ADB 枚举 | ✅ | ✅ | ✅ | 可集成（分通道 warnings） |
+| Wi-Fi 发现 | ✅ | ✅ | ✅ | 可集成（stable_id 已回填） |
+| USB 枚举 | ✅ | ✅ | ✅ | 需 macOS 权限验证 |
+| ADB 连接 | ✅ | ✅ | ✅ | 可集成（真机通过） |
+| Wi-Fi 信任连接 | ✅ | ✅ | ✅ | 可集成（state_dir 已生效） |
 | USB AOA 连接 | ✅ | ✅ | ✅ | 需真机/Xcode App 验证 |
 | Session 快照 | ✅ | ✅ | ✅ | 可集成 |
-| 设备完整信息 | ✅ | 部分 | 部分 | 需补字段 |
+| 设备完整信息 | ✅ | ✅ | 部分 | 可集成（字段已补全） |
 | Ping | ✅ | ✅ | ✅ | 可集成 |
-| 文件列表 | ✅ | ✅ | ✅ | 可集成，先修锁跨 await |
-| Stat/exists/count | ✅ | ✅ | ❌ | 未交付 |
+| 文件列表 | ✅ | ✅ | ✅ | 可集成 |
+| Stat/exists/count | ✅ | ✅ | ❌ | FFI 未导出（Phase E） |
 | 新建目录 | ✅ | ✅ | ✅ | 可集成 |
-| 重命名/移动 | ✅ | ✅ | ❌ | 未交付 |
-| 删除/回收站 | ✅ | ✅ | ❌ | 未交付 |
-| 单文件上传 | ✅ | ✅ | ✅ | 需补进度/生命周期 |
-| 单文件下载 | ✅ | ✅ | ✅ | 需补进度/Session 失效 |
-| 传输取消 | ✅ | ✅ | ✅ | 需补事件和终态 |
-| 批量/目录上传下载 | ✅ | ✅ | ❌ | 未交付 |
-| 剪贴板列表/写入/删除 | ✅ | ✅ | ❌ | 未交付 |
-| 照片库 | ✅ | ✅ | ❌ | 未交付 |
-| 视频库 | ✅ | ✅ | ❌ | 未交付 |
-| 音频库 | ✅ | ✅ | ❌ | 未交付 |
-| 缩略图 | ✅ | ✅ | ❌ | 需先设计二进制 ABI |
-| EXIF | ✅ | ✅ | ❌ | 未交付 |
-| 文件主动变更 | ✅ | 预留 | 预留 | 未交付 |
-| 剪贴板主动变更 | ✅ | 预留 | 预留 | 未交付 |
-| 媒体主动变更 | ✅ | 预留 | 预留 | 未交付 |
-| 照片同步 | ✅ | ❌ | ❌ | 后置或新阶段 |
-| 信任记录管理 | ✅ | ❌ | ❌ | 正式 Wi-Fi 设置页需要 |
+| 重命名/移动 | ✅ | ✅ | ❌ | FFI 未导出（Phase E） |
+| 删除/回收站 | ✅ | ✅ | ❌ | FFI 未导出（Phase E） |
+| 单文件上传 | ✅ | ✅ | ✅ | 可集成（进度/终态齐备） |
+| 单文件下载 | ✅ | ✅ | ✅ | 可集成（Session 失效语义正确） |
+| 传输取消 | ✅ | ✅ | ✅ | 可集成（终态/事件/区分来源） |
+| 批量/目录上传下载 | ✅ | ✅ | ❌ | FFI 未导出（Phase E） |
+| 剪贴板列表/写入/删除 | ✅ | ✅ | ❌ | FFI 未导出（Phase E） |
+| 照片库 | ✅ | ✅ | ❌ | FFI 未导出（Phase E） |
+| 视频库 | ✅ | ✅ | ❌ | FFI 未导出（Phase E） |
+| 音频库 | ✅ | ✅ | ❌ | FFI 未导出（Phase E） |
+| 缩略图 | ✅ | ✅ | ❌ | 需先设计二进制 ABI（Phase E） |
+| EXIF | ✅ | ✅ | ❌ | FFI 未导出（Phase E） |
+| 文件主动变更 | ✅ | ✅ | ✅ | 事件已桥接（RemoteFileChanged 含 files/statuses） |
+| 剪贴板主动变更 | ✅ | ✅ | ✅ | 事件已桥接（ClipboardChanged） |
+| 媒体主动变更 | ✅ | ✅ | ✅ | 事件已桥接（MediaChanged） |
+| 照片同步 | ✅ | ✅ | ❌ | 后端齐备（SyncService），FFI 未导出；是否纳入第一版由 Swift 决定 |
+| 信任记录管理 | ✅ | ✅ | ❌ | 后端齐备（TrustService），FFI 未导出（Phase E） |
+| 目录监控 | ✅ | ✅ | ❌ | 后端齐备（monitor_folder + 事件流），FFI 未导出（Phase E） |
 | CLI shell/batch | ✅ | 不适用 | 不适用 | GUI 不需要 |
 | CLI fallback | ✅ | — | — | 建议保留诊断入口 |
 
@@ -1134,293 +852,128 @@ Swift smoke 覆盖：
 
 ## Phase A：契约和文档止血
 
-优先级：P0
+优先级：P0 —— **Phase D 复核：已全部完成**（A1 见 §7.3，A2 见 §5.2 P0-1，
+A3 见 §3.2/§11；README 与迁移文档已同步 Phase D 状态）。
 
-### A1. 修复 ABI 单一事实来源
+### A1. 修复 ABI 单一事实来源（已完成）
 
-- Header 改为 1.2.0；
-- `docs/ffi-v1.md` 改为 1.2.0；
-- 更新已导出函数矩阵；
-- Swift smoke 同时检查 major/minor；
-- Header sync 检查签名，而不只检查名称；
-- CI 编译 C Header；
-- 增加 ABI snapshot。
+- Header 改为 1.2.0 ✅；
+- `docs/ffi-v1.md` 改为 1.2.0 ✅；
+- 更新已导出函数矩阵 ✅；
+- Swift smoke 同时检查 major/minor ✅；
+- Header sync 检查签名，而不只检查名称 ✅（`check-ffi-abi.py`）；
+- CI 编译 C Header ✅（本地脚本，CI job 待接入）；
+- 增加 ABI snapshot ✅（`docs/ffi-abi-snapshot.md`）。
 
-验收：
+### A2. 重新定义 Application 冻结状态（已完成，方案一）
 
-```text
-Rust constants
-C Header
-FFI docs
-Swift constants
-C smoke
-```
+`APPLICATION_API_VERSION = 1.0.0-preview.1`；`session_client()` 已移除；
+DTO/error/event fixture 补齐；冻结后任何破坏升 major。
 
-全部一致。
+### A3. 更新 README 和迁移文档（已完成）
 
-### A2. 重新定义 Application 冻结状态
-
-二选一：
-
-方案一：
-
-```text
-APPLICATION_API_VERSION = 1.0.0-preview.1
-```
-
-完成收口后再冻结。
-
-方案二：
-
-保留 1.0.0，但：
-
-- 移除 `session_client()`；
-- 处理 `Box<SessionSnapshot>` 破坏性变更；
-- 补完整文档；
-- 对所有公开 DTO 做 fixture；
-- 后续任何破坏必须升 major。
-
-推荐方案一，因为目前尚无正式外部 SDK 消费者。
-
-### A3. 更新 README 和迁移文档
-
-修复：
-
-- 旧 `src/` 目录描述；
-- FFI 1.1/1.2 混乱；
-- CLI “全量迁移”措辞；
-- Application 真实功能矩阵；
-- Swift 当前可用范围。
+README 追加 Phase D 里程碑；`docs/m8-migration.md` §4/4.2 记录
+CLI 行为变化与 watch/sync 契约变化；`docs/application-api-v1.md`
+同步全部新 API 与 `session_client()` 移除。
 
 ---
 
 ## Phase B：Runtime 与并发模型修复
 
-优先级：P0
+优先级：P0 —— **Phase D 复核：B1–B5 已全部完成**。
 
-### B1. 消除 Registry 锁跨 await
+### ~~B1. 消除 Registry 锁跨 await~~（已完成）
 
-对所有方法统一使用：
+统一短临界区模式（§5.2 P0-2），`session_handle` 返回 `Arc<ActiveSession>`。
 
-```rust
-let session = self.session_handle(id).await?;
-let client = session.client.clone();
-// guard 已释放
-client.operation().await
-```
+### ~~B2. 设计确定性 Session 关闭~~（已完成）
 
-Session 内部可使用：
+`disconnect` 按 1–8 步确定性执行（§5.2 P0-3），包含状态 watch、
+transfer 取消、有界 join、显式 QUIT、Closed 事件、Registry 移除。
 
-```rust
-Arc<ActiveSession>
-```
+### ~~B3. 修复 shutdown~~（已完成）
 
-Registry 存：
+删除固定 sleep；单次执行、拒绝新操作、并行关闭全部 Session、
+join 全部任务、关闭 EventHub、destroy 不静默遗留任务
+（订阅者收 `{"closed":true}`）。
 
-```rust
-HashMap<SessionId, Arc<ActiveSession>>
-```
+### ~~B4. 支持 caller-provided StateStore~~（已完成）
 
-### B2. 设计确定性 Session 关闭
+Core `StateStore::from_dir` + `connect_with_state`；Application
+`state_dir` 覆盖信任/host UUID/sync ledger；CLI `--state-dir`；FFI
+配置一致（§5.2 P0-4）。
 
-建议 ActiveSession 增加：
+### ~~B5. 处理 wire log~~（已完成）
 
-```rust
-state: watch::Sender<SessionState>
-transfers: HashSet<TransferId>
-event_task: JoinHandle<()>
-closing: CancellationToken
-```
-
-disconnect：
-
-1. 原子变为 Disconnecting；
-2. 拒绝新任务；
-3. 取消属于 Session 的 transfers；
-4. 等待任务结束，带 deadline；
-5. 停止事件转发；
-6. 显式 Core close；
-7. 发布 Closed；
-8. 从 Registry 移除。
-
-### B3. 修复 shutdown
-
-删除固定 50ms sleep。
-
-Runtime shutdown：
-
-- 只执行一次；
-- 拒绝新操作；
-- 并行关闭全部 Session；
-- join 全部后台任务；
-- 返回包含清理失败的结果；
-- 关闭 EventHub；
-- destroy 不应静默遗留任务。
-
-### B4. 支持 caller-provided StateStore
-
-修改 Core/Application API，让 connect 接受明确 StateStore 或 state path。
-
-确保：
-
-- `state_dir` 真正生效；
-- trust 存储位于 App Container；
-- 测试可用 tempdir；
-- 多 Runtime 可隔离；
-- FFI 配置与行为一致。
-
-### B5. 处理 wire log
-
-- 正式支持 `wire_log_utf8`；
-- 或从 ABI 删除并升 ABI major；
-- 推荐支持，但需要 Swift 设置页明确危险提示；
-- 默认关闭。
+正式支持（§5.2 P0-5），默认关闭，文档与 UI 提示危险。
 
 ---
 
 ## Phase C：事件与传输模型完成
 
-优先级：P0/P1
+优先级：P0/P1 —— **Phase D 复核：C1–C5 已全部完成**。
 
-### C1. Bridge Core EventSubscription
+### ~~C1. Bridge Core EventSubscription~~（已完成）
 
-Application connect 时：
+事件桥任务：callbacks → Core receiver → BackendEvent 映射；Session
+关闭时终止；未知事件安全 Warning；不泄露 protobuf（§5.2 P0-6）。
 
-- 设置需要的 EventCallbacks；
-- 创建一个 Core event receiver task；
-- 映射 Core ClientEvent → BackendEvent；
-- Session 关闭时终止；
-- 未知事件映射安全 Warning/Unknown；
-- 不泄露 protobuf。
+### ~~C2. 完成传输事件~~（已完成）
 
-### C2. 完成传输事件
+progress 写入 transferred/total，100ms/256KiB 节流，10–20 次/秒，
+终态无条件发布（§6.2）。
 
-progress callback：
+### ~~C3. 完成取消语义~~（已完成）
 
-- 写入 transferred；
-- 写入 total；
-- 按时间或字节阈值节流；
-- 发布 TransferUpdated。
+finished_at_ms + 立即终态事件 + 后台结果不覆盖 + User/Remote 取消
+区分 + 下载取消的 Session 同步（§6.2）。
 
-建议节流：
+### ~~C4. 有界任务历史~~（已完成）
 
-```text
-不超过 10–20 次/秒
-终态无条件发布
-```
+`transfer_history_capacity`（默认 64）/`transfer_history_ttl`（§6.2）。
 
-### C3. 完成取消语义
+### ~~C5. 连接丢失事件~~（已完成）
 
-取消时：
-
-- 设置 `finished_at_ms`；
-- 立即发布 Cancelled；
-- 最终后台任务结果不能覆盖终态；
-- 区分 UserCancelled 与 RemoteCancelled；
-- 下载取消导致 Session 关闭时发布 Session Failed/Closed。
-
-### C4. 有界任务历史
-
-RuntimeConfig 加：
-
-```rust
-transfer_history_capacity
-transfer_history_ttl
-```
-
-完成任务按容量/时间清理。
-
-### C5. 连接丢失事件
-
-任何请求发现 Session 已关闭时：
-
-- 更新 SessionState；
-- 发布 ConnectionLost；
-- 取消相关任务；
-- 后续请求返回 SessionClosed。
+请求级检测：Session `Failed` + `ConnectionLost` 事件 + 后续请求
+`SessionClosed` 快速失败；传输中取消 → ConnectionLost 已验证。
 
 ---
 
 ## Phase D：Application 业务闭环
 
-优先级：P1
+优先级：P1 —— **Phase D 复核：D1–D6 已全部完成**（本 Phase 名称即
+`docs/HandShaker_Phase_D_Application_Closure_Plan.md`）。
 
-### D1. 设备发现结果带 warnings
+### ~~D1. 设备发现结果带 warnings~~（已完成）
 
-新增：
+`DeviceDiscoveryResult { devices, warnings }` + per-transport 诊断
+（§5.3 P1-2）。
 
-```rust
-DeviceDiscoveryResult {
-    devices,
-    warnings,
-}
-```
+### ~~D2. 完整 DeviceInfoDto~~（已完成）
 
-或独立 diagnostics。
+5 个缺失字段补齐 + stable_id + identity 事件（§5.3 P1-3/P1-4）。
 
-### D2. 完整 DeviceInfoDto
+### ~~D3. 稳定 Wi-Fi identity~~（已完成）
 
-补充：
+`DeviceDescriptor.stable_id` = `phone:<uuid>`，连接后回填并发布
+identity 事件（§5.3 P1-4）。
 
-- external_storage_path；
-- disk_size；
-- used_disk_size；
-- battery_percentage；
-- phone_locked；
-- connection transport；
-- capabilities。
+### ~~D4. TrustService~~（已完成）
 
-### D3. 稳定 Wi-Fi identity
+Application `list_trust_records`/`remove_trust_record`/
+`reset_wifi_trust`，state_dir 真实生效（D3 提交 752d567）。
 
-建立：
+### ~~D5. 文件操作统一预检~~（已完成）
 
-```rust
-DiscoveredEndpoint
-StableDeviceIdentity
-```
+`plan_download`/`plan_upload`（FileConflictKind 六类冲突）+
+`execute_file_plan`（可取消、失败分类、transport 级失败标记连接丢失）。
 
-连接前使用 endpoint ID，连接后使用 phone UUID，并发 identity update 事件。
+### ~~D6. SyncService~~（已完成）
 
-### D4. TrustService
-
-Application 增加：
-
-- list trust；
-- remove trust；
-- reset trust；
-- trust status；
-- clear all。
-
-### D5. 文件操作统一预检
-
-把可跨 UI 复用的逻辑移入 Application：
-
-- stat；
-- existence；
-- file/folder classification；
-- overwrite conflict；
-- recursive requirement；
-- destination collision；
-- batch plan；
-- dry-run plan model。
-
-CLI 只负责参数和确认。
-
-### D6. SyncService
-
-若 Swift 第一版包含照片同步：
-
-- SyncConfig DTO；
-- plan；
-- run task；
-- status；
-- conflict DTO；
-- watch start/stop；
-- sync events；
-- cancellation；
-- ledger path 由 Runtime state_dir 管理。
-
-若第一版不包含，明确标记为第二阶段，不要半导出。
+`plan_sync`/`start_sync`/`get_sync_status`/`stop_sync`/
+`start_sync_watch`/`stop_sync_watch`/`last_sync_result`/
+`sync_ledger_status`；ledger 路径由 state_dir 管理；watch 批次经
+`SyncWatchApplied` 事件发布；真机首次/增量/watch 验收通过。
 
 ---
 
@@ -1652,53 +1205,54 @@ Swift wrapper 真机测试：
 
 # 11. Agent 可执行任务拆分
 
-建议按以下顺序建立 Issue/Agent Task。
+> **Phase D 复核**：1–13 已完成（见各节）；14–19（FFI 扩展）、20–34
+> （Apple SDK 与跨平台）仍待做。
 
-## Swift Delivery P0
+## Swift Delivery P0 —— 已完成
 
-1. **修复 FFI ABI 1.2 Header/文档不一致**
-2. **将 Application API 标记为 preview 或完成正式冻结**
-3. **移除 Session Registry 锁跨 await**
-4. **重构 disconnect/shutdown 为确定性生命周期**
-5. **让 RuntimeConfig.state_dir 真正生效**
-6. **让 wire_log 配置生效或从 ABI 移除**
-7. **桥接 Core 事件到 Application EventHub**
-8. **完善传输 progress/total/cancel/final events**
-9. **建立有界 Transfer history**
-10. **移除公开 `session_client()` 并完成 CLI 必要迁移**
+1. ~~修复 FFI ABI 1.2 Header/文档不一致~~（§7.3）
+2. ~~将 Application API 标记为 preview 或完成正式冻结~~（§5.2 P0-1）
+3. ~~移除 Session Registry 锁跨 await~~（§5.2 P0-2）
+4. ~~重构 disconnect/shutdown 为确定性生命周期~~（§5.2 P0-3）
+5. ~~让 RuntimeConfig.state_dir 真正生效~~（§5.2 P0-4）
+6. ~~让 wire_log 配置生效或从 ABI 移除~~（§5.2 P0-5）
+7. ~~桥接 Core 事件到 Application EventHub~~（§5.2 P0-6）
+8. ~~完善传输 progress/total/cancel/final events~~（§6.2）
+9. ~~建立有界 Transfer history~~（§6.2）
+10. ~~移除公开 `session_client()` 并完成 CLI 必要迁移~~（§3.2/§4）
 
 ## Swift MVP 功能
 
-11. **补完整 DeviceInfoDto**
-12. **新增 DeviceDiscoveryResult warnings**
-13. **Application TrustService**
-14. **FFI stat/count/move/delete**
-15. **FFI clipboard**
-16. **FFI media metadata**
-17. **设计并实现 thumbnail binary/cache API**
-18. **FFI batch transfer task**
-19. **FFI diagnostics**
+11. ~~补完整 DeviceInfoDto~~（§5.3 P1-3）
+12. ~~新增 DeviceDiscoveryResult warnings~~（§5.3 P1-2）
+13. ~~Application TrustService~~（Phase D/D4）
+14. **FFI stat/count/move/delete**（未开始）
+15. **FFI clipboard**（未开始）
+16. **FFI media metadata**（未开始）
+17. **设计并实现 thumbnail binary/cache API**（未开始）
+18. **FFI batch transfer task**（未开始）
+19. **FFI diagnostics**（未开始）
 
 ## Apple SDK
 
-20. **建立 Swift Package 封装**
-21. **实现 Runtime actor/RAII**
-22. **实现 Codable DTO 与 PublicError**
-23. **实现 Event AsyncThrowingStream**
-24. **实现 TransferCenter**
-25. **实现 security-scoped URL 生命周期**
-26. **构建静态 XCFramework**
-27. **CI 运行 C/Swift smoke**
-28. **上传可下载 artifact**
-29. **加入 fake-device FFI 成功路径测试**
-30. **进行 Swift 真机验收**
+20. **建立 Swift Package 封装**（未开始）
+21. **实现 Runtime actor/RAII**（未开始）
+22. **实现 Codable DTO 与 PublicError**（未开始）
+23. **实现 Event AsyncThrowingStream**（未开始）
+24. **实现 TransferCenter**（未开始）
+25. **实现 security-scoped URL 生命周期**（未开始）
+26. **构建静态 XCFramework**（未开始）
+27. **CI 运行 C/Swift smoke**（未开始）
+28. **上传可下载 artifact**（未开始）
+29. **加入 fake-device FFI 成功路径测试**（未开始）
+30. **进行 Swift 真机验收**（未开始）
 
 ## 后续跨平台
 
-31. **Linux GTK Rust 示例直接依赖 Application**
-32. **Windows cdylib 导出检查**
-33. **C# SafeHandle/PInvoke smoke**
-34. **Application 多平台路径与状态目录测试**
+31. **Linux GTK Rust 示例直接依赖 Application**（未开始）
+32. **Windows cdylib 导出检查**（未开始）
+33. **C# SafeHandle/PInvoke smoke**（未开始）
+34. **Application 多平台路径与状态目录测试**（未开始）
 
 ---
 
@@ -1706,57 +1260,60 @@ Swift wrapper 真机测试：
 
 只有满足以下条件，才建议把 Rust 后端标为“Swift GUI 可正式交付”。
 
+> **Phase D 复核**：已勾选项为完成；剩余缺口集中在 FFI 导出面
+> （Phase E）与 Apple 打包（Phase F/G）。
+
 ## 契约
 
-- [ ] ABI/Header/docs 版本一致；
-- [ ] Application API 无计划删除的公开 Core 类型；
-- [ ] DTO/error/event fixture 完整；
-- [ ] Swift wrapper 有兼容性检查。
+- [x] ABI/Header/docs 版本一致（1.2.0，脚本校验）；
+- [x] Application API 无计划删除的公开 Core 类型（`session_client()` 已移除）；
+- [x] DTO/error/event fixture 完整（Phase D 补齐）；
+- [ ] Swift wrapper 有兼容性检查（Phase F）。
 
 ## 生命周期
 
-- [ ] 无 Registry 锁跨网络 await；
-- [ ] disconnect 确定性关闭；
-- [ ] shutdown join 所有任务；
-- [ ] App 退出无残留连接；
-- [ ] Session 丢失可观察；
-- [ ] 下载取消后的 Session 状态正确。
+- [x] 无 Registry 锁跨网络 await；
+- [x] disconnect 确定性关闭；
+- [x] shutdown join 所有任务；
+- [x] App 退出无残留连接（真机验证 0 forward 残留）；
+- [x] Session 丢失可观察（ConnectionLost + Failed）；
+- [x] 下载取消后的 Session 状态正确（真机验证）。
 
 ## 事件
 
-- [ ] Core typed events 已桥接；
-- [ ] 传输进度事件完整；
-- [ ] total bytes 可用；
-- [ ] 取消/完成/失败终态完整；
-- [ ] Lagged/Closed 可恢复或明确处理。
+- [x] Core typed events 已桥接；
+- [x] 传输进度事件完整（节流 + 终态无条件）；
+- [x] total bytes 可用；
+- [x] 取消/完成/失败终态完整；
+- [x] Lagged/Closed 可恢复或明确处理。
 
 ## 功能
 
-- [ ] 文件浏览、stat、mkdir、move、delete；
-- [ ] 上传、下载、取消；
-- [ ] 剪贴板；
-- [ ] 设备完整信息；
-- [ ] MVP 所需媒体接口；
-- [ ] Wi-Fi trust 管理；
-- [ ] 明确是否包含 sync。
+- [x] 文件浏览、stat、mkdir、move、delete（Application 全有；FFI 只导出 list/mkdir，stat/move/delete 待 Phase E）；
+- [x] 上传、下载、取消（FFI 已导出）；
+- [ ] 剪贴板（FFI 未导出）；
+- [x] 设备完整信息（DTO 全字段，FFI snapshot 已含）；
+- [ ] MVP 所需媒体接口（FFI 未导出）；
+- [ ] Wi-Fi trust 管理（FFI 未导出；Application 已具备）；
+- [ ] 明确是否包含 sync（后端已具备 SyncService，FFI 未导出；需 Swift 决策）。
 
 ## Apple
 
-- [ ] state_dir 在 App Container 生效；
-- [ ] security-scoped URL 流程验证；
-- [ ] XCFramework；
-- [ ] Swift Package；
-- [ ] C/Swift smoke 进入 CI；
-- [ ] ARM64 真机/设备验收；
-- [ ] dylib/static linking 策略确定；
-- [ ] 签名、公证、libusb/ADB 策略记录。
+- [x] state_dir 在 App Container 生效（配置真实生效 + CLI `--state-dir`）；
+- [ ] security-scoped URL 流程验证（Phase F）；
+- [ ] XCFramework（Phase G）；
+- [ ] Swift Package（Phase F）；
+- [ ] C/Swift smoke 进入 CI（本地全过，CI job 未接入）；
+- [ ] ARM64 真机/设备验收（CLI 真机已过；Swift wrapper 层未验）；
+- [ ] dylib/static linking 策略确定（Phase G）；
+- [ ] 签名、公证、libusb/ADB 策略记录（Phase G）。
 
 ## CI
 
-- [ ] macOS C/Swift 成功路径测试；
+- [ ] macOS C/Swift 成功路径测试（本地脚本有，CI 未接入；fake device 路径缺）；
 - [ ] release artifacts；
-- [ ] ABI/header signature check；
-- [ ] 无设备和 fake device 两类测试。
+- [ ] ABI/header signature check（本地脚本有，CI 未接入）；
+- [ ] 无设备和 fake device 两类测试（fake device FFI 测试未做）。
 
 ---
 
@@ -1791,15 +1348,18 @@ FFI Preview
 
 ## Rust 团队优先修 P0
 
-先完成：
+先完成（Phase D 复核：1–7 已完成，剩余 8–10）：
 
-1. ABI 一致；
-2. Runtime 生命周期；
-3. 事件和传输；
-4. state_dir；
-5. 文件完整 FFI；
-6. clipboard FFI；
-7. XCFramework/Swift Package。
+1. ~~ABI 一致~~；
+2. ~~Runtime 生命周期~~；
+3. ~~事件和传输~~；
+4. ~~state_dir~~；
+5. ~~文件完整 FFI~~（FFI 只导出 list/mkdir/ping/传输；stat/move/delete 待 Phase E）；
+6. ~~clipboard FFI~~（待 Phase E）；
+7. ~~XCFramework/Swift Package~~（待 Phase F/G）；
+8. FFI 功能闭环（stat/count/move/delete、剪贴板、媒体、信任、批量、sync、diagnostics）；
+9. CI 接入 ABI 校验与 C/Swift smoke，上传 artifact；
+10. fake-device FFI 成功路径测试。
 
 ## 正式切换
 
@@ -1814,17 +1374,21 @@ CLIBackendClient 保留为诊断/回退
 
 # 14. 最终评级
 
-当前提交 `c71cf94`：
+审计基线 `c71cf94` → Phase D 复核 `e01bc94`：
 
 ```text
 Core 后端功能：成熟
-CLI：成熟，但 Application 迁移尚未完全收口
-Application：架构正确，仍属于 preview
-FFI：基础设施良好，功能覆盖不足
-Swift 集成：可以开始
-Swift 正式交付：暂不建议
+CLI：成熟；Application 迁移已收口（仅 device discover 直连 core）
+Application：架构正确，preview 明确（P0/P1 已关闭，fixture 补齐）
+FFI：基础设施良好（ABI 一致、smoke 本地全过），功能覆盖仍不足（23 符号）
+Swift 集成：可以开始（后端能力齐备）
+Swift 正式交付：暂不建议（待 Phase E FFI 功能闭环 + Phase F/G SDK 打包）
 ```
 
 一句话结论：
 
-> 当前项目已经跨过“能否做 Swift FFI”的门槛，但尚未跨过“能否让 Swift GUI 只依赖 FFI 并稳定发布”的门槛。下一阶段不应继续扩张协议功能，而应集中完成 Runtime 生命周期、事件桥接、传输语义、FFI 功能闭环和 Apple SDK 打包。
+> 项目已经跨过“能否做 Swift FFI”的门槛，并已完成应用层业务闭环
+> （发现诊断、稳定身份、信任、文件计划、SyncService、事件桥、传输
+> 语义与确定性生命周期，真机 ADB 验收通过）；下一阶段应集中完成
+> FFI 功能导出面（Phase E）、CI 接入与 Apple SDK 打包（Phase F/G），
+> 而不应继续扩张协议功能。

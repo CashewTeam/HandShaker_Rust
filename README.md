@@ -65,8 +65,8 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
   （Application `DeleteResultDto` 改为携带 `FileEntryDto`，fs.rm JSON 从路径数组
   变为条目对象数组——兼容性变化见 `docs/m8-migration.md` §7.1）；Phase 7 脚本
   `generate-ffi-header.sh`/`build-ffi-linux.sh` 与 `dist/apple/` 产物；
-  shell/batch/watch/sync 评估保留 core（边界见 §7.2，因此“全量迁移”不成立，
-  当前状态是常用命令已迁移、交互/长连接/同步仍走 Core）。
+  shell/batch/watch/sync 评估保留 core（边界见 §7.2；该过渡状态已于
+  M8.1 Phase D 全部收口，见下——此处保留为 0.7.2 当时状态的历史记录）。
 - **CI clippy 清零（0.7.3）**：`clippy --all-targets --all-features -D warnings`
   全部告警修复（collapsible-if/match-result-ok/io-other-error/needless-borrow
   等，行为不变）；`BackendEvent::SessionStateChanged` 装箱为
@@ -94,6 +94,20 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
   修复 macOS 14 provenance 文件上 `fchmodat` EPERM 导致的状态文件权限
   失败（`docs/m8-migration.md` §10/§11）；真机 ADB 验收通过（传输 MD5、
   进度、传输中取消 → ConnectionLost → Session Failed、清理无残留）。
+- **M8.1 Phase D Application 业务闭环（已完成，0.7.3）**：设备发现
+  返回分通道 warnings（`DeviceDiscoveryResult`）；`DeviceInfoDto` 补全
+  5 个字段并建立 `stable_id`（`phone:<uuid>` 连接后回填 + identity
+  事件）；Application TrustService（list/remove/reset，state_dir 真实
+  生效）；文件预检与执行计划（`plan_download`/`plan_upload`/
+  `execute_file_plan`，六类冲突，CLI 冲突翻译保持旧错误类与退出码）；
+  SyncService 全能力（plan/run/status/stop/watch，ledger 走 state_dir，
+  watch 批次经 `SyncWatchApplied` 事件，真机首次/增量/watch 验收）；
+  CLI 全部命令迁移到 Application（`session_client()` 过渡入口删除、
+  `AppSession` 不再持有 core client；仅 `device discover` 与
+  `fs rm/count` 输出适配保留在 CLI）；`--state-dir` 全局参数；
+  SIGINT 确定性清理（孤儿 sync 任务修复，真机 0 forward 残留）；
+  验收脚本 `scripts/phase-d-acceptance.sh`（无设备 SKIP）；
+  `docs/m8-migration.md` §4.1/4.2 记录 CLI 行为与 watch/sync 契约变化。
 - 剪贴板/目录监控之外的推送发送侧仍属于后续里程碑。
 
 ## 命令行教程

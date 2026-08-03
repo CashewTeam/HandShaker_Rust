@@ -42,18 +42,27 @@ handshaker-core(协议、传输、会话)
 
 - `HandShakerRuntime`(非单例,可多实例):create/shutdown(幂等,单次执行,
   确定性关闭:取消传输 → 有界 join → 并行关闭 Session → 关闭 EventHub)、
-  list_devices、connect/disconnect/get_session_snapshot、list_files、
-  stat_file/create_directory/move_path/delete_paths、start_download/
-  start_upload/cancel_transfer/get_transfer/list_transfers、subscribe_events;
+  list_devices/discover_devices(分通道 warnings)、connect/disconnect/
+  get_session_snapshot、list_files、stat_file/create_directory/move_path/
+  delete_paths、start_download/start_upload/cancel_transfer/get_transfer/
+  list_transfers、monitor_folder、subscribe_events;
+- Phase D 业务服务:`list_trust_records/remove_trust_record/
+  reset_wifi_trust`(state_dir 真实生效)、`plan_download/plan_upload/
+  execute_file_plan`(六类 FileConflictKind,可取消,transport 级失败标记
+  连接丢失)、SyncService(`plan_sync/start_sync/get_sync_status/stop_sync/
+  start_sync_watch/stop_sync_watch/last_sync_result/sync_ledger_status`,
+  ledger 位于 `<state_dir>/sync/<device_uuid>.json`,watch 批次经
+  `BackendEvent::SyncWatchApplied` 发布);
 - `SessionId(u64)`/`TransferId(u64)` 单调分配;长任务后台执行 + 事件轮询;
-- 配置真实生效:`state_dir` 控制信任记录/host UUID 位置(缺省 Core 默认
-  目录),`wire_log` 真实开启线路日志;Registry 锁不跨网络 await(短临界区
-  clone client);
+- 配置真实生效:`state_dir` 控制信任记录/host UUID/sync ledger 位置(缺省
+  Core 默认目录;CLI 提供 `--state-dir`),`wire_log` 真实开启线路日志;
+  Registry 锁不跨网络 await(短临界区 clone client);
 - 事件:`EventEnvelope { sequence, timestamp_ms, event }`,broadcast,
   Lagged 显式上报;Runtime shutdown 后订阅流以 `Closed` 结束;
   v1 完整实现 Runtime/Session/Transfer 事件;Core typed events 桥接
   (M8.1 Phase C/C1):`DeviceUpdated`/`ClipboardChanged`/`MediaChanged`/
-  `RemoteFileChanged` 携带 DTO payload,未知事件安全 `Warning`;请求或
+  `RemoteFileChanged` 携带 DTO payload(`RemoteFileChangeDto` 含
+  files/statuses 完整元数据),未知事件安全 `Warning`;请求或
   传输发现连接丢失时发布 `ConnectionLost` 并将 Session 置 `Failed`(C5);
 - 错误:`PublicError { code, message, detail, retryable, operation }`,
   分区码 1001–9001,`code` 是唯一程序判断依据。
@@ -69,8 +78,11 @@ handshaker-core(协议、传输、会话)
 
 - 协议能力与 M7 一致(ADB/WiFi/USB、文件、剪贴板、媒体、同步、watch);
 - USB accessory 会话单次性、Linux udev、Windows 评估均未变(见 docs/23);
-- CLI fs/clipboard/media 命令已走 Application(渐进迁移中,`device info/ping`/
-  discover/trust/sync/watch 仍直连 core,见 `docs/m8-migration.md` §7);
-  FFI 已导出 23 个符号(设备/会话/文件/传输/事件/ABI 1.2 的
+- CLI 业务命令已全部迁移到 Application(M8.1 Phase D 收口:device
+  info/ping、trust、pull/push 预检、watch、sync.* 均走
+  `HandShakerRuntime`;`session_client()` 过渡入口已删除,`AppSession`
+  不再持有 Core client)。仅剩 `device discover`(Wi-Fi mDNS)直连 core,
+  `fs rm/count` 输出适配保留在 CLI(见 `docs/m8-migration.md` §4/§7);
+- FFI 已导出 23 个符号(设备/会话/文件/传输/事件/ABI 1.2 的
   `hs_create_directory`/`hs_ping`),stat/move/delete、媒体、剪贴板、
-  信任、批量传输待按需追加。
+  信任、批量传输、sync 待按需追加(Application 层均已具备)。
