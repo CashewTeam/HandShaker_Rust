@@ -149,7 +149,24 @@ connect/disconnect/get session、list files、subscribe/next/destroy。
 5. ✅ `clipboard` 迁移(5d06a1e)、`media` 迁移(57529d3);
 6. ⏳ `shell`/`batch`/`watch`/`sync` 评估保留 core(§7 边界记录,后续事项
    见 §7.3:事件桥接、sync 上移、device info/ping CLI 侧迁移);
-7. ⏳ `handshaker-test-support` 拆分(计划 §4.5,当前 core 内部 `#[cfg(test)]`)。
+7. ⏳ `handshaker-test-support` 拆分:评估为**保持 core 内部**——FakeWifiSsp
+   依赖 `protocol::proto::*`(prost 生成)与 `protocol::crypto::KEY_TABLE`,
+   拆分需以 feature 公开协议内部,违反 AGENTS.md §8「Prost 类型、线路帧和
+   密码学细节保持 crate 内部可见」;当前亦无外部消费者(application/ffi 测试
+   走无设备路径)。如需共享,先修订该约束或经 feature 显式 opt-in。
+
+### 7.4 test-support 拆分评估
+
+- 现状:`crates/handshaker-core/src/test_support.rs`(1179 行,`#[cfg(test)]`)
+  被 core 内部 client/sync/exif_parser 测试使用(8 处引用,27 个 `pub(crate)`
+  项);application/cli/ffi 测试均走无设备错误路径,不依赖 fake;
+- 障碍:fake 构造/解析 SSP 消息依赖 `protocol::proto`(prost 生成)与
+  `protocol::crypto::KEY_TABLE`,均为 `pub(crate)`;拆分需以
+  `#[cfg(feature = "test-support")]` 公开 protocol 模块,与 AGENTS.md §8
+  冻结约束冲突;
+- 结论:保持 core 内部(与 M8 计划 §4.5「预留」一致)。前置条件:后续若
+  application/ffi 测试需要 fake 设备,先经用户决策公开协议内部(或
+  feature opt-in),再行拆分。
 
 ## 7. CLI 交互层边界评估(HEAD 8122ca1 之后,逐项落库)
 
