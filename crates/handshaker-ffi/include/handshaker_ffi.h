@@ -1,12 +1,13 @@
-/* handshaker_ffi.h — stable C ABI for handshaker-application (M8 v1.4).
+/* handshaker_ffi.h — stable C ABI for handshaker-application (M8 v1.5).
  *
- * ABI version: 1.4.0 (independent of the Rust crate version). 1.4 adds the
- * photo-sync surface (hs_sync_plan/start/status/stop/start_watch/
- * stop_watch); 1.3 added file stat/count/move/delete, clipboard, trust,
- * device discovery, directory monitor, batch transfers, media
- * libraries/thumbnail/exif and runtime diagnostics; 1.2 added
- * hs_create_directory and hs_ping; 1.1 added the transfer surface
- * (hs_transfer_*); 1.0 symbols are unchanged.
+ * ABI version: 1.5.0 (independent of the Rust crate version). 1.5 adds
+ * update file info (hs_update_file_info) and the pure media incremental
+ * merge (hs_media_merge_change); 1.4 added the photo-sync surface
+ * (hs_sync_plan/start/status/stop/start_watch/stop_watch); 1.3 added file
+ * stat/count/move/delete, clipboard, trust, device discovery, directory
+ * monitor, batch transfers, media libraries/thumbnail/exif and runtime
+ * diagnostics; 1.2 added hs_create_directory and hs_ping; 1.1 added the
+ * transfer surface (hs_transfer_*); 1.0 symbols are unchanged.
  *
  * Ownership rules:
  *  - Rust allocates; Rust frees. Buffers returned in HsCallResult must be
@@ -115,6 +116,15 @@ HsCallResult hs_move_path(HsRuntime *runtime, uint64_t session_id,
                           const uint8_t *request_json, size_t request_len);
 HsCallResult hs_delete_paths(HsRuntime *runtime, uint64_t session_id,
                              const uint8_t *request_json, size_t request_len);
+/* update file info (ABI 1.5). request_json:
+ * {"files":[{"path":"/sdcard/a.jpg","size":1024,"is_directory":false,
+ *   "created_at":123,"modified_at":456,"checksum":null,"is_trash":null,
+ *   "id":7,"ext_data":null}],"is_sync":false}
+ * (files/is_sync optional; session_id always comes from the call
+ * argument). The phone writes the reported fields back into its media
+ * store. Result: {"updated":true}. */
+HsCallResult hs_update_file_info(HsRuntime *runtime, uint64_t session_id,
+                                 const uint8_t *request_json, size_t request_len);
 
 /* Directory monitor (ABI 1.3). request_json:
  * {"path":"/sdcard/DCIM","enabled":true} (enabled optional, default true).
@@ -191,6 +201,20 @@ HsCallResult hs_media_thumbnail(HsRuntime *runtime, uint64_t session_id,
                                 const uint8_t *request_json, size_t request_len);
 HsCallResult hs_media_fetch_exif(HsRuntime *runtime, uint64_t session_id,
                                  const uint8_t *request_json, size_t request_len);
+/* Media incremental merge (ABI 1.5, pure function, no session/device).
+ * kind is "photo"|"video"|"audio"; library_json is the current
+ * PhotoLibraryDto/VideoLibraryDto/AudioLibraryDto; change_json is a
+ * MediaChangeDto
+ * {"media_kind":"photo","added":[...],"deleted":[...],"updated":[...]}
+ * whose media_kind must match kind. Entries are upserted by media_id
+ * (fallback path), preserving snapshot-only fields (thumbnail/star/GPS);
+ * deleted entries are removed by the same key. Result: the merged library
+ * DTO JSON. Errors: InvalidArgument (bad kind/JSON), InvalidState (kind
+ * mismatch). */
+HsCallResult hs_media_merge_change(HsRuntime *runtime, const uint8_t *kind,
+                                   size_t kind_len, const uint8_t *library_json,
+                                   size_t library_len, const uint8_t *change_json,
+                                   size_t change_len);
 
 /* Diagnostics (ABI 1.3, no session). Result JSON: abi/application_api/
  * crate_version/platform/arch/adb_path/adb_available/adb_version/

@@ -138,6 +138,32 @@ pub struct FileEntryDto {
     pub media_id: Option<u64>,
 }
 
+/// One file whose metadata should be written back to the phone media store
+/// (UPDATE_FILE_INFO; mirrors core `RemoteFile` without core types).
+/// Field names are the stable snake_case JSON contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateFileInfoItemDto {
+    /// Absolute remote path.
+    pub path: String,
+    /// File size in bytes.
+    pub size: u64,
+    /// Creation timestamp, when reported.
+    pub created_at: Option<u64>,
+    /// Modification timestamp, when reported.
+    pub modified_at: Option<u64>,
+    /// Whether the remote entry is a directory.
+    pub is_directory: bool,
+    /// MD5/checksum reported by the phone, when available.
+    pub checksum: Option<String>,
+    /// Whether the phone marks the entry as trash.
+    pub is_trash: Option<bool>,
+    /// Media-store identifier, when available.
+    pub id: Option<u64>,
+    /// Phone-side extension data (JSON with star/orientation/updateTime),
+    /// opaque to the host.
+    pub ext_data: Option<String>,
+}
+
 /// Snapshot of one open session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSnapshot {
@@ -275,6 +301,18 @@ pub struct DeletePathsRequest {
 pub struct DeleteResultDto {
     /// Entries the phone confirmed deleted (post-delete snapshot shape).
     pub deleted: Vec<FileEntryDto>,
+}
+
+/// Update file metadata on the phone (UPDATE_FILE_INFO). `files` carries
+/// the paths plus the fields the phone should write back into its media
+/// store; `is_sync` asks the phone to feed the change into its sync
+/// manager. Serialized/deserialized for the FFI request JSON; the FFI
+/// entry point always overrides `session_id` from the call argument.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateFileInfoRequest {
+    pub session_id: SessionId,
+    pub files: Vec<UpdateFileInfoItemDto>,
+    pub is_sync: bool,
 }
 
 /// One clipboard entry (mirrors core `ClipboardEntry`).

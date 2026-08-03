@@ -21,7 +21,9 @@ use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 
 use handshaker_application::{
-    AudioAlbumDto, ImageFileDto, PublicError, PublicErrorCode, SessionId, VideoFileDto,
+    AudioAlbumDto, AudioLibraryDto, ImageFileDto, MediaChangeDto, PhotoLibraryDto, PublicError,
+    PublicErrorCode, SessionId, VideoFileDto, VideoLibraryDto, merge_audio_library,
+    merge_photo_library, merge_video_library,
 };
 use serde::Deserialize;
 
@@ -599,6 +601,86 @@ pub unsafe extern "C" fn hs_media_fetch_exif(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Incremental media-library merge (pure function, no device round-trip)
+// ---------------------------------------------------------------------------
+
+/// `hs_media_merge_change` — merge a phone-pushed `MediaChangeDto` into a
+/// library snapshot and return the merged snapshot. `kind` selects the
+/// library type: `"photo"` | `"video"` | `"audio"` (anything else is
+/// `InvalidArgument`). `library_json` is the current library DTO
+/// (`PhotoLibraryDto`/`VideoLibraryDto`/`AudioLibraryDto`); `change_json`
+/// is a `MediaChangeDto`
+/// (`{"media_kind":"photo","added":[...],"deleted":[...],"updated":[...]}`
+/// with `MediaChangeItemDto` entries). The change's `media_kind` must match
+/// `kind` (mismatch → `InvalidState`). Entries are upserted by `media_id`
+/// (falling back to `path`) preserving snapshot-only fields (thumbnail,
+/// starred, GPS); deleted entries are removed by the same key. This is a
+/// pure data transformation and never touches the device, so it needs no
+/// session. Result JSON: the merged library DTO.
+///
+/// # Safety
+/// `runtime` must be a valid handle; `kind_ptr`/`kind_len`,
+/// `library_ptr`/`library_len` and `change_ptr`/`change_len` must describe
+/// valid, readable memory.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hs_media_merge_change(
+    runtime: *mut c_void,
+    kind_ptr: *const u8,
+    kind_len: usize,
+    library_ptr: *const u8,
+    library_len: usize,
+    change_ptr: *const u8,
+    change_len: usize,
+) -> HsCallResult {
+    catch("media_merge_change", || {
+        let _runtime = ffi_try!(runtime_ref(runtime, "media_merge_change"));
+        let kind = ffi_try!(input_str(kind_ptr, kind_len, "media_merge_change"));
+        let library_json = ffi_try!(input_str(library_ptr, library_len, "media_merge_change"));
+        let change_json = ffi_try!(input_str(change_ptr, change_len, "media_merge_change"));
+        let invalid_json = |error: serde_json::Error| {
+            err(
+                &PublicError::new(PublicErrorCode::InvalidArgument, "invalid JSON")
+                    .with_detail(error.to_string())
+                    .operation("media_merge_change"),
+            )
+        };
+        let change: MediaChangeDto =
+            ffi_try!(serde_json::from_str(change_json).map_err(invalid_json));
+        match kind {
+            "photo" => {
+                let library: PhotoLibraryDto =
+                    ffi_try!(serde_json::from_str(library_json).map_err(invalid_json));
+                match merge_photo_library(&library, &change) {
+                    Ok(merged) => ok(&merged),
+                    Err(error) => err(&error),
+                }
+            }
+            "video" => {
+                let library: VideoLibraryDto =
+                    ffi_try!(serde_json::from_str(library_json).map_err(invalid_json));
+                match merge_video_library(&library, &change) {
+                    Ok(merged) => ok(&merged),
+                    Err(error) => err(&error),
+                }
+            }
+            "audio" => {
+                let library: AudioLibraryDto =
+                    ffi_try!(serde_json::from_str(library_json).map_err(invalid_json));
+                match merge_audio_library(&library, &change) {
+                    Ok(merged) => ok(&merged),
+                    Err(error) => err(&error),
+                }
+            }
+            _ => err(&PublicError::new(
+                PublicErrorCode::InvalidArgument,
+                format!("invalid media kind \"{kind}\""),
+            )
+            .operation("media_merge_change")),
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -732,6 +814,98 @@ mod tests {
         let result = unsafe { hs_media_fetch_exif(runtime, 999, request.as_ptr(), request.len()) };
         assert_eq!(result.status, 1);
         assert_eq!(error_code_of(result), "session_not_found");
+        unsafe { hs_runtime_destroy(runtime) };
+    }
+
+    #[test]
+    fn media_merge_change_null_handle_returns_invalid_argument() {
+        let result = unsafe {
+            hs_media_merge_change(
+                std::ptr::null_mut(),
+                b"photo".as_ptr(),
+                5,
+                b"{}".as_ptr(),
+                2,
+                b"{}".as_ptr(),
+                2,
+            )
+        };
+        assert_eq!(result.status, 1);
+        assert_eq!(error_code_of(result), "invalid_argument");
+    }
+
+    #[test]
+    fn media_merge_change_bad_kind_is_rejected() {
+        let runtime = runtime_ptr();
+        let result = unsafe {
+            hs_media_merge_change(
+                runtime,
+                b"documents".as_ptr(),
+                10,
+                b"{}".as_ptr(),
+                2,
+                b"{}".as_ptr(),
+                2,
+            )
+        };
+        assert_eq!(result.status, 1);
+        assert_eq!(error_code_of(result), "invalid_argument");
+        unsafe { hs_runtime_destroy(runtime) };
+    }
+
+    #[test]
+    fn media_merge_change_bad_json_is_rejected() {
+        let runtime = runtime_ptr();
+        let result = unsafe {
+            hs_media_merge_change(
+                runtime,
+                b"photo".as_ptr(),
+                5,
+                b"{oops".as_ptr(),
+                6,
+                b"{}".as_ptr(),
+                2,
+            )
+        };
+        assert_eq!(result.status, 1);
+        assert_eq!(error_code_of(result), "invalid_argument");
+        unsafe { hs_runtime_destroy(runtime) };
+    }
+
+    #[test]
+    fn media_merge_change_photo_merges_without_device() {
+        // Pure function: no session, no device — a minimal library plus a
+        // change must produce the merged snapshot JSON.
+        let runtime = runtime_ptr();
+        let library = br#"{"images":[{"path":"/a.jpg","size":100,"starred":true,"thumbnail_error":false}],"albums":[],"camera_album_id":null}"#;
+        let change = br#"{"media_kind":"photo","added":[{"path":"/b.jpg","size":2048}],"deleted":[],"updated":[{"path":"/a.jpg","size":4096}]}"#;
+        let result = unsafe {
+            hs_media_merge_change(
+                runtime,
+                b"photo".as_ptr(),
+                5,
+                library.as_ptr(),
+                library.len(),
+                change.as_ptr(),
+                change.len(),
+            )
+        };
+        assert_eq!(result.status, 0, "merge must succeed without a device");
+        let bytes = unsafe { crate::buffer::into_vec(result.value) };
+        let merged: serde_json::Value = serde_json::from_slice(&bytes).expect("merged json");
+        unsafe { crate::result::free_result(HsCallResult::default()) };
+        let images = merged["images"].as_array().expect("images array");
+        assert_eq!(images.len(), 2, "one updated in place, one added");
+        let updated = images
+            .iter()
+            .find(|image| image["path"] == "/a.jpg")
+            .expect("updated entry");
+        assert_eq!(updated["size"], 4096, "overlap field overwritten");
+        assert_eq!(updated["starred"], true, "snapshot-only field preserved");
+        assert!(
+            images.iter().any(|image| image["path"] == "/b.jpg"),
+            "added entry present"
+        );
         unsafe { hs_runtime_destroy(runtime) };
     }
 

@@ -26,6 +26,7 @@ use crate::dto::{
     ListDevicesRequest, ListFilesRequest, MediaChangeDto, MediaChangeItemDto, MediaKindDto,
     MovePathRequest, PingResultDto, RemoteFileChangeDto, RemoteFileChangeKind, RuntimeConfig,
     SessionId, SessionSnapshot, SessionState, StatFileRequest, TransportKind,
+    UpdateFileInfoItemDto, UpdateFileInfoRequest,
 };
 use crate::error::{AppResult, PublicError, PublicErrorCode, from_core_error};
 use crate::event::{BackendEvent, EventEnvelope, EventHub};
@@ -773,6 +774,21 @@ impl HandShakerRuntime {
                     deleted: deleted.into_iter().map(remote_file_to_dto).collect(),
                 })
         })
+        .await
+    }
+
+    /// Update file metadata on the phone (UPDATE_FILE_INFO): `files`
+    /// carries the paths plus the fields the phone should write back into
+    /// its media store (star, orientation, timestamps, trash, ...);
+    /// `is_sync` asks the phone to feed the change into its sync manager.
+    /// Returns `true` when the phone accepted the update.
+    pub async fn update_files_info(&self, request: UpdateFileInfoRequest) -> AppResult<bool> {
+        let files: Vec<RemoteFile> = request.files.iter().map(dto_to_remote_file).collect();
+        self.request(
+            request.session_id,
+            "update_file_info",
+            |client| async move { client.update_files_info(&files, request.is_sync).await },
+        )
         .await
     }
 
@@ -2887,6 +2903,22 @@ pub(crate) fn remote_file_to_dto(file: RemoteFile) -> FileEntryDto {
         checksum: file.checksum,
         is_trash: file.is_trash,
         media_id: file.id,
+    }
+}
+
+/// Rebuild a core `RemoteFile` from an update-file-info request item
+/// (every field is carried through; the phone decides which to write back).
+fn dto_to_remote_file(item: &UpdateFileInfoItemDto) -> RemoteFile {
+    RemoteFile {
+        path: item.path.clone(),
+        size: item.size,
+        created_at: item.created_at,
+        modified_at: item.modified_at,
+        is_directory: item.is_directory,
+        checksum: item.checksum.clone(),
+        is_trash: item.is_trash,
+        id: item.id,
+        ext_data: item.ext_data.clone(),
     }
 }
 

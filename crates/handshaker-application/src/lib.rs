@@ -23,7 +23,8 @@ pub use dto::{
     DeletePathsRequest, DeleteResultDto, DeviceDescriptor, DeviceId, DeviceInfoDto, FileEntryDto,
     ListDevicesRequest, ListFilesRequest, MediaChangeDto, MediaChangeItemDto, MediaKindDto,
     MovePathRequest, PingResultDto, RemoteFileChangeDto, RemoteFileChangeKind, RuntimeConfig,
-    SessionId, SessionSnapshot, SessionState, StatFileRequest, TransportKind, UsbDetailDto,
+    SessionId, SessionSnapshot, SessionState, StatFileRequest, TransportKind,
+    UpdateFileInfoItemDto, UpdateFileInfoRequest, UsbDetailDto,
 };
 pub use error::{AppResult, PublicError, PublicErrorCode, from_core_error};
 pub use event::{BackendEvent, EventEnvelope, EventHub};
@@ -34,6 +35,7 @@ pub use file_plan::{
 pub use media::{
     AudioAlbumDto, AudioFileDto, AudioLibraryDto, ExifDataDto, ImageAlbumDto, ImageFileDto,
     PhotoLibraryDto, ThumbnailsDto, VideoAlbumDto, VideoFileDto, VideoLibraryDto,
+    merge_audio_library, merge_photo_library, merge_video_library,
 };
 pub use runtime::{HandShakerRuntime, normalize_remote_path, resolve_remote_path};
 pub use sync::{

@@ -45,7 +45,7 @@ use result::{HsCallResult, catch, err, free_result, input_str, ok, out_slot};
 
 /// ABI version (M8 §7.3), independent of Cargo versions.
 pub const ABI_VERSION_MAJOR: u32 = 1;
-pub const ABI_VERSION_MINOR: u32 = 4;
+pub const ABI_VERSION_MINOR: u32 = 5;
 pub const ABI_VERSION_PATCH: u32 = 0;
 
 /// Runtime handle: owns a tokio executor and the application runtime.
@@ -819,9 +819,9 @@ mod ffi_smoke_tests {
     }
 
     #[test]
-    fn abi_version_is_1_4_0() {
+    fn abi_version_is_1_5_0() {
         assert_eq!(hs_abi_version_major(), 1);
-        assert_eq!(hs_abi_version_minor(), 4);
+        assert_eq!(hs_abi_version_minor(), 5);
         assert_eq!(hs_abi_version_patch(), 0);
     }
 

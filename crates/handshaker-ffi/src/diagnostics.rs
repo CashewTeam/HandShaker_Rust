@@ -20,14 +20,15 @@ use crate::result::{HsCallResult, catch, ok};
 use crate::runtime_ref;
 
 /// `hs_runtime_diagnostics` — no request. Result JSON:
-/// `{"abi":"1.4.0","application_api":"1.0.0-preview.1",
+/// `{"abi":"1.5.0","application_api":"1.0.0-preview.1",
 ///   "crate_version":"0.x.y","platform":"macos","arch":"aarch64",
 ///   "adb_path":"adb","adb_available":true|false,
 ///   "adb_version":"Android Debug Bridge version 1.0.41"|null,
 ///   "state_dir":"/path"|null,"wire_log_enabled":true|false,
 ///   "active_sessions":N,"active_transfers":N,
 ///   "capabilities":["files","clipboard","trust","media","batch","sync",
-///    "monitor","events","discovery","diagnostics"]}`.
+///    "monitor","events","discovery","diagnostics","update_file_info",
+///    "media_merge"]}`.
 /// `adb_available`/`adb_version` probe the configured adb binary with
 /// `adb version` (first output line); `active_transfers` counts snapshots
 /// that are not in a terminal state (Queued or Running).
@@ -82,6 +83,7 @@ pub unsafe extern "C" fn hs_runtime_diagnostics(runtime: *mut c_void) -> HsCallR
             "capabilities": [
                 "files", "clipboard", "trust", "media", "batch", "sync",
                 "monitor", "events", "discovery", "diagnostics",
+                "update_file_info", "media_merge",
             ],
         }))
     })
@@ -174,7 +176,7 @@ mod tests {
         let bytes = unsafe { buffer::into_vec(result.value) };
         let decoded: serde_json::Value = serde_json::from_slice(&bytes).expect("value json");
         unsafe { free_result(Default::default()) };
-        assert_eq!(decoded["abi"], "1.4.0");
+        assert_eq!(decoded["abi"], "1.5.0");
         assert_eq!(decoded["application_api"], "1.0.0-preview.1");
         assert!(decoded["crate_version"].is_string());
         assert!(decoded["platform"].is_string());
@@ -209,6 +211,8 @@ mod tests {
             "events",
             "discovery",
             "diagnostics",
+            "update_file_info",
+            "media_merge",
         ] {
             assert!(
                 capabilities.contains(&expected.to_string()),

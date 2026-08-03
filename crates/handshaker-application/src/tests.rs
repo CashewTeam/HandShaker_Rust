@@ -2988,3 +2988,199 @@ async fn start_sync_watch_without_session_fails_closed() {
     assert_eq!(error.code, PublicErrorCode::SessionNotFound);
     runtime.shutdown().await.expect("shutdown");
 }
+
+// ---- update file info (goal 1: UPDATE_FILE_INFO bridging) ----
+
+#[test]
+fn update_file_info_request_json_round_trips() {
+    let request = crate::dto::UpdateFileInfoRequest {
+        session_id: SessionId(7),
+        files: vec![crate::dto::UpdateFileInfoItemDto {
+            path: "/storage/emulated/0/DCIM/Camera/a.jpg".to_string(),
+            size: 2048,
+            created_at: Some(1_700_000_000),
+            modified_at: Some(1_700_000_100),
+            is_directory: false,
+            checksum: Some("abc123".to_string()),
+            is_trash: Some(false),
+            id: Some(9),
+            ext_data: Some("{\"star\":1}".to_string()),
+        }],
+        is_sync: true,
+    };
+    let json = serde_json::to_value(&request).expect("serialize");
+    assert_eq!(json["session_id"], 7);
+    assert_eq!(json["is_sync"], true);
+    assert_eq!(
+        json["files"][0]["path"],
+        "/storage/emulated/0/DCIM/Camera/a.jpg"
+    );
+    assert_eq!(json["files"][0]["size"], 2048);
+    assert_eq!(json["files"][0]["created_at"], 1_700_000_000);
+    assert_eq!(json["files"][0]["modified_at"], 1_700_000_100);
+    assert_eq!(json["files"][0]["is_directory"], false);
+    assert_eq!(json["files"][0]["checksum"], "abc123");
+    assert_eq!(json["files"][0]["is_trash"], false);
+    assert_eq!(json["files"][0]["id"], 9);
+    assert_eq!(json["files"][0]["ext_data"], "{\"star\":1}");
+    let back: crate::dto::UpdateFileInfoRequest =
+        serde_json::from_value(json).expect("deserialize");
+    assert_eq!(back, request);
+}
+
+#[test]
+fn update_files_info_without_session_fails_closed() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    runtime.block_on(async {
+        let runtime = HandShakerRuntime::create(test_config())
+            .await
+            .expect("create");
+        let error = runtime
+            .update_files_info(crate::dto::UpdateFileInfoRequest {
+                session_id: SessionId(42),
+                files: vec![],
+                is_sync: false,
+            })
+            .await
+            .expect_err("missing session");
+        assert_eq!(error.code, PublicErrorCode::SessionNotFound);
+        runtime.shutdown().await.expect("shutdown");
+    });
+}
+
+// ---- media incremental merge (goal 1: media_merge bridging) ----
+
+#[test]
+fn merge_photo_library_upserts_deletes_and_preserves_snapshot_fields() {
+    let library = crate::media::PhotoLibraryDto {
+        images: vec![
+            crate::media::ImageFileDto {
+                path: Some("/a.jpg".to_string()),
+                size: Some(100),
+                media_id: Some(1),
+                starred: true,
+                thumbnail: Some(vec![0xFF, 0xD8]),
+                ..Default::default()
+            },
+            crate::media::ImageFileDto {
+                path: Some("/b.jpg".to_string()),
+                media_id: Some(2),
+                size: Some(200),
+                ..Default::default()
+            },
+        ],
+        albums: vec![],
+        camera_album_id: Some(5),
+    };
+    let change = crate::dto::MediaChangeDto {
+        media_kind: crate::dto::MediaKindDto::Photo,
+        added: vec![crate::dto::MediaChangeItemDto {
+            media_id: Some(3),
+            path: Some("/c.jpg".to_string()),
+            size: Some(300),
+            ..Default::default()
+        }],
+        deleted: vec![crate::dto::MediaChangeItemDto {
+            media_id: Some(2),
+            ..Default::default()
+        }],
+        updated: vec![crate::dto::MediaChangeItemDto {
+            media_id: Some(1),
+            size: Some(4096),
+            ..Default::default()
+        }],
+    };
+    let merged = crate::merge_photo_library(&library, &change).expect("merge");
+    assert_eq!(
+        merged.images.len(),
+        2,
+        "one updated in place, one added, one deleted"
+    );
+    let updated = merged
+        .images
+        .iter()
+        .find(|image| image.path.as_deref() == Some("/a.jpg"))
+        .expect("updated entry");
+    assert_eq!(updated.size, Some(4096), "overlap field overwritten");
+    assert!(updated.starred, "snapshot-only field preserved");
+    assert_eq!(
+        updated.thumbnail,
+        Some(vec![0xFF, 0xD8]),
+        "snapshot-only field preserved"
+    );
+    assert!(
+        merged
+            .images
+            .iter()
+            .any(|image| image.path.as_deref() == Some("/c.jpg")),
+        "added entry present"
+    );
+    assert!(
+        !merged
+            .images
+            .iter()
+            .any(|image| image.path.as_deref() == Some("/b.jpg")),
+        "deleted entry removed"
+    );
+    assert_eq!(
+        merged.camera_album_id,
+        Some(5),
+        "library-level field preserved"
+    );
+}
+
+#[test]
+fn merge_photo_library_rejects_kind_mismatch() {
+    let library = crate::media::PhotoLibraryDto::default();
+    let change = crate::dto::MediaChangeDto {
+        media_kind: crate::dto::MediaKindDto::Video,
+        added: vec![],
+        deleted: vec![],
+        updated: vec![],
+    };
+    let error = crate::merge_photo_library(&library, &change).expect_err("kind mismatch");
+    assert_eq!(error.code, PublicErrorCode::InvalidState);
+}
+
+#[test]
+fn merge_video_library_applies_added_entry() {
+    let library = crate::media::VideoLibraryDto::default();
+    let change = crate::dto::MediaChangeDto {
+        media_kind: crate::dto::MediaKindDto::Video,
+        added: vec![crate::dto::MediaChangeItemDto {
+            media_id: Some(4),
+            path: Some("/v.mp4".to_string()),
+            size: Some(500),
+            ..Default::default()
+        }],
+        deleted: vec![],
+        updated: vec![],
+    };
+    let merged = crate::merge_video_library(&library, &change).expect("merge");
+    assert_eq!(merged.videos.len(), 1);
+    assert_eq!(merged.videos[0].media_id, Some(4));
+    assert_eq!(merged.videos[0].size, Some(500));
+}
+
+#[test]
+fn merge_audio_library_removes_deleted_entry() {
+    let library = crate::media::AudioLibraryDto {
+        tracks: vec![crate::media::AudioFileDto {
+            media_id: Some(8),
+            path: Some("/s.mp3".to_string()),
+            ..Default::default()
+        }],
+        albums: vec![],
+    };
+    let change = crate::dto::MediaChangeDto {
+        media_kind: crate::dto::MediaKindDto::Audio,
+        added: vec![],
+        deleted: vec![crate::dto::MediaChangeItemDto {
+            media_id: Some(8),
+            ..Default::default()
+        }],
+        updated: vec![],
+    };
+    let merged = crate::merge_audio_library(&library, &change).expect("merge");
+    assert!(merged.tracks.is_empty(), "deleted entry removed");
+}

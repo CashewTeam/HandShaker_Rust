@@ -7,9 +7,13 @@
 use serde::{Deserialize, Serialize};
 
 use handshaker_core::{
-    AudioAlbum, AudioFile, AudioLibrary, ExifData, ImageAlbum, ImageFile, PhotoLibrary, Thumbnails,
-    VideoAlbum, VideoFile, VideoLibrary,
+    AudioAlbum, AudioFile, AudioLibrary, ExifData, ImageAlbum, ImageFile, MediaItem, MediaKind,
+    MediaLibraryChange, PhotoLibrary, Thumbnails, VideoAlbum, VideoFile, VideoLibrary,
+    media_merge::{apply_audio, apply_photo, apply_video},
 };
+
+use crate::dto::{MediaChangeDto, MediaChangeItemDto, MediaKindDto};
+use crate::error::{AppResult, PublicError, PublicErrorCode, from_core_error};
 
 /// One image entry (mirrors core `ImageFile`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -380,4 +384,174 @@ pub fn dto_to_audio_album(album: &AudioAlbumDto) -> AudioAlbum {
         thumbnail: album.thumbnail.clone(),
         thumbnail_error: album.thumbnail_error,
     }
+}
+
+/// Rebuild a core `ImageAlbum` from its DTO.
+pub fn dto_to_image_album(album: &ImageAlbumDto) -> ImageAlbum {
+    ImageAlbum {
+        path: album.path.clone(),
+        album_id: album.album_id,
+        name: album.name.clone(),
+        cover_image: album
+            .cover_image
+            .as_ref()
+            .map(|cover| Box::new(dto_to_image_file(cover))),
+    }
+}
+
+/// Rebuild a core `VideoAlbum` from its DTO.
+pub fn dto_to_video_album(album: &VideoAlbumDto) -> VideoAlbum {
+    VideoAlbum {
+        path: album.path.clone(),
+        album_id: album.album_id,
+        name: album.name.clone(),
+    }
+}
+
+/// Rebuild a core `AudioFile` from its DTO.
+pub fn dto_to_audio_file(file: &AudioFileDto) -> AudioFile {
+    AudioFile {
+        path: file.path.clone(),
+        size: file.size,
+        created_at: file.created_at,
+        modified_at: file.modified_at,
+        media_id: file.media_id,
+        album_id: file.album_id,
+        title: file.title.clone(),
+        mime_type: file.mime_type.clone(),
+        artist_id: file.artist_id,
+        artist: file.artist.clone(),
+        composer: file.composer.clone(),
+        genre: file.genre,
+        comment: file.comment.clone(),
+        copyright: file.copyright.clone(),
+        audio_codec: file.audio_codec.clone(),
+        track: file.track,
+        duration: file.duration,
+    }
+}
+
+/// Rebuild a core `PhotoLibrary` from its DTO (full field carry-over, so
+/// snapshot-only fields like thumbnails and starred state survive a merge).
+pub fn dto_to_photo_library(library: &PhotoLibraryDto) -> PhotoLibrary {
+    PhotoLibrary {
+        images: library.images.iter().map(dto_to_image_file).collect(),
+        albums: library.albums.iter().map(dto_to_image_album).collect(),
+        camera_album_id: library.camera_album_id,
+    }
+}
+
+/// Rebuild a core `VideoLibrary` from its DTO.
+pub fn dto_to_video_library(library: &VideoLibraryDto) -> VideoLibrary {
+    VideoLibrary {
+        videos: library.videos.iter().map(dto_to_video_file).collect(),
+        albums: library.albums.iter().map(dto_to_video_album).collect(),
+    }
+}
+
+/// Rebuild a core `AudioLibrary` from its DTO.
+pub fn dto_to_audio_library(library: &AudioLibraryDto) -> AudioLibrary {
+    AudioLibrary {
+        tracks: library.tracks.iter().map(dto_to_audio_file).collect(),
+        albums: library.albums.iter().map(dto_to_audio_album).collect(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Incremental media-library merging (mirrors `handshaker_core::media_merge`)
+// ---------------------------------------------------------------------------
+
+/// Map the DTO media category to the core category.
+fn kind_to_core(kind: MediaKindDto) -> MediaKind {
+    match kind {
+        MediaKindDto::Photo => MediaKind::Photo,
+        MediaKindDto::Video => MediaKind::Video,
+        MediaKindDto::Audio => MediaKind::Audio,
+    }
+}
+
+/// Rebuild a core `MediaItem` from its DTO (the DTO carries the stable
+/// subset the phone reports on the event channel; the rest stays `None`).
+fn item_to_core(item: &MediaChangeItemDto) -> MediaItem {
+    MediaItem {
+        media_id: item.media_id,
+        path: item.path.clone(),
+        size: item.size,
+        created_at: item.created_at,
+        modified_at: item.modified_at,
+        mime_type: item.mime_type.clone(),
+        title: item.title.clone(),
+        album_name: item.album_name.clone(),
+        ..MediaItem::default()
+    }
+}
+
+/// Rebuild a core `MediaLibraryChange` from its DTO (album payloads are
+/// intentionally not bridged yet).
+fn change_to_core(change: &MediaChangeDto) -> MediaLibraryChange {
+    MediaLibraryChange {
+        kind: kind_to_core(change.media_kind),
+        added: change.added.iter().map(item_to_core).collect(),
+        deleted: change.deleted.iter().map(item_to_core).collect(),
+        updated: change.updated.iter().map(item_to_core).collect(),
+        albums: Vec::new(),
+    }
+}
+
+/// Reject a change whose category does not match the library being merged
+/// (e.g. a Photo event applied to a video library).
+fn ensure_kind_matches(actual: MediaKindDto, expected: MediaKindDto) -> AppResult<()> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(PublicError::new(
+            PublicErrorCode::InvalidState,
+            "media kind mismatch",
+        ))
+    }
+}
+
+/// Merge a media-library change into a photo-library snapshot. Entries in
+/// `added`/`updated` are upserted by `media_id` (falling back to `path`),
+/// overlapping fields are overwritten while snapshot-only fields
+/// (thumbnail, starred, GPS, ...) are preserved; `deleted` entries are
+/// removed by the same key. Pure data transformation — no device I/O.
+/// Returns the merged snapshot.
+pub fn merge_photo_library(
+    library: &PhotoLibraryDto,
+    change: &MediaChangeDto,
+) -> AppResult<PhotoLibraryDto> {
+    ensure_kind_matches(change.media_kind, MediaKindDto::Photo)?;
+    let mut core = dto_to_photo_library(library);
+    apply_photo(&mut core, &change_to_core(change))
+        .map_err(|error| from_core_error(error, "merge_photo_library"))?;
+    Ok(core.into())
+}
+
+/// Merge a media-library change into a video-library snapshot (same
+/// upsert/preserve/remove semantics as `merge_photo_library`). Pure data
+/// transformation — no device I/O. Returns the merged snapshot.
+pub fn merge_video_library(
+    library: &VideoLibraryDto,
+    change: &MediaChangeDto,
+) -> AppResult<VideoLibraryDto> {
+    ensure_kind_matches(change.media_kind, MediaKindDto::Video)?;
+    let mut core = dto_to_video_library(library);
+    apply_video(&mut core, &change_to_core(change))
+        .map_err(|error| from_core_error(error, "merge_video_library"))?;
+    Ok(core.into())
+}
+
+/// Merge a media-library change into an audio-library snapshot (same
+/// upsert/preserve/remove semantics as `merge_photo_library`). Pure data
+/// transformation — no device I/O. Returns the merged snapshot.
+pub fn merge_audio_library(
+    library: &AudioLibraryDto,
+    change: &MediaChangeDto,
+) -> AppResult<AudioLibraryDto> {
+    ensure_kind_matches(change.media_kind, MediaKindDto::Audio)?;
+    let mut core = dto_to_audio_library(library);
+    apply_audio(&mut core, &change_to_core(change))
+        .map_err(|error| from_core_error(error, "merge_audio_library"))?;
+    Ok(core.into())
 }

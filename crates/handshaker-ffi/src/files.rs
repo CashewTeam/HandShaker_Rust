@@ -12,7 +12,7 @@ use std::ffi::c_void;
 
 use handshaker_application::{
     CountFilesRequest, DeletePathsRequest, MovePathRequest, PublicError, PublicErrorCode,
-    SessionId, StatFileRequest,
+    SessionId, StatFileRequest, UpdateFileInfoItemDto, UpdateFileInfoRequest,
 };
 use serde::Deserialize;
 
@@ -195,6 +195,55 @@ pub unsafe extern "C" fn hs_delete_paths(
     })
 }
 
+/// `hs_update_file_info` request JSON:
+/// `{"files":[{"path":"/sdcard/a.jpg","size":1024,"is_directory":false,
+///   "created_at":123,"modified_at":456,"checksum":null,"is_trash":null,
+///   "id":7,"ext_data":null}],"is_sync":false}` — `files` and `is_sync`
+/// optional (default: empty list, no sync); `session_id` always comes from
+/// the call argument and overrides any JSON value. The phone writes the
+/// reported fields back into its media store. Result JSON: `{"updated":true}`.
+///
+/// # Safety
+/// `runtime` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hs_update_file_info(
+    runtime: *mut c_void,
+    session_id: u64,
+    request_ptr: *const u8,
+    request_len: usize,
+) -> HsCallResult {
+    catch("update_file_info", || {
+        let runtime = ffi_try!(runtime_ref(runtime, "update_file_info"));
+        let json = ffi_try!(input_str(request_ptr, request_len, "update_file_info"));
+        #[derive(Deserialize)]
+        struct FfiUpdateFileInfoRequest {
+            #[serde(default)]
+            files: Vec<UpdateFileInfoItemDto>,
+            #[serde(default)]
+            is_sync: bool,
+        }
+        let ffi: FfiUpdateFileInfoRequest = ffi_try!(serde_json::from_str(json).map_err(|error| {
+            err(
+                &PublicError::new(PublicErrorCode::InvalidArgument, "invalid request JSON")
+                    .with_detail(error.to_string())
+                    .operation("update_file_info"),
+            )
+        }));
+        let request = UpdateFileInfoRequest {
+            session_id: SessionId(session_id),
+            files: ffi.files,
+            is_sync: ffi.is_sync,
+        };
+        match runtime
+            ._tokio
+            .block_on(async { runtime.app.update_files_info(request).await })
+        {
+            Ok(_updated) => ok(&serde_json::json!({ "updated": true })),
+            Err(error) => err(&error),
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +356,35 @@ mod tests {
         let runtime = runtime_ptr();
         let request = br#"{"paths":["/a"]}"#;
         let result = unsafe { hs_delete_paths(runtime, 999, request.as_ptr(), request.len()) };
+        assert_eq!(result.status, 1);
+        assert_eq!(error_code_of(result), "session_not_found");
+        unsafe { hs_runtime_destroy(runtime) };
+    }
+
+    #[test]
+    fn update_file_info_null_handle_returns_invalid_argument() {
+        let request = br#"{"files":[]}"#;
+        let result = unsafe {
+            hs_update_file_info(std::ptr::null_mut(), 1, request.as_ptr(), request.len())
+        };
+        assert_eq!(result.status, 1);
+        assert_eq!(error_code_of(result), "invalid_argument");
+    }
+
+    #[test]
+    fn update_file_info_bad_json_is_rejected() {
+        let runtime = runtime_ptr();
+        let result = unsafe { hs_update_file_info(runtime, 1, b"{oops".as_ptr(), 6) };
+        assert_eq!(result.status, 1);
+        assert_eq!(error_code_of(result), "invalid_argument");
+        unsafe { hs_runtime_destroy(runtime) };
+    }
+
+    #[test]
+    fn update_file_info_missing_session_returns_session_not_found() {
+        let runtime = runtime_ptr();
+        let request = br#"{"files":[]}"#;
+        let result = unsafe { hs_update_file_info(runtime, 999, request.as_ptr(), request.len()) };
         assert_eq!(result.status, 1);
         assert_eq!(error_code_of(result), "session_not_found");
         unsafe { hs_runtime_destroy(runtime) };
