@@ -17,9 +17,12 @@
 // them is audited and documented (Safety sections).
 #![allow(unsafe_op_in_unsafe_fn)]
 
+mod batch;
 mod buffer;
 mod clipboard;
+mod diagnostics;
 mod files;
+mod media;
 mod monitor;
 mod result;
 mod trust;
