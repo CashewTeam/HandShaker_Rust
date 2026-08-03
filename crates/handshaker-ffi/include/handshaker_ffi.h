@@ -134,7 +134,7 @@ HsCallResult hs_clipboard_clear(HsRuntime *runtime, uint64_t session_id);
 /* Trust (ABI 1.3, no session). hs_trust_list result: JSON array of
  * TrustRecordDto. remove request_json: {"device_id":"phone:xxx"},
  * result: {"removed":true}. reset request_json:
- * {"endpoint":"wifi:...","expected_device_id":"phone:xxx"},
+ * {"endpoint":"192.168.1.5:5555","expected_device_id":"phone:xxx"},
  * result: {"reset":true}. */
 HsCallResult hs_trust_list(HsRuntime *runtime);
 HsCallResult hs_trust_remove(HsRuntime *runtime, const uint8_t *request_json,

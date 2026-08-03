@@ -1076,6 +1076,12 @@ impl HandShakerRuntime {
                 cancel: Some(cancel_token.clone()),
             };
             let mut result = handshaker_core::BatchTransferResult::default();
+            // Plan-item counters: a tree counts as ONE plan item regardless of
+            // how many files it contains, a plain file counts as one (review
+            // fix: completed_items must never exceed item_count, so progress
+            // bars stay sane and terminal-rollback checks keep working).
+            let mut completed_items: u64 = 0;
+            let mut failed_items: u64 = 0;
             let outcome: Result<(), PublicError> = async {
                 for tree in &trees {
                     let partial = match direction {
@@ -1100,10 +1106,14 @@ impl HandShakerRuntime {
                     }
                     .map_err(|error| from_core_error(error, "execute_file_plan"))?;
                     merge_core_batch(&mut result, partial);
+                    // Partial file failures inside a tree stay visible in
+                    // batch_result.failures; the tree itself counts as one
+                    // completed plan item.
+                    completed_items += 1;
                     registry.set_batch_items(
                         id,
-                        result.ok.len() as u64,
-                        result.failures.len() as u64,
+                        completed_items,
+                        failed_items,
                         Some(tree.source.clone()),
                     );
                 }
@@ -1124,11 +1134,15 @@ impl HandShakerRuntime {
                         }
                     }
                     .map_err(|error| from_core_error(error, "execute_file_plan"))?;
+                    let partial_ok = partial.ok.len() as u64;
+                    let partial_failures = partial.failures.len() as u64;
                     merge_core_batch(&mut result, partial);
+                    completed_items += partial_ok;
+                    failed_items += partial_failures;
                     registry.set_batch_items(
                         id,
-                        result.ok.len() as u64,
-                        result.failures.len() as u64,
+                        completed_items,
+                        failed_items,
                         files.last().map(|file| file.source.clone()),
                     );
                 }
@@ -1211,6 +1225,10 @@ impl HandShakerRuntime {
                         return;
                     }
                     let connection_closed = connection_lost_code(error.code);
+                    // The batch died mid-way (transport/IO/cancel): attach the
+                    // partial result so the caller can see what already
+                    // completed (review fix; never silently empty).
+                    registry.set_batch_result(id, batch_result_to_dto(result));
                     registry.set_error(id, error);
                     if let Some(snapshot) = registry.transition(id, TransferState::Failed) {
                         event_hub.publish(BackendEvent::TransferUpdated(snapshot));

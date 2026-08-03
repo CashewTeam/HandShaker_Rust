@@ -26,8 +26,9 @@ use crate::runtime_ref;
 ///   "adb_version":"Android Debug Bridge version 1.0.41"|null,
 ///   "state_dir":"/path"|null,"wire_log_enabled":true|false,
 ///   "active_sessions":N,"active_transfers":N,
-///   "capabilities":["files","clipboard","trust","media","batch","sync",
-///    "monitor","events","discovery","diagnostics"]}`.
+///   "capabilities":["files","clipboard","trust","media","batch",
+///    "monitor","events","discovery","diagnostics"]}` (the sync backend
+///    exists but its FFI wrapper is intentionally not shipped yet).
 /// `adb_available`/`adb_version` probe the configured adb binary with
 /// `adb version` (first output line); `active_transfers` counts snapshots
 /// that are not in a terminal state (Queued or Running).
@@ -87,23 +88,49 @@ pub unsafe extern "C" fn hs_runtime_diagnostics(runtime: *mut c_void) -> HsCallR
     })
 }
 
-/// Run `adb version` synchronously and return (available, first-line
-/// version). Any failure (missing binary, non-zero exit, no output) yields
-/// `(false, None)` — diagnostics never fail on an adb problem.
+/// Run `adb version` synchronously with a bounded deadline and return
+/// (available, first-line version). Any failure (missing binary, non-zero
+/// exit, no output, timeout) yields `(false, None)` — diagnostics never
+/// fail on an adb problem, and a hung adb cannot block the caller
+/// (review fix: `Command::output()` alone would wait forever).
 fn adb_probe(adb_path: &str) -> (bool, Option<String>) {
-    match Command::new(adb_path).arg("version").output() {
-        Ok(output) if output.status.success() => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let first_line = stdout
-                .lines()
-                .next()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(str::to_string);
-            (true, first_line)
+    const ADB_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    let Ok(mut child) = Command::new(adb_path)
+        .arg("version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return (false, None);
+    };
+    let deadline = std::time::Instant::now() + ADB_PROBE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return (false, None);
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(_) => return (false, None),
         }
-        Ok(_) | Err(_) => (false, None),
+    };
+    if !status.success() {
+        return (false, None);
     }
+    let Ok(output) = child.wait_with_output() else {
+        return (false, None);
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let first_line = stdout
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string);
+    (true, first_line)
 }
 
 /// Terminal transfer states: Completed, Failed, Cancelled. Everything else

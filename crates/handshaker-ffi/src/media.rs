@@ -265,6 +265,22 @@ pub unsafe extern "C" fn hs_media_thumbnail(
             Ok(thumbnails) => thumbnails,
             Err(error) => return err(&error),
         };
+        // Cache key is per-device (review fix): two phones sharing the same
+        // remote path must not collide. The phone uuid (stable identity) is
+        // preferred; the session id is the fallback for snapshots without it.
+        let device_key = match runtime._tokio.block_on(async {
+            runtime
+                .app
+                .get_session_snapshot(SessionId(session_id))
+                .await
+        }) {
+            Ok(snapshot) => snapshot
+                .device_info
+                .phone_id
+                .clone()
+                .unwrap_or_else(|| session_id.to_string()),
+            Err(_) => session_id.to_string(),
+        };
         let cache_dir = ffi_try!(thumbnail_cache_dir(runtime, "media_thumbnail"));
         let mut out_images = Vec::new();
         for image in &thumbnails.images {
@@ -275,6 +291,7 @@ pub unsafe extern "C" fn hs_media_thumbnail(
                 let cache_path = ffi_try!(cache_thumbnail(
                     &cache_dir,
                     "image",
+                    &device_key,
                     path,
                     bytes,
                     "media_thumbnail"
@@ -295,6 +312,7 @@ pub unsafe extern "C" fn hs_media_thumbnail(
                 let cache_path = ffi_try!(cache_thumbnail(
                     &cache_dir,
                     "video",
+                    &device_key,
                     path,
                     bytes,
                     "media_thumbnail"
@@ -315,6 +333,7 @@ pub unsafe extern "C" fn hs_media_thumbnail(
                 let cache_path = ffi_try!(cache_thumbnail(
                     &cache_dir,
                     "audio",
+                    &device_key,
                     path,
                     bytes,
                     "media_thumbnail"
@@ -392,27 +411,51 @@ fn default_state_dir() -> Option<PathBuf> {
 
 /// Write one thumbnail to the cache (or reuse the existing file) and return
 /// its absolute path as a string. The file name is
-/// `<kind>-<fnv1a64(remote_path) hex>.thumb`; the hash is a simple stable
-/// 64-bit FNV-1a (no new dependencies).
+/// `<device_key>-<kind>-<fnv1a64(remote_path) hex>.thumb`; the hash is a
+/// simple stable 64-bit FNV-1a (no new dependencies) and the device key
+/// keeps distinct phones from colliding on equal remote paths. Writes are
+/// atomic (temp file + rename) so concurrent callers never observe a
+/// half-written cache entry.
 fn cache_thumbnail(
     cache_dir: &Path,
     kind: &str,
+    device_key: &str,
     remote_path: &str,
     bytes: &[u8],
     operation: &str,
 ) -> Result<String, HsCallResult> {
-    let file_name = format!("{kind}-{:016x}.thumb", fnv1a64(remote_path));
-    let path = cache_dir.join(file_name);
+    let device = sanitize_cache_component(device_key);
+    let file_name = format!("{device}-{kind}-{:016x}.thumb", fnv1a64(remote_path));
+    let tmp_name = format!("{file_name}.tmp");
+    let path = cache_dir.join(&file_name);
     if !path.exists() {
-        std::fs::write(&path, bytes).map_err(|error| {
+        let tmp = cache_dir.join(tmp_name);
+        std::fs::write(&tmp, bytes).map_err(|error| {
             err(
                 &PublicError::new(PublicErrorCode::Internal, "thumbnail cache write failed")
+                    .with_detail(format!("{}: {error}", tmp.display()))
+                    .operation(operation),
+            )
+        })?;
+        std::fs::rename(&tmp, &path).map_err(|error| {
+            err(
+                &PublicError::new(PublicErrorCode::Internal, "thumbnail cache commit failed")
                     .with_detail(format!("{}: {error}", path.display()))
                     .operation(operation),
             )
         })?;
     }
     Ok(path.display().to_string())
+}
+
+/// Restrict a cache-file component to ASCII alphanumerics plus `-`/`_` so
+/// a device identifier can never smuggle path separators into a file name.
+fn sanitize_cache_component(input: &str) -> String {
+    input
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(64)
+        .collect()
 }
 
 /// FNV-1a 64-bit hash (stable across processes and platforms) used to name
