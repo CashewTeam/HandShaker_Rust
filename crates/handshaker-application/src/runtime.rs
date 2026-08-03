@@ -22,6 +22,10 @@ use crate::dto::{
     TransportKind,
 };
 use crate::error::{AppResult, PublicError, PublicErrorCode, from_core_error};
+use crate::media::{
+    AudioAlbumDto, AudioLibraryDto, ExifDataDto, ImageFileDto, PhotoLibraryDto, ThumbnailsDto,
+    VideoFileDto, VideoLibraryDto, dto_to_audio_album, dto_to_image_file, dto_to_video_file,
+};
 use crate::event::{BackendEvent, EventEnvelope, EventHub};
 use crate::transfer::{
     BatchTransferItemDto, BatchTransferRequest, BatchTransferResultDto, DownloadRequest,
@@ -488,6 +492,73 @@ impl HandShakerRuntime {
             .clipboard_clear()
             .await
             .map_err(|error| from_core_error(error, "clear_clipboards"))
+    }
+
+    // ---- media library (mirrors core media domain, DTOs in media.rs) ----
+
+    /// Snapshot of the phone photo library.
+    pub async fn get_photo_library(&self, session_id: SessionId) -> AppResult<PhotoLibraryDto> {
+        self.ensure_open()?;
+        let client = self.session_client(session_id).await?;
+        client
+            .get_photo_library()
+            .await
+            .map(Into::into)
+            .map_err(|error| from_core_error(error, "get_photo_library"))
+    }
+
+    /// Snapshot of the phone video library.
+    pub async fn get_video_library(&self, session_id: SessionId) -> AppResult<VideoLibraryDto> {
+        self.ensure_open()?;
+        let client = self.session_client(session_id).await?;
+        client
+            .get_video_library()
+            .await
+            .map(Into::into)
+            .map_err(|error| from_core_error(error, "get_video_library"))
+    }
+
+    /// Snapshot of the phone audio library.
+    pub async fn get_audio_library(&self, session_id: SessionId) -> AppResult<AudioLibraryDto> {
+        self.ensure_open()?;
+        let client = self.session_client(session_id).await?;
+        client
+            .get_audio_library()
+            .await
+            .map(Into::into)
+            .map_err(|error| from_core_error(error, "get_audio_library"))
+    }
+
+    /// Fetch thumbnails for requested media entries.
+    pub async fn get_thumbnails(
+        &self,
+        session_id: SessionId,
+        images: &[ImageFileDto],
+        videos: &[VideoFileDto],
+        audio_albums: &[AudioAlbumDto],
+    ) -> AppResult<ThumbnailsDto> {
+        self.ensure_open()?;
+        let client = self.session_client(session_id).await?;
+        client
+            .get_thumbnails(
+                &images.iter().map(dto_to_image_file).collect::<Vec<_>>(),
+                &videos.iter().map(dto_to_video_file).collect::<Vec<_>>(),
+                &audio_albums.iter().map(dto_to_audio_album).collect::<Vec<_>>(),
+            )
+            .await
+            .map(Into::into)
+            .map_err(|error| from_core_error(error, "get_thumbnails"))
+    }
+
+    /// Fetch EXIF metadata for one remote media path.
+    pub async fn fetch_exif(&self, session_id: SessionId, path: &str) -> AppResult<ExifDataDto> {
+        self.ensure_open()?;
+        let client = self.session_client(session_id).await?;
+        client
+            .fetch_exif(path)
+            .await
+            .map(Into::into)
+            .map_err(|error| from_core_error(error, "fetch_exif"))
     }
 
     // ---- transfers ----

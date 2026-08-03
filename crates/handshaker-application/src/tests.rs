@@ -111,6 +111,30 @@ async fn unknown_session_errors_are_stable() {
         .await
         .expect_err("missing session");
     assert_eq!(error.code, PublicErrorCode::SessionNotFound);
+    let error = runtime
+        .get_photo_library(SessionId(42))
+        .await
+        .expect_err("missing session");
+    assert_eq!(error.code, PublicErrorCode::SessionNotFound);
+}
+
+#[test]
+fn media_dto_mapping_round_trips_thumbnail_request_shape() {
+    // DTO -> core -> DTO keeps media_id/path significant fields intact.
+    let dto = crate::media::ImageFileDto {
+        media_id: Some(621154),
+        path: Some("/storage/emulated/0/DCIM/Camera/a.jpg".into()),
+        ..Default::default()
+    };
+    let core = crate::media::dto_to_image_file(&dto);
+    assert_eq!(core.media_id, Some(621154));
+    assert_eq!(
+        core.path.as_deref(),
+        Some("/storage/emulated/0/DCIM/Camera/a.jpg")
+    );
+    let back: crate::media::ImageFileDto = core.into();
+    assert_eq!(back.media_id, dto.media_id);
+    assert_eq!(back.path, dto.path);
 }
 
 #[test]

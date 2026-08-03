@@ -9,6 +9,7 @@
 mod dto;
 mod error;
 mod event;
+mod media;
 mod runtime;
 mod transfer;
 
@@ -21,6 +22,10 @@ pub use dto::{
 };
 pub use error::{AppResult, PublicError, PublicErrorCode, from_core_error};
 pub use event::{BackendEvent, EventEnvelope, EventHub};
+pub use media::{
+    AudioAlbumDto, AudioFileDto, AudioLibraryDto, ExifDataDto, ImageAlbumDto, ImageFileDto,
+    PhotoLibraryDto, ThumbnailsDto, VideoAlbumDto, VideoFileDto, VideoLibraryDto,
+};
 pub use runtime::{HandShakerRuntime, normalize_remote_path, resolve_remote_path};
 pub use transfer::{
     BatchTransferItemDto, BatchTransferRequest, BatchTransferResultDto, DownloadRequest,

@@ -1797,7 +1797,7 @@ async fn execute_connected(
             return Err(Error::Usage(i18n::text("sync.watch_nested").to_string()));
         }
         Command::Media(command) => {
-            return media_command(client, &context, command).await;
+            return media_command(session, &context, command).await;
         }
         Command::Sync(command) => {
             return sync_command(client, &context, command, format).await;
@@ -2165,14 +2165,18 @@ fn media_preview_limit(args: &MediaPreviewArgs) -> Option<usize> {
 }
 
 async fn media_command(
-    client: &HandShakerClient,
+    session: &AppSession,
     context: &CommandContext,
     command: &MediaCommand,
 ) -> Result<Outcome> {
     let localizer = ZhCn;
     match command {
         MediaCommand::Photo(args) => {
-            let library = client.get_photo_library().await?;
+            let library = session
+                .runtime
+                .get_photo_library(session.session_id)
+                .await
+                .map_err(app_error)?;
             let limit = media_preview_limit(args);
             let (shown, entries_truncated) = truncate(&library.images, limit);
             let (albums, albums_truncated) = truncate(&library.albums, limit);
@@ -2213,7 +2217,11 @@ async fn media_command(
             Ok(Outcome::new("media.photo", data, human)?)
         }
         MediaCommand::Video(args) => {
-            let library = client.get_video_library().await?;
+            let library = session
+                .runtime
+                .get_video_library(session.session_id)
+                .await
+                .map_err(app_error)?;
             let limit = media_preview_limit(args);
             let (shown, entries_truncated) = truncate(&library.videos, limit);
             let (albums, albums_truncated) = truncate(&library.albums, limit);
@@ -2246,7 +2254,11 @@ async fn media_command(
             Ok(Outcome::new("media.video", data, human)?)
         }
         MediaCommand::Audio(args) => {
-            let library = client.get_audio_library().await?;
+            let library = session
+                .runtime
+                .get_audio_library(session.session_id)
+                .await
+                .map_err(app_error)?;
             let limit = media_preview_limit(args);
             let (shown, entries_truncated) = truncate(&library.tracks, limit);
             let (albums, albums_truncated) = truncate(&library.albums, limit);
@@ -2290,7 +2302,7 @@ async fn media_command(
                     &[&output_dir.display().to_string(), &error.to_string()],
                 ))
             })?;
-            let images: Vec<handshaker_core::ImageFile> = targets
+            let images: Vec<handshaker_application::ImageFileDto> = targets
                 .iter()
                 .map(|target| {
                     if target.chars().all(|character| character.is_ascii_digit()) {
@@ -2299,19 +2311,23 @@ async fn media_command(
                                 localizer.format(MessageKey::MediaThumbnailInvalidId, &[target]),
                             )
                         })?;
-                        Ok(handshaker_core::ImageFile {
+                        Ok(handshaker_application::ImageFileDto {
                             media_id: Some(media_id),
                             ..Default::default()
                         })
                     } else {
-                        Ok(handshaker_core::ImageFile {
+                        Ok(handshaker_application::ImageFileDto {
                             path: Some(resolve_remote(&context.remote_cwd, target)),
                             ..Default::default()
                         })
                     }
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let thumbnails = client.get_thumbnails(&images, &[], &[]).await?;
+            let thumbnails = session
+                .runtime
+                .get_thumbnails(session.session_id, &images, &[], &[])
+                .await
+                .map_err(app_error)?;
             let mut written = Vec::new();
             let mut failed = Vec::new();
             for (index, target) in targets.iter().enumerate() {
