@@ -1124,6 +1124,94 @@ fn remote_destination_conflict_handles_shape_and_overwrite() {
 }
 
 #[test]
+fn download_destination_rejects_dotdot_basename() {
+    // Defense in depth: a remote path that terminates in ".." (or has no
+    // file name at all) must be rejected as a hard conflict, never joined
+    // into the destination. Trailing "/." and "/" are normalized by
+    // `file_name` to the real name and stay legal.
+    for path in ["/storage/emulated/0/..", "/"] {
+        let mut conflicts = Vec::new();
+        let remote = FileEntryDto {
+            path: path.to_string(),
+            size: 10,
+            created_at_ms: None,
+            modified_at_ms: None,
+            is_directory: false,
+            checksum: None,
+            is_trash: None,
+            media_id: None,
+        };
+        let resolved = crate::runtime::resolve_local_download_destination(
+            "/tmp/out",
+            &remote,
+            1,
+            &mut conflicts,
+        );
+        assert!(resolved.is_none(), "{path} must not resolve");
+        assert_eq!(
+            conflicts[0].kind,
+            crate::file_plan::FileConflictKind::DestinationTypeMismatch
+        );
+        assert!(!conflicts[0].overridable);
+    }
+    // Trailing slash/dot forms carry the real file name; with a
+    // non-existent destination the resolved target stays the destination
+    // itself (single-source semantics).
+    let mut conflicts = Vec::new();
+    let remote = FileEntryDto {
+        path: "/storage/emulated/0/Download/.".to_string(),
+        size: 10,
+        created_at_ms: None,
+        modified_at_ms: None,
+        is_directory: false,
+        checksum: None,
+        is_trash: None,
+        media_id: None,
+    };
+    let resolved =
+        crate::runtime::resolve_local_download_destination("/tmp/out", &remote, 1, &mut conflicts);
+    assert_eq!(resolved, Some(std::path::PathBuf::from("/tmp/out")));
+    assert!(conflicts.is_empty());
+}
+
+#[test]
+fn upload_destination_rejects_dotdot_basename() {
+    // ".." and a root path (no file name at all) are rejected; trailing
+    // "/." carries the real file name and stays legal.
+    for name in ["..", "/"] {
+        let mut conflicts = Vec::new();
+        let source = std::path::PathBuf::from(if name == "/" {
+            name.to_string()
+        } else {
+            format!("/local/{name}")
+        });
+        let resolved = crate::runtime::resolve_remote_upload_destination(
+            "/storage/emulated/0/Download",
+            &source,
+            1,
+            None,
+            &mut conflicts,
+        );
+        assert!(resolved.is_none(), "{name:?} must not resolve");
+        assert_eq!(
+            conflicts[0].kind,
+            crate::file_plan::FileConflictKind::DestinationTypeMismatch
+        );
+    }
+    let mut conflicts = Vec::new();
+    let source = std::path::PathBuf::from("/local/a.bin/.");
+    let resolved = crate::runtime::resolve_remote_upload_destination(
+        "/storage/emulated/0/Download",
+        &source,
+        1,
+        None,
+        &mut conflicts,
+    )
+    .expect("trailing dot resolves");
+    assert_eq!(resolved, "/storage/emulated/0/Download");
+}
+
+#[test]
 fn duplicate_destination_conflicts_are_never_overridable() {
     let items = vec![
         crate::file_plan::FilePlanItem {

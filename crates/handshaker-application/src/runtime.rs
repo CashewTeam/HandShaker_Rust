@@ -1053,6 +1053,13 @@ impl HandShakerRuntime {
                     // Review fix: transport death inside a batch is aggregated
                     // as per-file failures by core; surface it as a connection
                     // loss instead of a silent partial success.
+                    //
+                    // Only session-level `Error::Transport` failures reach this
+                    // check: USB bulk errors are wrapped in `io::Error` by the
+                    // transport (usb.rs) and map to `LocalIo` via
+                    // `From<io::Error>`, so transient USB hiccups can never
+                    // tear down the session. Transport failures here mean the
+                    // frame writer/reader or response channel is gone.
                     let connection_closed = result
                         .failures
                         .iter()
@@ -1981,10 +1988,25 @@ pub(crate) fn resolve_local_download_destination(
     source_count: usize,
     conflicts: &mut Vec<FilePlanConflict>,
 ) -> Option<std::path::PathBuf> {
-    let base = std::path::Path::new(&remote.path)
+    // Defense in depth (security review): `resolve_remote_path` already
+    // normalizes the remote path, but never let a "." / ".." / empty
+    // basename escape the intended destination directory.
+    let base = match std::path::Path::new(&remote.path)
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("download");
+    {
+        Some(name) if !matches!(name, "." | "..") && !name.is_empty() => name.to_string(),
+        _ => {
+            conflicts.push(FilePlanConflict {
+                kind: FileConflictKind::DestinationTypeMismatch,
+                source: remote.path.clone(),
+                destination: destination.to_string(),
+                message: "remote path has no usable file name".into(),
+                overridable: false,
+            });
+            return None;
+        }
+    };
     let destination_path = std::path::PathBuf::from(destination);
     let existing = std::fs::metadata(&destination_path).ok();
 
@@ -2054,10 +2076,22 @@ pub(crate) fn resolve_remote_upload_destination(
     destination_stat: Option<&FileEntryDto>,
     conflicts: &mut Vec<FilePlanConflict>,
 ) -> Option<String> {
-    let base = source
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("upload");
+    // Defense in depth (security review): reject "." / ".." / empty local
+    // basenames instead of letting them escape the intended remote
+    // directory.
+    let base = match source.file_name().and_then(|name| name.to_str()) {
+        Some(name) if !matches!(name, "." | "..") && !name.is_empty() => name.to_string(),
+        _ => {
+            conflicts.push(FilePlanConflict {
+                kind: FileConflictKind::DestinationTypeMismatch,
+                source: source.display().to_string(),
+                destination: destination.to_string(),
+                message: "local source has no usable file name".into(),
+                overridable: false,
+            });
+            return None;
+        }
+    };
     if source_count > 1 {
         match destination_stat {
             Some(existing) if existing.is_directory => {
