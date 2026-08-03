@@ -22,8 +22,8 @@ async fn main() {
             return;
         }
         Err(_error) => {
-            let app_error = handshaker_rust::Error::Usage(
-                handshaker_rust::i18n::text("cli.parse_error").to_string(),
+            let app_error = handshaker_core::Error::Usage(
+                handshaker_core::i18n::text("cli.parse_error").to_string(),
             );
             render_error(&app_error, "unknown", fallback_output);
             std::process::exit(app_error.exit_code());
@@ -52,9 +52,9 @@ async fn main() {
         tokio::select! {
             result = cli::run(cli) => result,
             signal = tokio::signal::ctrl_c() => match signal {
-                Ok(()) => Err(handshaker_rust::Error::Interrupted),
-                Err(error) => Err(handshaker_rust::Error::LocalIo(
-                    handshaker_rust::i18n::format("error.ctrl_c", &[&error.to_string()]),
+                Ok(()) => Err(handshaker_core::Error::Interrupted),
+                Err(error) => Err(handshaker_core::Error::LocalIo(
+                    handshaker_core::i18n::format("error.ctrl_c", &[&error.to_string()]),
                 )),
             },
         }

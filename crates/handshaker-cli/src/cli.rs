@@ -10,7 +10,7 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use serde::Serialize;
 
-use handshaker_rust::{
+use handshaker_core::{
     BatchTransferFailure, BatchTransferItem, BatchTransferOptions, BatchTransferProgress,
     BatchTransferResult, ClientEvent, ClientOptions, ConnectionTarget, DeleteOptions, DeviceInfo,
     Error, EventCallbacks, EventFilter, EventStreamError, HandShakerClient, RemoteFile, Result,
@@ -825,7 +825,7 @@ fn connection_target(cli: &Cli) -> ConnectionTarget {
 
 async fn device_list(timeout: Duration) -> Result<Outcome> {
     let devices = HandShakerClient::list_adb_devices_with_timeout("adb", timeout).await?;
-    let accessories = handshaker_rust::list_usb_accessories()?;
+    let accessories = handshaker_core::list_usb_accessories()?;
     let localizer = ZhCn;
     let mut lines = Vec::new();
     if !devices.is_empty() {
@@ -888,7 +888,7 @@ async fn device_discover(cli: &Cli) -> Result<Outcome> {
     Outcome::new("device.discover", devices, human)
 }
 
-fn human_trust_records(records: &[handshaker_rust::TrustRecordInfo]) -> String {
+fn human_trust_records(records: &[handshaker_core::TrustRecordInfo]) -> String {
     let localizer = ZhCn;
     if records.is_empty() {
         return localizer.text(MessageKey::TrustNone).to_string();
@@ -1971,7 +1971,7 @@ async fn media_command(
                     &[&output_dir.display().to_string(), &error.to_string()],
                 ))
             })?;
-            let images: Vec<handshaker_rust::ImageFile> = targets
+            let images: Vec<handshaker_core::ImageFile> = targets
                 .iter()
                 .map(|target| {
                     if target.chars().all(|character| character.is_ascii_digit()) {
@@ -1980,12 +1980,12 @@ async fn media_command(
                                 localizer.format(MessageKey::MediaThumbnailInvalidId, &[target]),
                             )
                         })?;
-                        Ok(handshaker_rust::ImageFile {
+                        Ok(handshaker_core::ImageFile {
                             media_id: Some(media_id),
                             ..Default::default()
                         })
                     } else {
-                        Ok(handshaker_rust::ImageFile {
+                        Ok(handshaker_core::ImageFile {
                             path: Some(resolve_remote(&context.remote_cwd, target)),
                             ..Default::default()
                         })
@@ -2569,7 +2569,7 @@ fn remote_name(remote: &str) -> Option<String> {
 fn batch_options(
     overwrite: bool,
     command: &'static str,
-    device: &handshaker_rust::DeviceInfo,
+    device: &handshaker_core::DeviceInfo,
     format: OutputFormat,
 ) -> BatchTransferOptions {
     if format == OutputFormat::Json {
@@ -2619,7 +2619,7 @@ fn normalize_local(path: PathBuf) -> PathBuf {
     normalized
 }
 
-fn human_device_info(info: &handshaker_rust::DeviceInfo) -> String {
+fn human_device_info(info: &handshaker_core::DeviceInfo) -> String {
     let localizer = ZhCn;
     let battery = info
         .battery_percentage
@@ -2669,7 +2669,7 @@ fn human_file(file: &RemoteFile) -> String {
     )
 }
 
-fn human_clipboards(entries: &[handshaker_rust::ClipboardEntry]) -> String {
+fn human_clipboards(entries: &[handshaker_core::ClipboardEntry]) -> String {
     let localizer = ZhCn;
     let mut lines = vec![localizer.text(MessageKey::ClipboardHeader).to_string()];
     lines.extend(entries.iter().map(|entry| {
@@ -2955,7 +2955,7 @@ mod tests {
 
     #[test]
     fn watch_envelope_carries_event_payload() {
-        let event = ClientEvent::ClipboardChanged(vec![handshaker_rust::ClipboardEntry {
+        let event = ClientEvent::ClipboardChanged(vec![handshaker_core::ClipboardEntry {
             text: "hello".to_string(),
             timestamp_ms: 42,
         }]);

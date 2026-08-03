@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use handshaker_rust::{
+use handshaker_core::{
     DeviceInfo, Error, Result,
     i18n::{self, Localizer, MessageKey, ZhCn},
 };
@@ -93,7 +93,7 @@ pub(crate) fn render_error(error: &Error, command: &str, format: OutputFormat) {
 pub(crate) fn render_batch_progress(
     command: &str,
     info: &DeviceInfo,
-    progress: &handshaker_rust::BatchTransferProgress,
+    progress: &handshaker_core::BatchTransferProgress,
     format: OutputFormat,
 ) {
     match format {
@@ -166,7 +166,7 @@ pub(crate) fn error_envelope(error: &Error, command: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use handshaker_rust::ErrorCode;
+    use handshaker_core::ErrorCode;
 
     #[test]
     fn success_envelope_has_stable_schema_v1_shape() {

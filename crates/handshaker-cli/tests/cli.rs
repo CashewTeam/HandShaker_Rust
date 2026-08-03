@@ -25,8 +25,8 @@ fn help_text_comes_from_the_chinese_language_file() {
         .expect("run handshaker help");
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).expect("UTF-8 help");
-    assert!(help.contains(handshaker_rust::i18n::text("cli.command.ls")));
-    assert!(help.contains(handshaker_rust::i18n::text("cli.arg.path")));
+    assert!(help.contains(handshaker_core::i18n::text("cli.command.ls")));
+    assert!(help.contains(handshaker_core::i18n::text("cli.arg.path")));
     assert!(!help.contains("Print this message"));
     assert!(!help.contains("[default:"));
 }
@@ -39,9 +39,9 @@ fn discover_help_is_localized_and_parses() {
         .expect("run discover help");
     assert!(help.status.success());
     let help = String::from_utf8(help.stdout).expect("UTF-8 help");
-    assert!(help.contains(handshaker_rust::i18n::text("cli.command.discover")));
-    assert!(help.contains(handshaker_rust::i18n::text("cli.arg.browse_timeout")));
-    assert!(help.contains(handshaker_rust::i18n::text("cli.value.browse_timeout")));
+    assert!(help.contains(handshaker_core::i18n::text("cli.command.discover")));
+    assert!(help.contains(handshaker_core::i18n::text("cli.arg.browse_timeout")));
+    assert!(help.contains(handshaker_core::i18n::text("cli.value.browse_timeout")));
 
     let output = Command::new(env!("CARGO_BIN_EXE_handshaker"))
         .args([
@@ -190,7 +190,7 @@ fn device_list_reads_only_adb_devices_long() {
         .expect("run handshaker human output");
     assert!(human.status.success());
     let human_output = String::from_utf8(human.stdout).expect("UTF-8 output");
-    let adb_header = handshaker_rust::i18n::text("device.list_header");
+    let adb_header = handshaker_core::i18n::text("device.list_header");
     assert!(
         human_output.contains(&format!("{adb_header}\nABC123\tdevice\tDE106\tosborn")),
         "ADB rows must appear with their header: {human_output}"
@@ -210,8 +210,8 @@ fn watch_help_is_localized() {
         .expect("run watch help");
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).expect("UTF-8 help");
-    assert!(help.contains(handshaker_rust::i18n::text("cli.command.watch")));
-    assert!(help.contains(handshaker_rust::i18n::text("cli.arg.watch_path")));
+    assert!(help.contains(handshaker_core::i18n::text("cli.command.watch")));
+    assert!(help.contains(handshaker_core::i18n::text("cli.arg.watch_path")));
 }
 
 #[test]
@@ -222,8 +222,8 @@ fn media_help_is_localized() {
         .expect("run media help");
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).expect("UTF-8 help");
-    assert!(help.contains(handshaker_rust::i18n::text("cli.command.media")));
-    assert!(help.contains(handshaker_rust::i18n::text("cli.command.media_photo")));
+    assert!(help.contains(handshaker_core::i18n::text("cli.command.media")));
+    assert!(help.contains(handshaker_core::i18n::text("cli.command.media_photo")));
 
     let photo = Command::new(env!("CARGO_BIN_EXE_handshaker"))
         .args(["media", "photo", "--help"])
@@ -231,7 +231,7 @@ fn media_help_is_localized() {
         .expect("run media photo help");
     assert!(photo.status.success());
     let photo = String::from_utf8(photo.stdout).expect("UTF-8 help");
-    assert!(photo.contains(handshaker_rust::i18n::text("cli.arg.media_limit")));
+    assert!(photo.contains(handshaker_core::i18n::text("cli.arg.media_limit")));
 }
 
 #[test]
@@ -270,7 +270,7 @@ fn sync_commands_parse_and_require_output_dir() {
         .expect("sync help");
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).expect("UTF-8 help");
-    assert!(help.contains(handshaker_rust::i18n::text("cli.command.sync_plan")));
+    assert!(help.contains(handshaker_core::i18n::text("cli.command.sync_plan")));
 }
 
 #[test]
@@ -283,7 +283,7 @@ fn batch_subcommand_parses_and_requires_connection() {
         .expect("batch help");
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).expect("UTF-8 help");
-    assert!(help.contains(handshaker_rust::i18n::text("cli.command.batch")));
+    assert!(help.contains(handshaker_core::i18n::text("cli.command.batch")));
 
     // Without a device, batch fails at device selection (3) or connection (4),
     // not usage (2): the command itself parses.
