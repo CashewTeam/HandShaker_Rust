@@ -221,6 +221,10 @@ pub struct BatchTransferOptions {
     /// Maximum files transferred in parallel (1..=8). Defaults to 1 (serial),
     /// which keeps ordering deterministic and matches pre-0.4.1 behavior.
     pub concurrency: usize,
+    /// Optional cancellation token: when cancelled, files that have not
+    /// started yet are skipped and the batch returns `Error::Interrupted`
+    /// (Phase D review fix: plan transfers must stop on `cancel_transfer`).
+    pub cancel: Option<crate::cancellation::CancellationToken>,
 }
 
 impl Default for BatchTransferOptions {
@@ -230,6 +234,7 @@ impl Default for BatchTransferOptions {
             progress: None,
             offset: 0,
             concurrency: 1,
+            cancel: None,
         }
     }
 }
@@ -242,6 +247,10 @@ impl std::fmt::Debug for BatchTransferOptions {
             .field("offset", &self.offset)
             .field("concurrency", &self.concurrency)
             .field("has_progress_callback", &self.progress.is_some())
+            .field(
+                "cancellation_requested",
+                &self.cancel.as_ref().is_some_and(|t| t.is_cancelled()),
+            )
             .finish()
     }
 }
@@ -256,6 +265,11 @@ pub struct BatchTransferFailure {
     pub target: String,
     /// Human-readable error message for this file.
     pub message: String,
+    /// Structured error class of this failure (Phase D review fix): lets
+    /// callers distinguish transport death from ordinary per-file failures
+    /// without parsing message text. `None` in pre-Phase-D payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<crate::error::ErrorCode>,
 }
 
 /// Aggregated result of a batch transfer: successes and per-file failures.

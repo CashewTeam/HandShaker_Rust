@@ -1599,6 +1599,7 @@ fn batch_result_to_dto_preserves_ok_and_failures() {
             source: "/remote/b.txt".to_string(),
             target: "/local/b.txt".to_string(),
             message: "remote io".to_string(),
+            code: Some(handshaker_core::ErrorCode::RemoteIo),
         }],
     };
     let dto = crate::runtime::batch_result_to_dto(result);

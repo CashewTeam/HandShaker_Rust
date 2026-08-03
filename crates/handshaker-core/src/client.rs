@@ -1108,7 +1108,22 @@ impl HandShakerClient {
         let transfer_options = &transfer_options;
         let done = &done;
         let callback = &callback;
+        let cancel = &options.cancel;
         let futures = items.iter().cloned().map(|item| async move {
+            // Cancellation (Phase D review fix): once the token is cancelled,
+            // skip items that have not started; the batch below then returns
+            // `Error::Interrupted` so callers land on the Cancelled state.
+            if cancel.as_ref().is_some_and(|token| token.is_cancelled()) {
+                return Err(BatchTransferFailure {
+                    source: item.source,
+                    target: item.target,
+                    // Internal marker only: when a cancellation is requested
+                    // mid-batch the whole batch returns `Error::Interrupted`
+                    // below, so this message never reaches the user.
+                    message: "cancelled".to_string(),
+                    code: Some(crate::error::ErrorCode::Interrupted),
+                });
+            }
             let outcome = if is_upload {
                 this.upload(
                     Path::new(&item.source),
@@ -1130,6 +1145,7 @@ impl HandShakerClient {
                     source: item.source,
                     target: item.target,
                     message: error.to_string(),
+                    code: Some(error.code()),
                 }),
             };
             let completed = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -1152,7 +1168,18 @@ impl HandShakerClient {
                     .push(failure),
             }
         }
-        Ok(result.into_inner().expect("batch result lock"))
+        let result = result.into_inner().expect("batch result lock");
+        // A cancellation requested mid-batch must surface as an interrupt,
+        // not as an ordinary aggregated failure list.
+        if cancel.as_ref().is_some_and(|token| token.is_cancelled())
+            && result
+                .failures
+                .iter()
+                .any(|failure| failure.code == Some(crate::error::ErrorCode::Interrupted))
+        {
+            return Err(Error::Interrupted);
+        }
+        Ok(result)
     }
 
     /// Upload a local directory tree to a remote directory, mirroring the
@@ -2788,6 +2815,7 @@ mod tests {
                     progress: None,
                     offset: 0,
                     concurrency: 2,
+                    cancel: None,
                 },
             )
             .await
@@ -2814,6 +2842,7 @@ mod tests {
                     progress: None,
                     offset: 0,
                     concurrency: 0,
+                    cancel: None,
                 },
             )
             .await
@@ -2828,11 +2857,54 @@ mod tests {
                     progress: None,
                     offset: 0,
                     concurrency: 9,
+                    cancel: None,
                 },
             )
             .await
             .expect_err("concurrency 9 rejected");
         assert_eq!(error.code(), crate::error::ErrorCode::Usage);
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn batch_transfer_stops_when_cancellation_is_requested() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let local_a = temp.path().join("a.bin");
+        let local_b = temp.path().join("b.bin");
+
+        let fake = FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        // Cancelling before the batch starts must skip every item and
+        // surface Error::Interrupted (not an aggregated failure list).
+        let token = crate::cancellation::CancellationToken::new();
+        token.cancel();
+        let error = client
+            .download_many(
+                &[
+                    BatchTransferItem {
+                        source: "/storage/emulated/0/a.txt".to_string(),
+                        target: local_a.display().to_string(),
+                    },
+                    BatchTransferItem {
+                        source: "/storage/emulated/0/a.txt".to_string(),
+                        target: local_b.display().to_string(),
+                    },
+                ],
+                BatchTransferOptions {
+                    overwrite: false,
+                    progress: None,
+                    offset: 0,
+                    concurrency: 1,
+                    cancel: Some(token.clone()),
+                },
+            )
+            .await
+            .expect_err("cancelled batch must interrupt");
+        assert_eq!(error.code(), crate::error::ErrorCode::Interrupted);
+        // No file may land after the cancellation.
+        assert!(!local_a.exists());
+        assert!(!local_b.exists());
         client.close().await.expect("close");
         fake.finish().await;
     }
@@ -2864,6 +2936,7 @@ mod tests {
                     progress: None,
                     offset: 0,
                     concurrency: 1,
+                    cancel: None,
                 },
             )
             .await
@@ -2945,6 +3018,7 @@ mod tests {
                     progress: None,
                     offset: 9,
                     concurrency: 1,
+                    cancel: None,
                 },
             )
             .await
@@ -2985,6 +3059,7 @@ mod tests {
                     progress: None,
                     offset: 0,
                     concurrency: 1,
+                    cancel: None,
                 },
             )
             .await
@@ -3016,6 +3091,7 @@ mod tests {
                     progress: None,
                     offset: 0,
                     concurrency: 1,
+                    cancel: None,
                 },
             )
             .await
@@ -3042,6 +3118,7 @@ mod tests {
                     progress: None,
                     offset: 0,
                     concurrency: 1,
+                    cancel: None,
                 },
             )
             .await
@@ -3071,6 +3148,7 @@ mod tests {
                     progress: None,
                     offset: 0,
                     concurrency: 1,
+                    cancel: None,
                 },
             )
             .await

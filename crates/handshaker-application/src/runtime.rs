@@ -952,6 +952,10 @@ impl HandShakerRuntime {
         let concurrency = request.concurrency.max(1);
         let total_bytes = request.plan.total_bytes;
         let item_count = request.plan.items.len();
+        // Review fix: cancel_transfer(id) must stop the background plan, not
+        // just flip the snapshot (the core batch checks this token between
+        // items and returns Error::Interrupted).
+        let cancel_token = entry.cancel.clone();
 
         // Split the plan into file pairs and directory trees (both sides are
         // already resolved absolute paths).
@@ -979,12 +983,13 @@ impl HandShakerRuntime {
         let handle = tokio::spawn(async move {
             registry.transition(id, TransferState::Running);
             // BatchTransferOptions is not Clone (progress callback Arc); build
-            // a fresh copy per call.
+            // a fresh copy per call, each carrying the cancellation token.
             let batch = || handshaker_core::BatchTransferOptions {
                 overwrite,
                 progress: None,
                 offset: 0,
                 concurrency,
+                cancel: Some(cancel_token.clone()),
             };
             let mut result = handshaker_core::BatchTransferResult::default();
             let outcome: Result<(), PublicError> = async {
@@ -1045,12 +1050,23 @@ impl HandShakerRuntime {
                     }
                 }
                 Ok(()) => {
+                    // Review fix: transport death inside a batch is aggregated
+                    // as per-file failures by core; surface it as a connection
+                    // loss instead of a silent partial success.
+                    let connection_closed = result
+                        .failures
+                        .iter()
+                        .any(|failure| failure.code == Some(handshaker_core::ErrorCode::Transport));
                     // Some items failed but the batch itself completed
                     // (partial success): observable, never silent.
                     registry.set_error(
                         id,
                         PublicError::new(
-                            PublicErrorCode::RemoteIo,
+                            if connection_closed {
+                                PublicErrorCode::ConnectionLost
+                            } else {
+                                PublicErrorCode::RemoteIo
+                            },
                             format!(
                                 "{} of {} plan items failed",
                                 result.failures.len(),
@@ -1062,8 +1078,26 @@ impl HandShakerRuntime {
                     if let Some(snapshot) = registry.transition(id, TransferState::Failed) {
                         event_hub.publish(BackendEvent::TransferUpdated(snapshot));
                     }
+                    if connection_closed {
+                        mark_connection_lost(
+                            &inner.sessions,
+                            &inner.transfers,
+                            session_id,
+                            &event_hub,
+                        )
+                        .await;
+                    }
                 }
                 Err(error) => {
+                    if error.code == PublicErrorCode::TransferCancelled {
+                        // cancel_transfer() already flipped the snapshot to
+                        // Cancelled (terminal); the task must not overwrite it
+                        // with Failed.
+                        if let Ok(snapshot) = registry.get(id) {
+                            event_hub.publish(BackendEvent::TransferUpdated(snapshot));
+                        }
+                        return;
+                    }
                     let connection_closed = connection_lost_code(error.code);
                     registry.set_error(id, error);
                     if let Some(snapshot) = registry.transition(id, TransferState::Failed) {
@@ -1896,6 +1930,7 @@ fn batch_options(request: &BatchTransferRequest) -> BatchTransferOptions {
         progress: None,
         offset: 0,
         concurrency: 1,
+        cancel: None,
     }
 }
 

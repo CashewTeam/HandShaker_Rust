@@ -1531,7 +1531,11 @@ async fn execute_connected(
                 .await
                 .map_err(app_error)?;
             // Translate plan conflicts back to the legacy CLI error classes
-            // (exit codes and JSON error codes stay stable).
+            // (exit codes and JSON error codes stay stable). Missing remote
+            // sources keep the legacy collect-and-continue behavior: the
+            // item is reported as a per-file failure instead of aborting the
+            // whole pull (mirrors the push path).
+            let mut collected_failures: Vec<TransferFailureDto> = Vec::new();
             let mut existing_targets = 0_usize;
             let mut first_existing = String::new();
             for conflict in &plan.conflicts {
@@ -1547,10 +1551,10 @@ async fn execute_connected(
                         ));
                     }
                     FileConflictKind::SourceMissing => {
-                        return Err(Error::RemoteIo {
-                            code: None,
-                            message: localizer
-                                .format(MessageKey::RemoteMissing, &[&conflict.source]),
+                        collected_failures.push(TransferFailureDto {
+                            source: conflict.source.clone(),
+                            target: conflict.destination.clone(),
+                            message: conflict.message.clone(),
                         });
                     }
                     FileConflictKind::DestinationTypeMismatch => {
@@ -1642,7 +1646,7 @@ async fn execute_connected(
                     format,
                 )?;
             }
-            let result = session
+            let mut result = session
                 .runtime
                 .batch_download(BatchTransferRequest {
                     session_id: session.session_id,
@@ -1652,6 +1656,7 @@ async fn execute_connected(
                 })
                 .await
                 .map_err(app_error)?;
+            result.failures.extend(collected_failures);
             let outcome = Outcome::new(
                 "fs.pull",
                 &result,

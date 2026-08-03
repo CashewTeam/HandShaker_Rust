@@ -48,6 +48,18 @@
   文件预检计划(D4)、CLI 迁移(D5)已交付;SyncService(D6)按计划为可选,
   未实施(需真机验收)。
 
+### 4.1 Phase D/D5 CLI 行为变化(有意,非回归)
+
+- 单文件 pull/push 的本地/远端目标若已是**目录**,现在下载/上传到目录内
+  (目标追加 basename),不再触发旧的 `LocalTargetExists`/`RemoteTargetExists`
+  错误或覆盖确认——旧 CLI 把该目录当作文件目标处理;
+- `fs push -r <dir> <existing-remote-dir>`:tree 目标保持旧镜像语义
+  (镜像到 remote 本身),与 plan 的目录目标解析(remote/<basename>)不同,
+  CLI 侧覆盖为旧语义;
+- `trust remove` 传入空/畸形 `phone:` 前缀 device id 时返回 Usage(exit 2)
+  (旧:直接按 uuid 处理);正常 uuid 行为不变;
+- 上述变化不影响 JSON envelope 结构、命令名与退出码类别。
+
 ## 5. 0.7.1 迁移记录(提交 6bd6abf / 8bb89c5 / d7e516d / fd8b96b)
 
 - **连接统一走 runtime(6bd6abf)**:`connect()` 构造 `DeviceDescriptor` 并经
