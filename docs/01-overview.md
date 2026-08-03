@@ -87,8 +87,8 @@
 
 ## 1.7 相关源码索引
 
-- Android 主服务：`Android_jadx/sources/com/smartisanos/smartfolder/aoa/service/ConnectionManagerService.java`
+- Android 主服务：`Reference/Android_jadx/sources/com/smartisanos/smartfolder/aoa/service/ConnectionManagerService.java`
 - Android 帧读取：`.../aoa/service/i.java`；帧写出：`.../aoa/g/a.java`
 - Android 分发：`.../aoa/g/h.java`；解码：`.../aoa/decoder/a.java`
-- Mac 协议核心头：`macos/decompiled/headers/SmartFinderCore.h`
-- Mac IO 协议接口：`macos/interfaces/Protocols/SmartFinderCore_Protocols.h`（`SFGenericDeviceIOProtocol`）
+- Mac 协议核心头：`Reference/macos/decompiled/headers/SmartFinderCore.h`
+- Mac IO 协议接口：`Reference/macos/interfaces/Protocols/SmartFinderCore_Protocols.h`（`SFGenericDeviceIOProtocol`）

@@ -1,8 +1,8 @@
 # 06 protobuf 模式（SmartSyncProtocol.proto）
 
 以下模式**逐字段**与 APK 内置权威源文件一致：
-`Android_jadx/resources/main/proto/SmartSyncProtocol.proto`（与
-`android_smali/unknown/main/proto/SmartSyncProtocol.proto` 相同）。
+`Reference/Android_jadx/resources/main/proto/SmartSyncProtocol.proto`（与
+`Reference/android_smali/unknown/main/proto/SmartSyncProtocol.proto` 相同）。
 同时已与 macOS 端 `SmartFinderCore.h` 中 66 个 `SSP*` GPB 消息逐字段比对通过。
 
 - 序列化：**protobuf proto2**，整数 varint（64 位），大端无关（varint 无字节序）。

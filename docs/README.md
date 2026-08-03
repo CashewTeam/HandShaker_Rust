@@ -2,11 +2,11 @@
 
 本文档基于对以下逆向材料的分析整理而成：
 
-- **Android 端（协议服务端）**：`Android_jadx/sources/`（jadx 反编译）、`android_smali/`（smali，用于核验）、
-  以及 APK 内置的权威源文件 `Android_jadx/resources/main/proto/SmartSyncProtocol.proto`。
-- **macOS 端（协议客户端）**：`macos/decompiled/headers/`（626 个 ObjC 类头文件）、
-  `macos/HandShaker_Mac.m`（Hopper 反编译主程序）、`macos/analysis/*.json`（方法索引）、
-  `macos/HandShaker.app`（二进制字符串核验）。
+- **Android 端（协议服务端）**：`Reference/Android_jadx/sources/`（jadx 反编译）、`Reference/android_smali/`（smali，用于核验）、
+  以及 APK 内置的权威源文件 `Reference/Android_jadx/resources/main/proto/SmartSyncProtocol.proto`。
+- **macOS 端（协议客户端）**：`Reference/macos/decompiled/headers/`（626 个 ObjC 类头文件）、
+  `Reference/macos/HandShaker_Mac.m`（Hopper 反编译主程序）、`Reference/macos/analysis/*.json`（方法索引）、
+  `Reference/macos/HandShaker.app`（二进制字符串核验）。
 
 目标：完整记录 HandShaker 的通信协议，为 Rust 兼容后端（与原版互通）提供实现依据。
 

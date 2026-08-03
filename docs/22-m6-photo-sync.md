@@ -161,12 +161,12 @@ handshaker sync status
 push/删除自己的测试照片)。
 验证等级「原始 1.2.0 smali + mac 端交叉确认 + 自动化测试 + 真机 E2E」。
 
-**原始 1.2.0 smali 交叉验证(2026-08-03,从真机提取 APK 反编译,`original_smali_1.2.0/`)**:
+**原始 1.2.0 smali 交叉验证(2026-08-03,从真机提取 APK 反编译,`Reference/original_smali_1.2.0/`)**:
 
 从真机 `/system/app/HandShaker/HandShaker.apk`(versionCode 201,versionName 1.2.0)提取并用
 apktool 3.0.1 反编译,与 mac 端/proto/维护版三方结论**逐条确认**:
 
-1. **type 37 枚举**:`original_smali_1.2.0/smali/com/smartisanos/smartfolder/a/a$dp.smali:597-612`
+1. **type 37 枚举**:`Reference/original_smali_1.2.0/smali/com/smartisanos/smartfolder/a/a$dp.smali:597-612`
    `PHOTO_SYNC_REQUEST = 0x25(37)`、`SYNC_MONITOR_REQUEST = 0x27(39)`——与 mac 端、proto
    完全一致;**早前"老 APK 枚举不同"的推测被推翻**(真机 HEART_BEAT 响应实为 pc_id 带
    `hs-` 前缀/前置 39 复位导致,均已修复)。

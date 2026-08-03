@@ -64,7 +64,7 @@
 
 ## 13.4 核心源码引用索引
 
-### Android（`Android_jadx/sources/`）
+### Android（`Reference/Android_jadx/sources/`）
 
 | 文件 | 内容 |
 |---|---|
@@ -88,7 +88,7 @@
 | `.../aoa/service/a.java` | AccessoryManager（AOA 打开） |
 | `resources/main/proto/SmartSyncProtocol.proto` | **权威协议定义** |
 
-### macOS（`macos/`）
+### macOS（`Reference/macos/`）
 
 | 文件 | 内容 |
 |---|---|
@@ -101,8 +101,8 @@
 
 ### 逆向工具
 
-- `macos/tools/objcdump.py` — ObjC 方法 dump 工具
-- `macos/tools/patch_sfbutton.py`、`patch_crashhandler.py` — 兼容性修复（与协议无关）
+- `Reference/macos/tools/objcdump.py` — ObjC 方法 dump 工具
+- `Reference/macos/tools/patch_sfbutton.py`、`patch_crashhandler.py` — 兼容性修复（与协议无关）
 
 ## 13.5 实现前的最后确认
 
