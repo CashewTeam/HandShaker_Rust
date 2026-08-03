@@ -68,6 +68,11 @@ FFI、UniFFI 或任何 UI 框架。
 | `FileOperationPlan` | direction/session_id/items/conflicts/file_count/directory_count/total_bytes/requires_recursive/executable(Phase D/D4) |
 | `FilePlanItem/FilePlanConflict/FileConflictKind` | 计划条目与冲突(`destination_exists`/`destination_type_mismatch`/`recursive_required`/`duplicate_destination`/`source_missing`/`local_permission_denied`) |
 | `PlanDownloadRequest/PlanUploadRequest/ExecuteFilePlanRequest` | 预检与执行请求(Phase D/D4) |
+| `SyncProfileDto` | id/session_id/device_uuid/remote_root/local_root/enabled(Phase D/D6;`enabled=false` 拒绝 plan/run/watch) |
+| `SyncPlanDto/SyncActionDto/SyncConflictDto` | 同步计划与冲突(downloads/metadata_updates/deletions/conflicts) |
+| `SyncStatusDto/SyncRunResultDto/SyncLedgerStatusDto` | 任务状态/运行结果(CLI `sync run` 字段兼容)/账本摘要(Phase D/D6) |
+| `RemoteFileChangeDto` | change_kind/paths + 可选 files/statuses 完整元数据(Phase D/D2 扩展,旧 JSON 反序列化兼容) |
+| `BackendEvent::SyncWatchApplied` | 增量 watch 批次结果事件(Phase D/D6;`kind=sync_watch_applied`) |
 
 ## 4. Runtime 接口(preview,未冻结)
 
@@ -85,6 +90,7 @@ impl HandShakerRuntime {
     pub async fn get_session_snapshot(&self, session_id: SessionId) -> AppResult<SessionSnapshot>;
     pub async fn ping(&self, session_id: SessionId) -> AppResult<PingResultDto>;
     pub async fn list_files(&self, request: ListFilesRequest) -> AppResult<Vec<FileEntryDto>>;
+    pub async fn monitor_folder(&self, session_id: SessionId, path: String, enabled: bool) -> AppResult<()>;   // Phase D/D6
     // 信任（Phase D/D3）:始终使用 Runtime 的 state_dir
     pub async fn list_trust_records(&self) -> AppResult<Vec<TrustRecordDto>>;
     pub async fn remove_trust_record(&self, request: RemoveTrustRequest) -> AppResult<RemoveTrustResult>;
@@ -93,6 +99,16 @@ impl HandShakerRuntime {
     pub async fn plan_download(&self, request: PlanDownloadRequest) -> AppResult<FileOperationPlan>;
     pub async fn plan_upload(&self, request: PlanUploadRequest) -> AppResult<FileOperationPlan>;
     pub async fn execute_file_plan(&self, request: ExecuteFilePlanRequest) -> AppResult<TransferId>;
+    // 同步（Phase D/D6）:profile id = 调用方稳定标识(CLI 用 phone UUID);
+    // ledger 账本在 <state_dir>/sync/<device_uuid>.json(与旧 CLI 路径兼容)
+    pub async fn plan_sync(&self, profile: SyncProfileDto) -> AppResult<SyncPlanDto>;
+    pub async fn start_sync(&self, profile: SyncProfileDto) -> AppResult<String>;
+    pub async fn get_sync_status(&self, profile_id: &str) -> AppResult<SyncStatusDto>;
+    pub async fn last_sync_result(&self, profile_id: &str) -> AppResult<Option<SyncRunResultDto>>;
+    pub async fn stop_sync(&self, profile_id: &str) -> AppResult<()>;
+    pub async fn start_sync_watch(&self, profile_id: &str) -> AppResult<()>;
+    pub async fn stop_sync_watch(&self, profile_id: &str) -> AppResult<()>;
+    pub async fn sync_ledger_status(&self, device_uuid: &str) -> AppResult<SyncLedgerStatusDto>;   // 无需 session
 }
 ```
 
@@ -106,9 +122,21 @@ impl HandShakerRuntime {
   client(发送 QUIT,仅当调用方是最后持有者)→ 无条件发布
   `SessionStateChanged(Closed)`;清理异常(超时/QUIT 发送失败/仍有持有者)
   通过 `Warning` 事件可观察,调用仍返回成功。
-- `state_dir` 真实生效:连接、信任(Phase D/D3)记录与 host UUID 写入
-  `state_dir`(缺省为 Core 默认配置目录);`wire_log` 真实开启线路日志
-  (默认关闭)。
+- `state_dir` 真实生效:连接、信任(Phase D/D3)记录、host UUID 与 sync
+  ledger(Phase D/D6)写入 `state_dir`(缺省为 Core 默认配置目录);
+  `wire_log` 真实开启线路日志(默认关闭)。
+- 同步(Phase D/D6):`plan_sync` 只读预检(不触网之外的动作);
+  `start_sync` 校验 plan 可执行后后台执行,ledger 仅在运行完整结束后
+  原子提交(per-file 失败聚合进 `SyncRunResultDto`,transport 级失败不
+  提交);`stop_sync` 有界 join + abort,且不会误删并发重注册的新 job;
+  `start_sync_watch` 与运行中 job 互斥(锁内判定),watch 事件流 Closed
+  时 `monitoring=false` + `last_error=ConnectionLost`;watch 批次应用后
+  发布 `BackendEvent::SyncWatchApplied(SyncRunResultDto)`,事件 Lagged
+  记录为 `last_error` 并发布 `Warning`(提示全量同步对账)。
+- `monitor_folder`(Phase D/D6):注册/注销手机端目录监控,事件经事件桥
+  以 `RemoteFileChanged` 送达(含 `files`/`statuses` 完整元数据)。
+- `session_client()` 过渡入口已移除(Phase D/3):CLI 全部命令走
+  Application,`AppSession` 不再持有 core client。
 - 未知/已关闭 Session:`SessionNotFound(2103)`/`SessionClosed(2104)`。
 - 相对远端路径由 Application 集中解析(`resolve_remote_path`/`normalize_remote_path`),
   `..` 不越过根目录。

@@ -2489,15 +2489,32 @@ async fn sync_store_for_uses_configured_state_dir() {
 }
 
 #[tokio::test]
-async fn start_sync_without_session_returns_session_not_found() {
+async fn start_sync_without_session_fails_the_job_after_start() {
     let runtime = HandShakerRuntime::create(test_config())
         .await
         .expect("create");
-    let error = runtime
+    // start_sync registers the job and runs the plan inside the task (exactly
+    // one photo_sync per run — the phone rejects a second while SYNCING), so
+    // the missing session surfaces as the job's last_error, not as a
+    // start_sync error.
+    let profile_id = runtime
         .start_sync(sync_profile("photos", 999))
         .await
-        .expect_err("must fail");
-    assert_eq!(error.code, PublicErrorCode::SessionNotFound);
+        .expect("job registered");
+    for _ in 0..50 {
+        let status = runtime.get_sync_status(&profile_id).await.expect("status");
+        if !status.running {
+            let error = status.last_error.expect("job must have failed");
+            assert_eq!(error.code, PublicErrorCode::SessionNotFound);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let status = runtime
+        .get_sync_status(&profile_id)
+        .await
+        .expect("final status");
+    assert!(!status.running);
     runtime.shutdown().await.expect("shutdown");
 }
 

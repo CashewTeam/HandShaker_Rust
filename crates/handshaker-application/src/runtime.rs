@@ -1820,9 +1820,10 @@ impl HandShakerRuntime {
     }
 
     /// Start a full sync run for a profile and return its job id (the
-    /// profile id). The plan must be executable; a plan with unresolved
-    /// conflicts is refused with `InvalidState` — the caller resolves them
-    /// (e.g. by backing up the local files) and re-plans. The ledger is
+    /// profile id). The plan is computed inside the job with exactly one
+    /// `photo_sync` request (the phone rejects a second one while in SYNCING
+    /// state — the legacy CLI behaved the same way); conflicted entries are
+    /// skipped and reported in `SyncRunResultDto.conflicts`. The ledger is
     /// committed atomically after a completed run; per-file failures are
     /// aggregated by `execute_plan` and the ledger still commits (failed
     /// entries keep their old records, `SyncRunResult.failures` reports
@@ -1830,14 +1831,12 @@ impl HandShakerRuntime {
     /// untouched and reports through [`Self::get_sync_status`].
     pub async fn start_sync(&self, profile: SyncProfileDto) -> AppResult<String> {
         self.ensure_open()?;
-        let plan = self.plan_sync(profile.clone()).await?;
-        if !plan.executable {
-            return Err(PublicError::new(
-                PublicErrorCode::InvalidState,
-                "sync plan contains unresolved conflicts",
-            )
-            .operation("sync.start"));
-        }
+        // No pre-flight `plan_sync` here: the phone rejects a second
+        // PHOTO_SYNC_REQUEST while it is still in SYNCING state, so a
+        // start_sync that planned first would fail on every real device
+        // (the legacy CLI ran exactly one photo_sync per run). The plan is
+        // computed once inside the job; conflicted entries are skipped and
+        // reported in the result, matching the legacy behavior.
         let job = self.register_sync_job(profile).await?;
         let this = self.clone();
         let task_job = job.clone();

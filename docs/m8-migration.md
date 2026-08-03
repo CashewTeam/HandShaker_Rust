@@ -36,17 +36,14 @@
 
 ## 4. 已知迁移遗留(非回归)
 
-- CLI 其余命令(clipboard/media/sync/watch/batch/shell)仍直连 core,
-  按文档 Phase 3 渐进迁移(下一阶段:clipboard/media → sync/watch/shell);
 - `handshaker-test-support` crate 尚未拆分(当前 core 内部 `#[cfg(test)]`),预留;
-- Application 的 Clipboard/Media/RemoteFile 事件为预留变体,未桥接;
 - `fs.rm`/`fs.count` 暂留 core:rm 的 JSON 契约是 `RemoteFile` 数组(Application
   `DeleteResultDto` 返回路径字符串数组),count 携带 CLI 专用 exclusions 语义;
-- `session_client()` 过渡接口仍存在(watch/sync/shell 使用),Phase D/D5 后
-  剩余调用点:watch/sync/shell;冻结前移除;
-- Phase D 完成状态:设备发现诊断(D1)、稳定身份(D2)、TrustService(D3)、
-  文件预检计划(D4)、CLI 迁移(D5)已交付;SyncService(D6)按计划为可选,
-  未实施(需真机验收)。
+- `device discover` 仍直连 core(Wi-Fi mDNS 发现,Application 有等价
+  `discover_devices`,CLI 侧未切换);
+- Phase D 完成状态:D1(发现诊断)/D2(稳定身份)/D3(TrustService)/D4(文件预检
+  计划)/D5(CLI 基础迁移)/D6(SyncService 含 watch)已交付;
+  `session_client()` 过渡入口已删除(Phase D/3 收口)。
 
 ### 4.1 Phase D/D5 CLI 行为变化(有意,非回归)
 
@@ -59,6 +56,24 @@
 - `trust remove` 传入空/畸形 `phone:` 前缀 device id 时返回 Usage(exit 2)
   (旧:直接按 uuid 处理);正常 uuid 行为不变;
 - 上述变化不影响 JSON envelope 结构、命令名与退出码类别。
+
+### 4.2 Phase D/D6 契约变化(有意,已记录)
+
+- **watch 命令的 `data`**:从 core `ClientEvent`(adjacently tagged)改为
+  Application `BackendEvent`(internally tagged)。顶层 envelope 结构
+  (`schema_version`/`ok`/`command`/`event`/`device`/`data`/`warnings`)
+  不变,`data.kind` 仍为 snake_case 标签(如 `clipboard_changed`),但
+  载荷字段按 `BackendEvent` 定义(如 `ClipboardChanged` 带 `session_id`,
+  `RemoteFileChanged` 带 `change` 而非 core 字段)。事件桥已为
+  `DirectoryChanged`/`FileChanged`/`PhotoSyncChanged` 填充
+  `RemoteFileChangeDto.files/statuses` 完整元数据。
+- **sync run/watch 语义**:`sync run` 由同步执行改为"后台 job + CLI 等待",
+  输出 JSON 字段不变(`downloaded`/`deleted`/`failures`/`conflicts`);
+  `sync watch` 的 `applied` 语义从"本批事件条数"改为"本批下载+删除数"
+  (更准确);`sync status` 输出不变(账本摘要)。
+- **ledger 路径**:与旧 CLI 一致(`<config_dir>/sync/<device_uuid>.json`),
+  由 Application 统一按 `state_dir` 解析;`device_uuid` 取自会话
+  `phone_id`(校验规则不变)。
 
 ## 5. 0.7.1 迁移记录(提交 6bd6abf / 8bb89c5 / d7e516d / fd8b96b)
 

@@ -33,6 +33,12 @@ async fn main() {
     let output = cli.output;
     let is_shell = matches!(cli.command, cli::Command::Shell);
     let is_watch = matches!(cli.command, cli::Command::Watch { .. });
+    // `sync run` and `sync watch` drive their own Ctrl-C handling (stopping
+    // the job/watch and cleaning the session up); the top-level select must
+    // not race them, or SIGINT would exit the process before close_session
+    // releases the adb forward (Phase D device finding).
+    let is_self_handling_ctrl_c =
+        is_shell || is_watch || matches!(cli.command, cli::Command::Sync(_));
     let filter = match cli.verbose {
         0 => "warn",
         1 => "info",
@@ -43,10 +49,10 @@ async fn main() {
         .with_writer(std::io::stderr)
         .init();
 
-    // The shell drives its own readline loop and `watch` handles Ctrl-C itself
-    // (to unregister monitors); every other command lets the top-level select
-    // turn Ctrl-C into a user interrupt.
-    let result = if is_shell || is_watch {
+    // The shell drives its own readline loop and `watch`/`sync` handle
+    // Ctrl-C themselves (to unregister monitors and stop jobs); every other
+    // command lets the top-level select turn Ctrl-C into a user interrupt.
+    let result = if is_self_handling_ctrl_c {
         cli::run(cli).await
     } else {
         tokio::select! {

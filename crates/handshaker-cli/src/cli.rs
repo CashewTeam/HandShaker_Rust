@@ -137,6 +137,11 @@ pub(crate) struct Cli {
     #[arg(long, global = true)]
     pub serial: Option<String>,
 
+    /// Override the state/config directory (trust records, sync ledger,
+    /// host UUID). Defaults to the platform config directory.
+    #[arg(long, global = true, value_name = "DIR")]
+    pub state_dir: Option<PathBuf>,
+
     #[arg(long, global = true, conflicts_with = "serial", value_parser = parse_socket_addr)]
     pub wifi: Option<SocketAddr>,
 
@@ -879,7 +884,7 @@ fn runtime_config(cli: &Cli) -> RuntimeConfig {
         adb_path: PathBuf::from("adb"),
         default_timeout: cli.timeout,
         heartbeat_interval: Duration::from_secs(10),
-        state_dir: None,
+        state_dir: cli.state_dir.clone(),
         wire_log: cli.wire_log.clone(),
         event_capacity: 1024,
         transfer_history_capacity: 64,
