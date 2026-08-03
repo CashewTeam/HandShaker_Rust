@@ -15,18 +15,17 @@ use handshaker_core::{
 };
 
 use crate::dto::{
-    ClipboardEntryDto, ConnectRequest, CountFilesRequest, CreateDirectoryRequest, DeletePathsRequest,
-    DeleteResultDto, DeviceDescriptor,
-    DeviceId, DeviceInfoDto, FileEntryDto, ListDevicesRequest, ListFilesRequest, MovePathRequest,
-    PingResultDto, RuntimeConfig, SessionId, SessionSnapshot, SessionState, StatFileRequest,
-    TransportKind,
+    ClipboardEntryDto, ConnectRequest, CountFilesRequest, CreateDirectoryRequest,
+    DeletePathsRequest, DeleteResultDto, DeviceDescriptor, DeviceId, DeviceInfoDto, FileEntryDto,
+    ListDevicesRequest, ListFilesRequest, MovePathRequest, PingResultDto, RuntimeConfig, SessionId,
+    SessionSnapshot, SessionState, StatFileRequest, TransportKind,
 };
 use crate::error::{AppResult, PublicError, PublicErrorCode, from_core_error};
+use crate::event::{BackendEvent, EventEnvelope, EventHub};
 use crate::media::{
     AudioAlbumDto, AudioLibraryDto, ExifDataDto, ImageFileDto, PhotoLibraryDto, ThumbnailsDto,
     VideoFileDto, VideoLibraryDto, dto_to_audio_album, dto_to_image_file, dto_to_video_file,
 };
-use crate::event::{BackendEvent, EventEnvelope, EventHub};
 use crate::transfer::{
     BatchTransferItemDto, BatchTransferRequest, BatchTransferResultDto, DownloadRequest,
     TransferDirectionDto, TransferFailureDto, TransferId, TransferRegistry, TransferSnapshot,
@@ -475,7 +474,11 @@ impl HandShakerRuntime {
     }
 
     /// Delete one clipboard entry by timestamp.
-    pub async fn delete_clipboard(&self, session_id: SessionId, timestamp_ms: i64) -> AppResult<()> {
+    pub async fn delete_clipboard(
+        &self,
+        session_id: SessionId,
+        timestamp_ms: i64,
+    ) -> AppResult<()> {
         self.ensure_open()?;
         let client = self.session_client(session_id).await?;
         client
@@ -543,7 +546,10 @@ impl HandShakerRuntime {
             .get_thumbnails(
                 &images.iter().map(dto_to_image_file).collect::<Vec<_>>(),
                 &videos.iter().map(dto_to_video_file).collect::<Vec<_>>(),
-                &audio_albums.iter().map(dto_to_audio_album).collect::<Vec<_>>(),
+                &audio_albums
+                    .iter()
+                    .map(dto_to_audio_album)
+                    .collect::<Vec<_>>(),
             )
             .await
             .map(Into::into)

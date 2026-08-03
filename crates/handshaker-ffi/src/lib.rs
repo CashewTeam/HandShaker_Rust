@@ -411,12 +411,13 @@ pub unsafe extern "C" fn hs_create_directory(
         struct FfiCreateDirectoryRequest {
             path: String,
         }
-        let ffi: FfiCreateDirectoryRequest = ffi_try!(serde_json::from_str(json).map_err(|error| {
-            err(
-                &PublicError::new(PublicErrorCode::InvalidArgument, "invalid request JSON")
-                    .with_detail(error.to_string()),
-            )
-        }));
+        let ffi: FfiCreateDirectoryRequest =
+            ffi_try!(serde_json::from_str(json).map_err(|error| {
+                err(
+                    &PublicError::new(PublicErrorCode::InvalidArgument, "invalid request JSON")
+                        .with_detail(error.to_string()),
+                )
+            }));
         let request = CreateDirectoryRequest {
             session_id: SessionId(session_id),
             path: ffi.path,
@@ -780,12 +781,7 @@ mod ffi_smoke_tests {
     #[test]
     fn create_directory_null_handle_returns_invalid_argument() {
         let result = unsafe {
-            hs_create_directory(
-                std::ptr::null_mut(),
-                1,
-                br#"{"path":"/a"}"#.as_ptr(),
-                12,
-            )
+            hs_create_directory(std::ptr::null_mut(), 1, br#"{"path":"/a"}"#.as_ptr(), 12)
         };
         assert_eq!(result.status, 1);
         let bytes = unsafe { crate::buffer::into_vec(result.error) };

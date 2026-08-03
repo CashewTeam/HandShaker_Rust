@@ -7,8 +7,8 @@
 use serde::{Deserialize, Serialize};
 
 use handshaker_core::{
-    AudioAlbum, AudioFile, AudioLibrary, ExifData, ImageAlbum, ImageFile, PhotoLibrary,
-    Thumbnails, VideoAlbum, VideoFile, VideoLibrary,
+    AudioAlbum, AudioFile, AudioLibrary, ExifData, ImageAlbum, ImageFile, PhotoLibrary, Thumbnails,
+    VideoAlbum, VideoFile, VideoLibrary,
 };
 
 /// One image entry (mirrors core `ImageFile`).

@@ -11,10 +11,10 @@ use rustyline::error::ReadlineError;
 use serde::Serialize;
 
 use handshaker_core::{
-    ClientEvent, ClientOptions, ClipboardEntry, ConnectionTarget, DeviceInfo, Error, EventCallbacks,
-    EventFilter, EventStreamError, HandShakerClient, RemoteFile, Result, StateStore, SyncConfig,
-    SyncDiff, SyncRunResult, SyncSnapshot, SyncStore, apply_file_change, check_conflicts,
-    default_config_dir, execute_plan,
+    ClientEvent, ClientOptions, ClipboardEntry, ConnectionTarget, DeviceInfo, Error,
+    EventCallbacks, EventFilter, EventStreamError, HandShakerClient, RemoteFile, Result,
+    StateStore, SyncConfig, SyncDiff, SyncRunResult, SyncSnapshot, SyncStore, apply_file_change,
+    check_conflicts, default_config_dir, execute_plan,
     i18n::{self, Localizer, MessageKey, ZhCn},
     plan_diff, sync_config,
 };
