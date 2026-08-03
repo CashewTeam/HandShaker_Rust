@@ -3,8 +3,7 @@
 
 Verifies:
 1. every exported `fn hs_*` in the Rust lib (crates/handshaker-ffi/src/lib.rs)
-   has a prototype in the C header (crates/handshaker-ffi/include/handshaker_ffi.h);
-2. the header prototype matches the Rust signature: parameter count, type
+   has a prototype in the C header (crates/handshaker-ffi/include/handshaker_ffi.h);2. the header prototype matches the Rust signature: parameter count, type
    categories (pointer widths / integer widths / value structs) and return type;
 3. the ABI_VERSION_* constants in lib.rs match the header top comment
    ("ABI version: X.Y.Z");
@@ -17,6 +16,7 @@ Usage:
   check-ffi-abi.py --lib LIB_RS --header HEADER_H [--check-snapshot FILE | --snapshot FILE]
 """
 import argparse
+import os
 import re
 import sys
 
@@ -183,7 +183,17 @@ def main():
     ap.add_argument("--check-snapshot", help="compare snapshot file (check mode)")
     args = ap.parse_args()
 
-    src = open(args.lib, encoding="utf-8").read()
+    # lib.rs may declare submodules (`mod files;` etc.); exported symbols
+    # live in the same src/ directory, so scan every *.rs next to lib.rs.
+    lib_dir = os.path.dirname(args.lib)
+    extra = sorted(
+        os.path.join(lib_dir, f)
+        for f in os.listdir(lib_dir)
+        if f.endswith(".rs") and f != os.path.basename(args.lib)
+    )
+    src = "\n".join(
+        open(path, encoding="utf-8").read() for path in [args.lib, *extra]
+    )
     hdr = open(args.header, encoding="utf-8").read()
 
     rust = rust_signatures(src)

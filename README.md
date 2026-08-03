@@ -108,6 +108,21 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
   SIGINT 确定性清理（孤儿 sync 任务修复，真机 0 forward 残留）；
   验收脚本 `scripts/phase-d-acceptance.sh`（无设备 SKIP）；
   `docs/m8-migration.md` §4.1/4.2 记录 CLI 行为与 watch/sync 契约变化。
+- **M8.1 Phase E FFI 功能扩展（已完成）**：ABI 升至 1.3.0（44 个导出
+  符号，`docs/ffi-v1.md`/`docs/ffi-abi-snapshot.md` 同步，Header 校验 +
+  C/Swift smoke 覆盖新符号）：文件 `hs_stat_file`/`hs_count_files`/
+  `hs_move_path`/`hs_delete_paths`；剪贴板 `hs_clipboard_list/set/
+  delete/clear`；信任 `hs_trust_list/remove/reset` + 发现
+  `hs_discover_devices`（分通道 warnings）；监控 `hs_monitor_folder`；
+  批量传输 `hs_transfer_start_batch_download/upload`（后台任务 +
+  TransferSnapshot 增加 item_count/completed_items/failed_items/
+  current_item/batch_result，进度/取消/结果复用 transfer_get/list/
+  cancel）；媒体 `hs_media_photo_library/video_library/audio_library/
+  fetch_exif` 与缩略图 `hs_media_thumbnail`（磁盘 cache path，不经过
+  JSON 数字数组）；诊断 `hs_runtime_diagnostics`（ABI/版本/平台/adb
+  探测/会话与传输计数/能力列表）。Application 相应新增
+  `start_batch_download/start_batch_upload`/`session_count` 与
+  TransferSnapshot 扩展（serde 兼容）。
 - 剪贴板/目录监控之外的推送发送侧仍属于后续里程碑。
 
 ## 命令行教程

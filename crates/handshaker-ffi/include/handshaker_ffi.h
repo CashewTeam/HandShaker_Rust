@@ -1,8 +1,10 @@
-/* handshaker_ffi.h — stable C ABI for handshaker-application (M8 v1.2).
+/* handshaker_ffi.h — stable C ABI for handshaker-application (M8 v1.3).
  *
- * ABI version: 1.2.0 (independent of the Rust crate version). 1.2 adds
- * hs_create_directory and hs_ping; 1.1 added the transfer surface
- * (hs_transfer_*); 1.0 symbols are unchanged.
+ * ABI version: 1.3.0 (independent of the Rust crate version). 1.3 adds
+ * file stat/count/move/delete, clipboard, trust, device discovery,
+ * directory monitor, batch transfers, media libraries/thumbnail/exif and
+ * runtime diagnostics; 1.2 added hs_create_directory and hs_ping; 1.1
+ * added the transfer surface (hs_transfer_*); 1.0 symbols are unchanged.
  *
  * Ownership rules:
  *  - Rust allocates; Rust frees. Buffers returned in HsCallResult must be
@@ -70,6 +72,10 @@ void hs_runtime_destroy(HsRuntime *runtime);          /* NULL safe */
  * Result: JSON array of DeviceDescriptor. */
 HsCallResult hs_list_devices(HsRuntime *runtime, const uint8_t *request_json,
                              size_t request_len);
+/* Discovery (ABI 1.3). No request body. Result: DeviceDiscoveryResult
+ * {"devices":[...],"warnings":[...]} — per-channel failures are reported
+ * as warnings instead of an empty-array lie. */
+HsCallResult hs_discover_devices(HsRuntime *runtime);
 
 /* Sessions. connect request_json: a full DeviceDescriptor (as returned by
  * hs_list_devices). Result: {"session_id": N}. */
@@ -91,6 +97,51 @@ HsCallResult hs_create_directory(HsRuntime *runtime, uint64_t session_id,
 /* Session (ABI 1.2). Result: {"round_trip_ms": N}. */
 HsCallResult hs_ping(HsRuntime *runtime, uint64_t session_id);
 
+/* Files (ABI 1.3). stat request_json: {"path":"/sdcard/a.txt"} (path
+ * optional, default "."). Result: {"file": FileEntryDto|null}.
+ * count request_json: {"path":"/sdcard","depth":1,"exclusions":[...]}
+ * (all optional, depth default 1). Result: {"count": N}.
+ * move request_json: {"source":"/a","target":"/b"}.
+ * Result: {"moved":true}.
+ * delete request_json: {"paths":["/a","/b"],"trash":false,"sync":false}
+ * (trash/sync optional, default false). Result: DeleteResultDto. */
+HsCallResult hs_stat_file(HsRuntime *runtime, uint64_t session_id,
+                          const uint8_t *request_json, size_t request_len);
+HsCallResult hs_count_files(HsRuntime *runtime, uint64_t session_id,
+                            const uint8_t *request_json, size_t request_len);
+HsCallResult hs_move_path(HsRuntime *runtime, uint64_t session_id,
+                          const uint8_t *request_json, size_t request_len);
+HsCallResult hs_delete_paths(HsRuntime *runtime, uint64_t session_id,
+                             const uint8_t *request_json, size_t request_len);
+
+/* Directory monitor (ABI 1.3). request_json:
+ * {"path":"/sdcard/DCIM","enabled":true} (enabled optional, default true).
+ * Result: {"registered":true}. Events arrive as RemoteFileChanged. */
+HsCallResult hs_monitor_folder(HsRuntime *runtime, uint64_t session_id,
+                               const uint8_t *request_json, size_t request_len);
+
+/* Clipboard (ABI 1.3). hs_clipboard_list takes no request body; result:
+ * JSON array of ClipboardEntryDto. set request_json: {"text":"..."},
+ * result: {"set":true}. delete request_json: {"timestamp_ms":123},
+ * result: {"deleted":true}. clear result: {"cleared":true}. */
+HsCallResult hs_clipboard_list(HsRuntime *runtime, uint64_t session_id);
+HsCallResult hs_clipboard_set(HsRuntime *runtime, uint64_t session_id,
+                              const uint8_t *request_json, size_t request_len);
+HsCallResult hs_clipboard_delete(HsRuntime *runtime, uint64_t session_id,
+                                 const uint8_t *request_json, size_t request_len);
+HsCallResult hs_clipboard_clear(HsRuntime *runtime, uint64_t session_id);
+
+/* Trust (ABI 1.3, no session). hs_trust_list result: JSON array of
+ * TrustRecordDto. remove request_json: {"device_id":"phone:xxx"},
+ * result: {"removed":true}. reset request_json:
+ * {"endpoint":"wifi:...","expected_device_id":"phone:xxx"},
+ * result: {"reset":true}. */
+HsCallResult hs_trust_list(HsRuntime *runtime);
+HsCallResult hs_trust_remove(HsRuntime *runtime, const uint8_t *request_json,
+                             size_t request_len);
+HsCallResult hs_trust_reset(HsRuntime *runtime, const uint8_t *request_json,
+                            size_t request_len);
+
 /* Transfers (ABI 1.1). request_json (start_*):
  * {"remote_path":"/sdcard/a.bin","local_path":"/tmp/a.bin","overwrite":false}
  * (overwrite optional, default false). Result: {"transfer_id": N}.
@@ -103,6 +154,47 @@ HsCallResult hs_transfer_start_upload(HsRuntime *runtime, uint64_t session_id,
 HsCallResult hs_transfer_cancel(HsRuntime *runtime, uint64_t transfer_id);
 HsCallResult hs_transfer_get(HsRuntime *runtime, uint64_t transfer_id);
 HsCallResult hs_transfer_list(HsRuntime *runtime);
+
+/* Batch transfers (ABI 1.3). request_json (start_batch_*):
+ * {"files":[{"source":"/a","target":"/b"}],
+ *  "trees":[{"source":"/dir","target":"/dir"}],"overwrite":false}
+ * (files/trees/overwrite optional). Result: {"transfer_id": N}.
+ * Progress, cancellation and the final result ride the existing
+ * hs_transfer_get/list/cancel: TransferSnapshot carries
+ * item_count/completed_items/failed_items/current_item/batch_result. */
+HsCallResult hs_transfer_start_batch_download(HsRuntime *runtime,
+                                              uint64_t session_id,
+                                              const uint8_t *request_json,
+                                              size_t request_len);
+HsCallResult hs_transfer_start_batch_upload(HsRuntime *runtime,
+                                            uint64_t session_id,
+                                            const uint8_t *request_json,
+                                            size_t request_len);
+
+/* Media (ABI 1.3). Library calls take request_json "{}" (reserved for
+ * future paging); results are the PhotoLibraryDto/VideoLibraryDto/
+ * AudioLibraryDto JSON. Thumbnail request_json:
+ * {"images":[{"path":"/a.jpg"}],"videos":[...],"audio_albums":[...]}
+ * (all optional); thumbnail bytes are cached on disk under
+ * <state_dir>/thumbnails/ and the result carries cache paths:
+ * {"images":[{"path":"/a.jpg","cache_path":"/abs/path","size":N}],...}
+ * EXIF request_json: {"path":"/a.jpg"}; result: ExifDataDto. */
+HsCallResult hs_media_photo_library(HsRuntime *runtime, uint64_t session_id,
+                                    const uint8_t *request_json, size_t request_len);
+HsCallResult hs_media_video_library(HsRuntime *runtime, uint64_t session_id,
+                                    const uint8_t *request_json, size_t request_len);
+HsCallResult hs_media_audio_library(HsRuntime *runtime, uint64_t session_id,
+                                    const uint8_t *request_json, size_t request_len);
+HsCallResult hs_media_thumbnail(HsRuntime *runtime, uint64_t session_id,
+                                const uint8_t *request_json, size_t request_len);
+HsCallResult hs_media_fetch_exif(HsRuntime *runtime, uint64_t session_id,
+                                 const uint8_t *request_json, size_t request_len);
+
+/* Diagnostics (ABI 1.3, no session). Result JSON: abi/application_api/
+ * crate_version/platform/arch/adb_path/adb_available/adb_version/
+ * state_dir/wire_log_enabled/active_sessions/active_transfers/
+ * capabilities. adb probing never fails the call. */
+HsCallResult hs_runtime_diagnostics(HsRuntime *runtime);
 
 /* Events (queue-pull). hs_subscription_next returns EventEnvelope JSON;
  * on timeout: {"timeout":true}; after runtime shutdown: {"closed":true}.

@@ -47,7 +47,7 @@ struct DeviceDescriptor: Codable {
 
 func main() throws {
     guard hs_abi_version_major() == 1 else { throw NSError(domain: "abi", code: 1) }
-    guard hs_abi_version_minor() == 2 else { throw NSError(domain: "abi", code: 14) }
+    guard hs_abi_version_minor() == 3 else { throw NSError(domain: "abi", code: 14) }
     guard hs_abi_version_patch() == 0 else { throw NSError(domain: "abi", code: 15) }
 
     // RAII runtime; created and destroyed by the wrapper.
@@ -65,6 +65,15 @@ func main() throws {
     guard devices.isEmpty else { throw NSError(domain: "ffi", code: 5) }
     // No value buffer to free here (consumed by stringAndFree).
 
+    // ABI 1.3 surface: diagnostics and trust work without a device.
+    let dresult = hs_runtime_diagnostics(runtime.ptrForTest)
+    guard dresult.status == 0 else { throw NSError(domain: "ffi", code: 30) }
+    guard let djson = stringAndFree(dresult.value),
+          djson.contains("\"abi\":\"1.3.0\""),
+          djson.contains("\"capabilities\"") else { throw NSError(domain: "ffi", code: 31) }
+    let trustResult = hs_trust_list(runtime.ptrForTest)
+    guard trustResult.status == 0 else { throw NSError(domain: "ffi", code: 32) }
+    guard let tjson = stringAndFree(trustResult.value), tjson == "[]" else { throw NSError(domain: "ffi", code: 33) }
     try runtime.shutdown()
 
     // Transfer surface (ABI 1.1): a missing session yields a stable

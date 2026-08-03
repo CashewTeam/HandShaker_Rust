@@ -1,7 +1,9 @@
-# handshaker-ffi v1.2(C ABI 契约)
+# handshaker-ffi v1.3(C ABI 契约)
 
-> ABI 版本:1.2.0(与 Rust crate 版本独立;major=签名破坏、minor=增函数/可选字段、patch=实现修复)
-> 1.2 追加 `hs_create_directory` 与 `hs_ping`;1.1 追加传输任务面(`hs_transfer_*`),1.0 符号不变。
+> ABI 版本:1.3.0(与 Rust crate 版本独立;major=签名破坏、minor=增函数/可选字段、patch=实现修复)
+> 1.3 追加文件 stat/count/move/delete、剪贴板、信任、设备发现、目录监控、
+> 批量传输、媒体库/缩略图/EXIF 与运行时诊断;1.2 追加 `hs_create_directory`
+> 与 `hs_ping`;1.1 追加传输任务面(`hs_transfer_*`),1.0 符号不变。
 > 单一事实来源:`crates/handshaker-ffi/src/lib.rs` 的 `ABI_VERSION_*` 常量与
 > `crates/handshaker-ffi/include/handshaker_ffi.h` 顶部注释;`scripts/generate-ffi-header.sh`
 > 校验两者与 ABI snapshot(`docs/ffi-abi-snapshot.md`)一致。
@@ -68,11 +70,22 @@ typedef struct HsSubscription HsSubscription;
   NativeCall、NativeError)+ `Models/`(Codable DTO)+ `HandShakerClient.swift`(
   `protocol BackendClient: Sendable`);SwiftUI View 不直接触碰 C 类型。
 
-## 5. v1.2 已导出 vs 未导出
+## 5. v1.3 已导出 vs 未导出
 
-- 已导出:Runtime 生命周期、设备列表、连接/断开/快照、文件列表、
-  `hs_create_directory`/`hs_ping`(ABI 1.2)、**传输任务
-  (start_download/start_upload/cancel/get/list,ABI 1.1)**、事件订阅;
-- 未导出(按需追加,minor):stat/move/delete、批量传输(batch)、媒体、剪贴板、
-  信任管理、同步;
-- 大文件字节**不**经过 JSON/FFI(Rust 直接写文件,任务 ID + 进度事件)。
+- 已导出(共 44 个符号,Phase E 后):
+  - v1.0/1.1/1.2:Runtime 生命周期与诊断(`hs_runtime_diagnostics`,1.3)、
+    设备列表与发现(`hs_list_devices`/`hs_discover_devices`,1.3)、
+    连接/断开/快照、文件列表、`hs_create_directory`/`hs_ping`(1.2)、
+    传输任务(start_download/start_upload/cancel/get/list,1.1;
+    `hs_transfer_start_batch_download/upload`,1.3)、事件订阅;
+  - v1.3 新增:文件(`hs_stat_file`/`hs_count_files`/`hs_move_path`/
+    `hs_delete_paths`)、剪贴板(`hs_clipboard_list/set/delete/clear`)、
+    信任(`hs_trust_list/remove/reset`)、目录监控(`hs_monitor_folder`)、
+    媒体(`hs_media_photo_library/video_library/audio_library/thumbnail/
+    fetch_exif`);
+- 未导出(按需追加,minor):照片同步(sync plan/run/status/watch——Application
+  SyncService 已具备,FFI 未包装)、update file info、媒体增量合并;
+- 大文件字节**不**经过 JSON/FFI(Rust 直接写文件,任务 ID + 进度事件);
+- 缩略图 bytes 经 FFI 写入 `<state_dir>/thumbnails/` 磁盘缓存并返回
+  `cache_path`(不经过 JSON 数字数组;缓存文件按 remote path hash 命名,
+  已存在则复用)。

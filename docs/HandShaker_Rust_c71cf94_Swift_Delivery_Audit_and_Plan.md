@@ -3,6 +3,7 @@
 > 审计仓库：`CashewTeam/HandShaker_Rust`
 > 审计提交：`c71cf94cb654e8dcf15a5819d2176a94ff3bc132`
 > Phase D 复核提交：`e01bc94`（本文件已按 Phase D 完成状态复核更新）
+> Phase E 复核提交：`b82c46f`（FFI 功能扩展完成，ABI 1.3.0、44 个导出符号）
 > Cargo Workspace 版本：`0.7.3`
 > Application API 标称版本：`1.0.0-preview.1`（Phase D 后维持 preview，见 §5.2 P0-1）
 > FFI Rust 实现版本：`1.2.0`（Header/文档/snapshot 已一致）
@@ -13,8 +14,10 @@
 > **Phase D 复核结论（速览）**：原 P0 清单（§5.2）除 FFI 功能扩展外已全部关闭；
 > CLI 迁移仅剩 `device discover` 直连 core；`session_client()` 过渡入口已删除；
 > Core 事件已完整桥接；传输进度/终态/取消语义已闭环；真机 ADB 验收通过
-> （基础 + sync 首次/增量/watch，0 forward 残留）。剩余主要缺口全部集中在
-> **FFI 功能扩展（Phase E）与 Apple SDK 交付（Phase F/G）**。
+> （基础 + sync 首次/增量/watch，0 forward 残留）。**Phase E（FFI 功能扩展）
+> 已完成**：ABI 1.3.0、44 个导出符号（文件 stat/count/move/delete、剪贴板、
+> 信任、发现、监控、批量传输、媒体/缩略图/EXIF、诊断）。剩余主要缺口
+> 集中在 **Apple SDK 交付（Phase F/G）与 CI 接入**。
 
 ---
 
@@ -41,10 +44,10 @@
 | CLI 向 Application 迁移 | 70% | 98%（仅 `device discover` 直连 core） |
 | Application 业务覆盖 | 75% | 90%（发现诊断、稳定身份、信任、文件计划、SyncService 全落地） |
 | Application v1 契约稳定性 | 55% | 75%（明确 `1.0.0-preview.1`，DTO/事件 fixture 补齐，仍为 preview） |
-| FFI 基础设施 | 80% | 90%（ABI 单一事实来源、Header 校验、C/Swift smoke 本地全过） |
-| FFI 功能覆盖 | 40% | 40%（仍是 23 个符号；stat/move/delete、剪贴板、媒体、信任、sync 未导出） |
-| Apple 二进制与 Swift 包装交付 | 30% | 30%（无正式 XCFramework/Swift Package） |
-| Swift GUI 完整 MVP 后端准备 | 45% | 60%（后端能力齐备，FFI 导出面与 SDK 打包是剩余门槛） |
+| FFI 基础设施 | 80% | 95%（ABI 单一事实来源、Header 校验、C/Swift smoke 本地全过） |
+| FFI 功能覆盖 | 40% | 85%（44 个符号：文件/剪贴板/信任/发现/监控/批量/媒体/诊断全导出） |
+| Apple 二进制与 Swift 包装交付 | 30% | 30%（无正式 XCFramework/Swift Package，Phase F/G） |
+| Swift GUI 完整 MVP 后端准备 | 45% | 85%（后端与 FFI 能力齐备，剩余 SDK 打包与 CI） |
 
 ### 最终判断
 
@@ -65,13 +68,13 @@
 - Application/FFI 错误解码；
 - 事件订阅线程模型验证。
 
-当前不建议作为正式 Swift GUI 后端交付的原因（Phase D 复核后剩余）：
+当前不建议作为正式 Swift GUI 后端交付的原因（Phase E 复核后剩余）：
 
-1. ~~FFI ABI 版本信息互相矛盾~~（已修复：Header/文档/snapshot 对齐 1.2.0，`scripts/generate-ffi-header.sh` 校验）；
+1. ~~FFI ABI 版本信息互相矛盾~~（已修复：Header/文档/snapshot 对齐 1.3.0，`scripts/generate-ffi-header.sh` 校验 44 个符号）；
 2. ~~Application 的 Runtime/Session/Transfer 生命周期不够确定~~（已修复：确定性关闭、有界 join、孤儿任务消除）；
-3. ~~传输进度没有完整进入事件流~~（已修复：progress/total/节流/终态无条件发布）；
+3. ~~传输进度没有完整进入事件流~~（已修复：progress/total/节流/终态无条件发布，批量任务带 item 进度）；
 4. ~~Core 主动推送事件没有桥接到 Application~~（已修复：事件桥 + ConnectionLost/Clipboard/Media/RemoteFileChanged/SyncWatchApplied）；
-5. FFI 缺少大量 GUI 必需功能（stat/move/delete、剪贴板、媒体、信任、批量、sync 均未导出）；
+5. ~~FFI 缺少大量 GUI 必需功能~~（已修复：Phase E 导出 21 个新符号，44 个符号覆盖文件/剪贴板/信任/发现/监控/批量/媒体/诊断；sync 按计划后置）；
 6. ~~`state_dir` 和 `wire_log` 配置语义不真实~~（已修复：state_dir 全链路生效 + CLI `--state-dir`；wire_log 真实写入）；
 7. ~~Application 仍公开 `HandShakerClient` 过渡入口~~（已删除，742f183）；
 8. Swift 交付物仍是宿主架构的 `.a/.dylib`，没有正式 XCFramework；
@@ -592,46 +595,30 @@ QUIT → 发布每个任务终态与 Session `Closed`（§5.2 P0-3）。
 - cancel/get/list transfers；
 - subscribe/next/destroy events。
 
-### Application 已有但 FFI 未导出
+### ~~Application 已有但 FFI 未导出~~（Phase E 复核）
 
-文件：
+Phase E（ABI 1.3.0）后已全部导出：
 
-- stat；
-- exists；
-- count；
-- move/rename；
-- delete。
+- 文件：stat/exists（stat 的 optional 结果）/count/move/delete
+  → `hs_stat_file`/`hs_count_files`/`hs_move_path`/`hs_delete_paths`；
+- 剪贴板 → `hs_clipboard_list/set/delete/clear`；
+- 媒体 → `hs_media_photo_library/video_library/audio_library/
+  thumbnail/fetch_exif`（缩略图走磁盘 cache path）；
+- 批量 → `hs_transfer_start_batch_download/upload`（后台任务 + item
+  进度 + batch_result）；
+- 信任 → `hs_trust_list/remove/reset`；发现 → `hs_discover_devices`；
+  监控 → `hs_monitor_folder`；诊断 → `hs_runtime_diagnostics`。
 
-剪贴板：
+### ~~Core/CLI 有但 Application 或 FFI 未完成~~（Phase E 复核）
 
-- list；
-- set；
-- delete；
-- clear。
+Application 层已全部完成（Phase D）；FFI 导出面已补齐（Phase E）：
 
-媒体：
-
-- photo library；
-- video library；
-- audio library；
-- thumbnails；
-- EXIF。
-
-批量：
-
-- batch upload；
-- batch download；
-- recursive trees。
-
-### ~~Core/CLI 有但 Application 或 FFI 未完成~~（Phase D 复核）
-
-Application 层已全部完成（Phase D）；FFI 导出面仍缺（Phase E）：
-
-- ~~Wi-Fi discover diagnostics~~ → `discover_devices()` warnings（D1）；
-- ~~trust list/remove/reset~~ → TrustService（D3）；
-- ~~folder monitor~~ → `monitor_folder()` 服务 + `RemoteFileChanged` 事件（62c7664）；
+- ~~Wi-Fi discover diagnostics~~ → `discover_devices()` warnings（D1 + E3）；
+- ~~trust list/remove/reset~~ → TrustService（D3）+ FFI（E3）；
+- ~~folder monitor~~ → `monitor_folder()` 服务 + `RemoteFileChanged` 事件
+  （62c7664）+ FFI（E 补充）；
 - ~~Core typed event bridge~~ → 事件桥（Phase C/C1，含 ConnectionLost）；
-- ~~sync plan/run/status/watch~~ → SyncService（D6）；
+- ~~sync plan/run/status/watch~~ → SyncService（D6，FFI 按计划后置）；
 - ~~photo sync~~ → SyncService（D6，真机验收）；
 - ~~monitor lifecycle~~ → `start_sync_watch/stop_sync_watch` 与 watch 任务（D6）；
 - ~~Connection loss event~~ → 请求级检测 + 事件（Phase C/C5）。
@@ -639,7 +626,8 @@ Application 层已全部完成（Phase D）；FFI 导出面仍缺（Phase E）�
 仍缺（Application 与 FFI 均无）：
 
 - update file info（Core 有，未上架 Application/FFI）；
-- media incremental merge（Core 有，未上架 Application/FFI）。
+- media incremental merge（Core 有，未上架 Application/FFI）；
+- sync FFI（Application SyncService 已具备，按计划后置 minor 追加）。
 
 ## 7.3 ~~P0：ABI 版本不一致~~（已修复）
 
@@ -816,29 +804,29 @@ Swift smoke 覆盖：
 | Wi-Fi 信任连接 | ✅ | ✅ | ✅ | 可集成（state_dir 已生效） |
 | USB AOA 连接 | ✅ | ✅ | ✅ | 需真机/Xcode App 验证 |
 | Session 快照 | ✅ | ✅ | ✅ | 可集成 |
-| 设备完整信息 | ✅ | ✅ | 部分 | 可集成（字段已补全） |
+| 设备完整信息 | ✅ | ✅ | ✅ | 可集成（字段已补全） |
 | Ping | ✅ | ✅ | ✅ | 可集成 |
 | 文件列表 | ✅ | ✅ | ✅ | 可集成 |
-| Stat/exists/count | ✅ | ✅ | ❌ | FFI 未导出（Phase E） |
+| Stat/exists/count | ✅ | ✅ | ✅ | 可集成（ABI 1.3） |
 | 新建目录 | ✅ | ✅ | ✅ | 可集成 |
-| 重命名/移动 | ✅ | ✅ | ❌ | FFI 未导出（Phase E） |
-| 删除/回收站 | ✅ | ✅ | ❌ | FFI 未导出（Phase E） |
+| 重命名/移动 | ✅ | ✅ | ✅ | 可集成（ABI 1.3） |
+| 删除/回收站 | ✅ | ✅ | ✅ | 可集成（ABI 1.3） |
 | 单文件上传 | ✅ | ✅ | ✅ | 可集成（进度/终态齐备） |
 | 单文件下载 | ✅ | ✅ | ✅ | 可集成（Session 失效语义正确） |
 | 传输取消 | ✅ | ✅ | ✅ | 可集成（终态/事件/区分来源） |
-| 批量/目录上传下载 | ✅ | ✅ | ❌ | FFI 未导出（Phase E） |
-| 剪贴板列表/写入/删除 | ✅ | ✅ | ❌ | FFI 未导出（Phase E） |
-| 照片库 | ✅ | ✅ | ❌ | FFI 未导出（Phase E） |
-| 视频库 | ✅ | ✅ | ❌ | FFI 未导出（Phase E） |
-| 音频库 | ✅ | ✅ | ❌ | FFI 未导出（Phase E） |
-| 缩略图 | ✅ | ✅ | ❌ | 需先设计二进制 ABI（Phase E） |
-| EXIF | ✅ | ✅ | ❌ | FFI 未导出（Phase E） |
+| 批量/目录上传下载 | ✅ | ✅ | ✅ | 可集成（后台任务 + item 进度 + batch_result，ABI 1.3） |
+| 剪贴板列表/写入/删除 | ✅ | ✅ | ✅ | 可集成（ABI 1.3） |
+| 照片库 | ✅ | ✅ | ✅ | 可集成（ABI 1.3） |
+| 视频库 | ✅ | ✅ | ✅ | 可集成（ABI 1.3） |
+| 音频库 | ✅ | ✅ | ✅ | 可集成（ABI 1.3） |
+| 缩略图 | ✅ | ✅ | ✅ | 磁盘 cache path（ABI 1.3，不经过 JSON 数字数组） |
+| EXIF | ✅ | ✅ | ✅ | 可集成（ABI 1.3） |
 | 文件主动变更 | ✅ | ✅ | ✅ | 事件已桥接（RemoteFileChanged 含 files/statuses） |
 | 剪贴板主动变更 | ✅ | ✅ | ✅ | 事件已桥接（ClipboardChanged） |
 | 媒体主动变更 | ✅ | ✅ | ✅ | 事件已桥接（MediaChanged） |
-| 照片同步 | ✅ | ✅ | ❌ | 后端齐备（SyncService），FFI 未导出；是否纳入第一版由 Swift 决定 |
-| 信任记录管理 | ✅ | ✅ | ❌ | 后端齐备（TrustService），FFI 未导出（Phase E） |
-| 目录监控 | ✅ | ✅ | ❌ | 后端齐备（monitor_folder + 事件流），FFI 未导出（Phase E） |
+| 照片同步 | ✅ | ✅ | ❌ | 后端齐备（SyncService），FFI 未包装（按计划后置，minor 追加） |
+| 信任记录管理 | ✅ | ✅ | ✅ | 可集成（ABI 1.3） |
+| 目录监控 | ✅ | ✅ | ✅ | 可集成（ABI 1.3，事件流已交付） |
 | CLI shell/batch | ✅ | 不适用 | 不适用 | GUI 不需要 |
 | CLI fallback | ✅ | — | — | 建议保留诊断入口 |
 
@@ -979,91 +967,47 @@ Application `list_trust_records`/`remove_trust_record`/
 
 ## Phase E：FFI 功能扩展
 
-建议 ABI 版本：`1.3.0` 或 `1.4.0`
+建议 ABI 版本：`1.3.0` 或 `1.4.0`——**已采用 1.3.0**。
 
-### E1. 文件 FFI
+> **Phase E 复核：E1–E6 已全部完成**（提交 0797c79/b82c46f + Application
+> 3eecc6a；ABI 1.3.0、44 个导出符号；子代理 B/C 实现、父代理验证提交）。
 
-新增：
+### ~~E1. 文件 FFI~~（已完成）
 
-- `hs_stat_file`
-- `hs_count_files`
-- `hs_move_path`
-- `hs_delete_paths`
+`hs_stat_file`/`hs_count_files`/`hs_move_path`/`hs_delete_paths`
+（JSON request/response；stat 缺省 "."；count 含 depth/exclusions；
+delete 含 trash/sync 选项）。`exists` 由 stat 的 optional 结果表达。
 
-`exists` 可由 stat 的 optional 结果表达，避免重复 API。
+### ~~E2. Clipboard FFI~~（已完成）
 
-### E2. Clipboard FFI
+`hs_clipboard_list/set/delete/clear`。
 
-新增：
+### ~~E3. Trust FFI~~（已完成）
 
-- `hs_clipboard_list`
-- `hs_clipboard_set`
-- `hs_clipboard_delete`
-- `hs_clipboard_clear`
+`hs_trust_list`/`hs_trust_remove`（`device_id`，自动 `phone:` 前缀归一）/
+`hs_trust_reset`（`endpoint`+`expected_device_id`），并追加
+`hs_discover_devices`（DeviceDiscoveryResult 带分通道 warnings）。
 
-### E3. Trust FFI
+### ~~E4. Batch FFI~~（已完成）
 
-新增：
+`hs_transfer_start_batch_download/upload`：后台任务模型，进度/取消/结果
+复用 `hs_transfer_get/list/cancel`；`TransferSnapshot` 扩展
+`item_count/completed_items/failed_items/current_item/batch_result`
+（serde 兼容）；Application `start_batch_download/upload` 复用
+`execute_file_plan` 后台执行体（3eecc6a）。
 
-- `hs_trust_list`
-- `hs_trust_remove`
-- `hs_trust_reset`
+### ~~E5. Media FFI~~（已完成）
 
-### E4. Batch FFI
+`hs_media_photo_library/video_library/audio_library/fetch_exif`；
+`hs_media_thumbnail` 采用方案 1（Rust 磁盘 cache）：bytes 写入
+`<state_dir>/thumbnails/<kind>-<fnv1a64(path)>.thumb` 并返回
+`cache_path`（已存在复用，不经过 JSON 数字数组）。
 
-新增后台任务模型，不建议同步 block_on 整批完成：
+### ~~E6. Diagnostics FFI~~（已完成）
 
-```text
-start_batch_upload/download
-BatchTransferId
-progress
-cancel
-result
-```
-
-可以统一扩展现有 TransferSnapshot，增加：
-
-- item_count；
-- completed_items；
-- failed_items；
-- current_item。
-
-### E5. Media FFI
-
-列表与元数据用 JSON。
-
-缩略图单独设计：
-
-方案优先级：
-
-1. Rust 磁盘 cache + 返回 cache path；
-2. 单图片 byte buffer；
-3. 批量 buffer table；
-4. 不推荐 JSON 数字数组；
-5. base64 只适合小型调试接口。
-
-### E6. Diagnostics FFI
-
-增加：
-
-```text
-hs_runtime_diagnostics
-```
-
-返回：
-
-- ABI；
-- Application API；
-- Rust crate；
-- platform/arch；
-- adb path；
-- adb available/version；
-- state dir；
-- active sessions；
-- active transfers；
-- supported capabilities。
-
-方便 Swift 设置页与错误反馈。
+`hs_runtime_diagnostics`：ABI/Application API/crate/platform/arch/
+adb 探测（失败不报错）/state_dir/wire_log/active sessions/active
+transfers/capabilities。
 
 ---
 
@@ -1205,12 +1149,12 @@ Swift wrapper 真机测试：
 
 # 11. Agent 可执行任务拆分
 
-> **Phase D 复核**：1–13 已完成（见各节）；14–19（FFI 扩展）、20–34
+> **Phase E 复核**：1–19 已完成（14–19 为 Phase E，见 §10）；20–34
 > （Apple SDK 与跨平台）仍待做。
 
 ## Swift Delivery P0 —— 已完成
 
-1. ~~修复 FFI ABI 1.2 Header/文档不一致~~（§7.3）
+1. ~~修复 FFI ABI 1.2 Header/文档不一致~~（§7.3，现 1.3.0）
 2. ~~将 Application API 标记为 preview 或完成正式冻结~~（§5.2 P0-1）
 3. ~~移除 Session Registry 锁跨 await~~（§5.2 P0-2）
 4. ~~重构 disconnect/shutdown 为确定性生命周期~~（§5.2 P0-3）
@@ -1221,17 +1165,17 @@ Swift wrapper 真机测试：
 9. ~~建立有界 Transfer history~~（§6.2）
 10. ~~移除公开 `session_client()` 并完成 CLI 必要迁移~~（§3.2/§4）
 
-## Swift MVP 功能
+## Swift MVP 功能 —— 已完成（Phase E）
 
 11. ~~补完整 DeviceInfoDto~~（§5.3 P1-3）
 12. ~~新增 DeviceDiscoveryResult warnings~~（§5.3 P1-2）
 13. ~~Application TrustService~~（Phase D/D4）
-14. **FFI stat/count/move/delete**（未开始）
-15. **FFI clipboard**（未开始）
-16. **FFI media metadata**（未开始）
-17. **设计并实现 thumbnail binary/cache API**（未开始）
-18. **FFI batch transfer task**（未开始）
-19. **FFI diagnostics**（未开始）
+14. ~~FFI stat/count/move/delete~~（E1，hs_stat_file/hs_count_files/hs_move_path/hs_delete_paths）
+15. ~~FFI clipboard~~（E2，hs_clipboard_list/set/delete/clear）
+16. ~~FFI media metadata~~（E5，photo/video/audio library + fetch_exif）
+17. ~~设计并实现 thumbnail binary/cache API~~（E5，磁盘 cache path）
+18. ~~FFI batch transfer task~~（E4，后台任务 + item 进度 + batch_result）
+19. ~~FFI diagnostics~~（E6，hs_runtime_diagnostics）
 
 ## Apple SDK
 
@@ -1289,13 +1233,13 @@ Swift wrapper 真机测试：
 
 ## 功能
 
-- [x] 文件浏览、stat、mkdir、move、delete（Application 全有；FFI 只导出 list/mkdir，stat/move/delete 待 Phase E）；
-- [x] 上传、下载、取消（FFI 已导出）；
-- [ ] 剪贴板（FFI 未导出）；
+- [x] 文件浏览、stat、mkdir、move、delete（Application + FFI 全导出，ABI 1.3）；
+- [x] 上传、下载、取消（单文件 + 批量后台任务，item 进度与 batch_result 齐备）；
+- [x] 剪贴板（FFI 已导出）；
 - [x] 设备完整信息（DTO 全字段，FFI snapshot 已含）；
-- [ ] MVP 所需媒体接口（FFI 未导出）；
-- [ ] Wi-Fi trust 管理（FFI 未导出；Application 已具备）；
-- [ ] 明确是否包含 sync（后端已具备 SyncService，FFI 未导出；需 Swift 决策）。
+- [x] 媒体接口（photo/video/audio library + thumbnail cache path + EXIF，FFI 已导出）；
+- [x] Wi-Fi trust 管理（FFI 已导出，trust_list/remove/reset）；
+- [ ] 明确是否包含 sync（后端已具备 SyncService，FFI 未包装；需 Swift 决策）。
 
 ## Apple
 
@@ -1374,21 +1318,21 @@ CLIBackendClient 保留为诊断/回退
 
 # 14. 最终评级
 
-审计基线 `c71cf94` → Phase D 复核 `e01bc94`：
+审计基线 `c71cf94` → Phase E 复核 `b82c46f`：
 
 ```text
 Core 后端功能：成熟
 CLI：成熟；Application 迁移已收口（仅 device discover 直连 core）
 Application：架构正确，preview 明确（P0/P1 已关闭，fixture 补齐）
-FFI：基础设施良好（ABI 一致、smoke 本地全过），功能覆盖仍不足（23 符号）
-Swift 集成：可以开始（后端能力齐备）
-Swift 正式交付：暂不建议（待 Phase E FFI 功能闭环 + Phase F/G SDK 打包）
+FFI：功能覆盖 85%（ABI 1.3.0、44 符号：文件/剪贴板/信任/发现/监控/批量/
+      媒体/诊断全导出；Header/snapshot 校验 + C/Swift smoke 本地全过）
+Swift 集成：可以开始（后端与 FFI 能力齐备）
+Swift 正式交付：暂不建议（待 Phase F/G：Swift Package、XCFramework、CI）
 ```
 
 一句话结论：
 
-> 项目已经跨过“能否做 Swift FFI”的门槛，并已完成应用层业务闭环
-> （发现诊断、稳定身份、信任、文件计划、SyncService、事件桥、传输
-> 语义与确定性生命周期，真机 ADB 验收通过）；下一阶段应集中完成
-> FFI 功能导出面（Phase E）、CI 接入与 Apple SDK 打包（Phase F/G），
-> 而不应继续扩张协议功能。
+> 项目已完成应用层业务闭环与 FFI 功能导出面（Phase D + Phase E：发现诊断、
+> 稳定身份、信任、文件计划、SyncService、事件桥、传输语义、44 个 FFI 符号，
+> 真机 ADB 验收通过）；下一阶段应集中完成 Apple SDK 打包与 CI 接入
+> （Phase F/G），而不应继续扩张协议功能。

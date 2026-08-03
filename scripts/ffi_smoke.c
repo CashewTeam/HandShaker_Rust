@@ -8,7 +8,7 @@
 #include <string.h>
 
 int main(void) {
-    if (hs_abi_version_major() != 1 || hs_abi_version_minor() != 2) {
+    if (hs_abi_version_major() != 1 || hs_abi_version_minor() != 3) {
         fprintf(stderr, "unexpected ABI version\n");
         return 1;
     }
@@ -28,6 +28,29 @@ int main(void) {
     if (r.status != 0 || r.value.len == 0) {
         fprintf(stderr, "list devices failed\n");
         return 3;
+    }
+    hs_call_result_free(r);
+
+    /* ABI 1.3 surface: diagnostics and trust work without a device. */
+    r = hs_runtime_diagnostics(rt);
+    if (r.status != 0 || r.value.len == 0) {
+        fprintf(stderr, "diagnostics failed\n");
+        return 30;
+    }
+    hs_call_result_free(r);
+
+    r = hs_trust_list(rt);
+    if (r.status != 0 || r.value.len == 0) {
+        fprintf(stderr, "trust list failed\n");
+        return 31;
+    }
+    hs_call_result_free(r);
+
+    /* ABI 1.3 surface: NULL runtime yields a stable InvalidArgument. */
+    r = hs_stat_file(NULL, 1, (const uint8_t *)"{}", 2);
+    if (r.status == 0) {
+        fprintf(stderr, "stat with NULL runtime must fail\n");
+        return 32;
     }
     hs_call_result_free(r);
 
