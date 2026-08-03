@@ -536,7 +536,12 @@ impl HandShakerRuntime {
 
 /// Resolve a possibly-relative remote path against the device root, exactly
 /// once (application layer owns this rule; GUI must not reimplement it).
-/// Absolute inputs are still normalized so `..` cannot escape above `/`.
+///
+/// Semantics:
+/// - absolute inputs are normalized (`..` cannot escape above `/`);
+/// - relative inputs are joined under `root` and **clamped to `root`**: a
+///   path whose normalized form would leave the root is pinned back to root;
+/// - empty / "." resolve to root.
 pub fn resolve_remote_path(root: &str, path: &str) -> String {
     let trimmed = path.trim();
     if trimmed.is_empty() || trimmed == "." {
@@ -545,9 +550,18 @@ pub fn resolve_remote_path(root: &str, path: &str) -> String {
     if trimmed.starts_with('/') {
         return normalize_remote_path(trimmed);
     }
-    // Relative: join under root, normalizing a leading "./" or ".." safely.
     let joined = format!("{root}/{trimmed}");
-    normalize_remote_path(&joined)
+    let normalized = normalize_remote_path(&joined);
+    // Clamp: relative paths must stay inside the device root. When root is
+    // the filesystem root itself ("/") there is nothing above it to escape.
+    if root == "/" || root.is_empty() {
+        return normalized;
+    }
+    let prefix = format!("{root}/");
+    if normalized == root || normalized.starts_with(&prefix) {
+        return normalized;
+    }
+    root.to_string()
 }
 
 /// Collapse "." and resolve ".." textually; never escapes above root

@@ -445,9 +445,7 @@ pub unsafe extern "C" fn hs_subscription_next(
         if subscription.is_null() {
             return ok(&serde_json::json!({ "closed": true }));
         }
-        let subscription = &mut *(subscription as *mut HsSubscription);
-        let timeout = Duration::from_millis(timeout_ms as u64);
-        let subscription = &mut *(subscription as *mut HsSubscription);
+        let subscription = &*(subscription as *const HsSubscription);
         let timeout = Duration::from_millis(timeout_ms as u64);
         let outcome = subscription._tokio.block_on(async {
             tokio::time::timeout(timeout, subscription.receiver.lock().await.recv()).await

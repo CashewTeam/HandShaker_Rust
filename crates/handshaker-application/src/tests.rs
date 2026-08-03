@@ -123,10 +123,11 @@ fn resolve_remote_path_rules() {
         resolve_remote_path("/root", "DCIM/Camera"),
         "/root/DCIM/Camera"
     );
-    // ".." collapses and never escapes above root.
+    // Relative ".." is clamped to the root (never escapes above it).
     assert_eq!(resolve_remote_path("/root", "a/../b"), "/root/b");
-    assert_eq!(resolve_remote_path("/root", "../../etc"), "/etc");
-    // Absolute inputs are normalized too: ".." cannot escape above "/".
+    assert_eq!(resolve_remote_path("/root", "../../etc"), "/root");
+    assert_eq!(resolve_remote_path("/root", "a/../../.."), "/root");
+    // Absolute inputs are normalized: ".." cannot escape above "/".
     assert_eq!(resolve_remote_path("/root", "/a/../../etc"), "/etc");
     assert_eq!(
         resolve_remote_path("/root", "/../../etc/passwd"),
