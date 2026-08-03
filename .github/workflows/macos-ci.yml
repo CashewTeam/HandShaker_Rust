@@ -34,6 +34,9 @@ jobs:
           key: macos-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: macos-cargo-
 
+      - name: Install Homebrew libusb (for rusb dynamic link)
+        run: brew install libusb
+
       - name: Format check
         run: cargo fmt --all -- --check
 

@@ -17,7 +17,7 @@ final class ServiceTests: XCTestCase {
             XCTAssertFalse(device.id.isEmpty)
             XCTAssertNotNil(device.transport)
         }
-        try await runtime.shutdown()
+        await runtime.shutdown()
     }
 
     func testDiscoverDevicesReturnsWarningsNotErrors() async throws {
@@ -28,7 +28,7 @@ final class ServiceTests: XCTestCase {
         // succeeds and reports warnings for failed channels.
         XCTAssertNotNil(result.devices)
         XCTAssertNotNil(result.warnings)
-        try await runtime.shutdown()
+        await runtime.shutdown()
     }
 
     func testDiagnosticsReportsABI() async throws {
@@ -43,7 +43,7 @@ final class ServiceTests: XCTestCase {
             diagnostics.capabilities.contains("media_merge"),
             "expected the media_merge capability (ABI 1.5), got \(diagnostics.capabilities)"
         )
-        try await runtime.shutdown()
+        await runtime.shutdown()
     }
 
     func testEventStreamCancelStopsPoller() async throws {
@@ -61,32 +61,32 @@ final class ServiceTests: XCTestCase {
             return received
         }
         // Let the poller start and block on hs_subscription_next.
-        try await Task.sleep(nanoseconds: 200_000_000)
+        try await Task.sleep(for: .milliseconds(200))
         consumer.cancel()
         // The stream must terminate promptly after cancellation (the
         // poller notices the cancellation, finishes, and destroys the
         // subscription handle — nothing leaks).
         let received = await consumer.value
         XCTAssertEqual(received, 0, "no events expected; nothing connects")
-        try await runtime.shutdown()
+        await runtime.shutdown()
     }
 
     func testEventStreamFinishesAfterShutdown() async throws {
         let runtime = try HandShakerRuntime()
         let stream = try await runtime.eventStream()
         let consumer = Task { () -> Bool in
-            var iterated = false
             do {
                 for try await _ in stream {
-                    iterated = true
+                    // Drain until the poller finishes the stream after
+                    // runtime shutdown.
                 }
                 return true // finished normally (closed after shutdown)
             } catch {
                 return false
             }
         }
-        try await Task.sleep(nanoseconds: 200_000_000)
-        try await runtime.shutdown()
+        try await Task.sleep(for: .milliseconds(200))
+        await runtime.shutdown()
         // The poller sees the closed sentinel and finishes the stream.
         let finishedNormally = await consumer.value
         XCTAssertTrue(finishedNormally, "event stream must finish after runtime shutdown")
@@ -104,7 +104,7 @@ final class ServiceTests: XCTestCase {
         } catch {
             XCTFail("expected HandShakerError, got \(error)")
         }
-        try await runtime.shutdown()
+        await runtime.shutdown()
     }
 
     func testTransferUnknownIDThrowsTransferNotFound() async throws {
@@ -119,13 +119,13 @@ final class ServiceTests: XCTestCase {
         } catch {
             XCTFail("expected HandShakerError, got \(error)")
         }
-        try await runtime.shutdown()
+        await runtime.shutdown()
     }
 
     func testShutdownIsIdempotent() async throws {
         let runtime = try HandShakerRuntime()
-        try await runtime.shutdown()
-        try await runtime.shutdown() // must not crash or throw
+        await runtime.shutdown()
+        await runtime.shutdown() // must not crash or throw
         // A second shutdown after the first is a no-op by contract.
     }
 }

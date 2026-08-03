@@ -28,7 +28,7 @@ final class DeviceAcceptanceTests: XCTestCase {
         let runtime = try HandShakerRuntime()
         let devices = try await runtime.listDevices()
         guard let adb = devices.first(where: { $0.transport == .adb }) else {
-            try await runtime.shutdown()
+            await runtime.shutdown()
             throw XCTSkip("no ADB device attached")
         }
         let session = try await runtime.connect(.init(device: adb))
@@ -44,7 +44,7 @@ final class DeviceAcceptanceTests: XCTestCase {
             _ = try? await runtime.deletePaths(sessionID: sessionID, [testDir])
             _ = try? await runtime.disconnect(sessionID: sessionID)
         }
-        try await runtime?.shutdown()
+        await runtime?.shutdown()
         try await super.tearDown()
     }
 
@@ -195,7 +195,7 @@ final class DeviceAcceptanceTests: XCTestCase {
 
         // 4. delete the moved file (directory removed in tearDown).
         do {
-            try await runtime.deletePaths(sessionID: sessionID, [moved])
+            _ = try await runtime.deletePaths(sessionID: sessionID, [moved])
         } catch {
             try skipOnPhoneWriteRejection(error, "delete")
         }
