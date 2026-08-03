@@ -11,7 +11,7 @@ use rustyline::error::ReadlineError;
 use serde::Serialize;
 
 use handshaker_core::{
-    ClientEvent, ClientOptions, ConnectionTarget, DeviceInfo, Error, EventCallbacks,
+    ClientEvent, ClientOptions, ClipboardEntry, ConnectionTarget, DeviceInfo, Error, EventCallbacks,
     EventFilter, EventStreamError, HandShakerClient, RemoteFile, Result, StateStore, SyncConfig,
     SyncDiff, SyncRunResult, SyncSnapshot, SyncStore, apply_file_change, check_conflicts,
     default_config_dir, execute_plan,
@@ -1704,7 +1704,18 @@ async fn execute_connected(
             }
         }
         Command::Clipboard(ClipboardCommand::Get) => {
-            let entries = client.clipboard_list().await?;
+            let entries = session
+                .runtime
+                .list_clipboards(session.session_id)
+                .await
+                .map_err(app_error)?;
+            let entries: Vec<_> = entries
+                .iter()
+                .map(|entry| ClipboardEntry {
+                    text: entry.text.clone(),
+                    timestamp_ms: entry.timestamp_ms,
+                })
+                .collect();
             Outcome::new("clipboard.get", &entries, human_clipboards(&entries))?
         }
         Command::Clipboard(ClipboardCommand::Set(args)) => {
@@ -1722,7 +1733,11 @@ async fn execute_connected(
                     Error::Usage(localizer.text(MessageKey::ClipboardSetRequired).to_string())
                 })?
             };
-            client.clipboard_set(&text).await?;
+            session
+                .runtime
+                .set_clipboard(session.session_id, &text)
+                .await
+                .map_err(app_error)?;
             Outcome::new(
                 "clipboard.set",
                 serde_json::json!({ "bytes": text.len() }),
@@ -1735,7 +1750,11 @@ async fn execute_connected(
                 yes,
                 format,
             )?;
-            client.clipboard_delete(*timestamp).await?;
+            session
+                .runtime
+                .delete_clipboard(session.session_id, *timestamp)
+                .await
+                .map_err(app_error)?;
             Outcome::new(
                 "clipboard.delete",
                 serde_json::json!({ "timestamp": timestamp }),
@@ -1748,7 +1767,11 @@ async fn execute_connected(
                 yes,
                 format,
             )?;
-            client.clipboard_clear().await?;
+            session
+                .runtime
+                .clear_clipboards(session.session_id)
+                .await
+                .map_err(app_error)?;
             Outcome::new(
                 "clipboard.clear",
                 serde_json::json!({}),

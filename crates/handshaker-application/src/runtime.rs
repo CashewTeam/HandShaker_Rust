@@ -15,8 +15,8 @@ use handshaker_core::{
 };
 
 use crate::dto::{
-    ConnectRequest, CountFilesRequest, CreateDirectoryRequest, DeletePathsRequest, DeleteResultDto,
-    DeviceDescriptor,
+    ClipboardEntryDto, ConnectRequest, CountFilesRequest, CreateDirectoryRequest, DeletePathsRequest,
+    DeleteResultDto, DeviceDescriptor,
     DeviceId, DeviceInfoDto, FileEntryDto, ListDevicesRequest, ListFilesRequest, MovePathRequest,
     PingResultDto, RuntimeConfig, SessionId, SessionSnapshot, SessionState, StatFileRequest,
     TransportKind,
@@ -434,6 +434,60 @@ impl HandShakerRuntime {
         Ok(DeleteResultDto {
             deleted: deleted.into_iter().map(remote_file_to_dto).collect(),
         })
+    }
+
+    // ---- clipboard (M8 §5.5-adjacent service) ----
+
+    /// List clipboard history for an open session.
+    pub async fn list_clipboards(
+        &self,
+        session_id: SessionId,
+    ) -> AppResult<Vec<ClipboardEntryDto>> {
+        self.ensure_open()?;
+        let client = self.session_client(session_id).await?;
+        client
+            .clipboard_list()
+            .await
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .map(|entry| ClipboardEntryDto {
+                        text: entry.text,
+                        timestamp_ms: entry.timestamp_ms,
+                    })
+                    .collect()
+            })
+            .map_err(|error| from_core_error(error, "list_clipboards"))
+    }
+
+    /// Write one clipboard entry.
+    pub async fn set_clipboard(&self, session_id: SessionId, text: &str) -> AppResult<()> {
+        self.ensure_open()?;
+        let client = self.session_client(session_id).await?;
+        client
+            .clipboard_set(text)
+            .await
+            .map_err(|error| from_core_error(error, "set_clipboard"))
+    }
+
+    /// Delete one clipboard entry by timestamp.
+    pub async fn delete_clipboard(&self, session_id: SessionId, timestamp_ms: i64) -> AppResult<()> {
+        self.ensure_open()?;
+        let client = self.session_client(session_id).await?;
+        client
+            .clipboard_delete(timestamp_ms)
+            .await
+            .map_err(|error| from_core_error(error, "delete_clipboard"))
+    }
+
+    /// Clear all clipboard history.
+    pub async fn clear_clipboards(&self, session_id: SessionId) -> AppResult<()> {
+        self.ensure_open()?;
+        let client = self.session_client(session_id).await?;
+        client
+            .clipboard_clear()
+            .await
+            .map_err(|error| from_core_error(error, "clear_clipboards"))
     }
 
     // ---- transfers ----

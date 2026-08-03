@@ -243,3 +243,10 @@ pub struct DeleteResultDto {
     /// Entries the phone confirmed deleted (post-delete snapshot shape).
     pub deleted: Vec<FileEntryDto>,
 }
+
+/// One clipboard entry (mirrors core `ClipboardEntry`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClipboardEntryDto {
+    pub text: String,
+    pub timestamp_ms: i64,
+}
