@@ -1,6 +1,6 @@
 # HandShaker_Rust 后端现状与完整开发计划
 
-> 状态基线：2026-08-03，Cargo workspace `handshaker_rust 0.7.0`（M8 拆分为 core/application/cli/ffi）。
+> 状态基线：2026-08-03，Cargo workspace `handshaker_rust 0.7.1`（M8 拆分为 core/application/cli/ffi；0.7.1 完成 CLI fs 迁移与 FFI 传输面）。
 >
 > 本文只把已经存在于 Rust 代码中的能力标记为“已实现”。协议文档、proto schema 或抓包已经确认，
 > 但尚未形成正式 Rust API/CLI 的能力，仍标记为“未实现”。
@@ -506,7 +506,7 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 - ✅ USB 下完成与 ADB 相同的设备、文件、传输和剪贴板验收。
 - ✅ 拔线能立即结束任务并给出明确错误，不残留资源。
 
-### M8：内部分层整理、应用服务模型冻结与 handshaker-ffi（Swift UniFFI 接入）（已完成，2026-08，0.7.0）
+### M8：内部分层整理、应用服务模型冻结与 handshaker-ffi（Swift UniFFI 接入）（已完成，2026-08，0.7.0/0.7.1）
 
 目标：把 0.6.1 之后的后端整理成可被 GUI 长期依赖的分层结构，并建立 FFI 边界。
 实现记录见 `docs/architecture.md`、`docs/application-api-v1.md`、`docs/ffi-v1.md`、
@@ -523,6 +523,7 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 - 实现 Swift UniFFI 接入：生成 Swift 绑定，提供最小示例工程，验证连接、浏览、传输与事件订阅
   四条 GUI 消费路径。
 - 版本与文档：版本 0.7.0；新增 FFI/应用服务模型文档与兼容性策略；回归 + security_review + 真机冒烟。
+- **后续（0.7.1）**：CLI 连接统一走 runtime；`fs ls/stat/exists/mkdir/mv` + `fs pull/push` 批量用例迁移到 Application（`rm`/`count` 因输出契约暂留 core）；`handshaker-ffi` ABI 1.1.0 导出传输任务面（`hs_transfer_*`）；192 测试。
 
 验收：
 
@@ -579,7 +580,7 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ## 9. 版本建议
 
-- 当前 `0.7.0`（M8）：ADB/WiFi/USB 基线能力全保留；Workspace 拆分 core/application/cli/ffi；
+- 当前 `0.7.1`（M8）：ADB/WiFi/USB 基线能力全保留；Workspace 拆分 core/application/cli/ffi；
   应用服务模型冻结（Runtime/Session/Transfer/事件/PublicError v1）；FFI C ABI 1.0.0 最小闭环
   （设备/连接/文件/事件订阅，C 与 Swift smoke 通过）。
 - 媒体、同步或 USB 等较大里程碑：根据 public API 兼容性由维护者决定 Y 版本。

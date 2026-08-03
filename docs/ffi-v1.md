@@ -1,6 +1,7 @@
-# handshaker-ffi v1(C ABI 契约)
+# handshaker-ffi v1.1(C ABI 契约)
 
-> ABI 版本:1.0.0(与 Rust crate 版本独立;major=签名破坏、minor=增函数/可选字段、patch=实现修复)
+> ABI 版本:1.1.0(与 Rust crate 版本独立;major=签名破坏、minor=增函数/可选字段、patch=实现修复)
+> 1.1 追加传输任务面(`hs_transfer_*`),1.0 符号不变。
 > crate:`crates/handshaker-ffi`,产物:`libhandshaker_ffi.{a,dylib,rlib}`(macOS)
 
 ## 1. 基础类型
@@ -22,7 +23,7 @@ typedef struct HsSubscription HsSubscription;
 
 | 函数 | 说明 |
 |---|---|
-| `hs_abi_version_major/minor/patch` | ABI 版本 1.0.0 |
+| `hs_abi_version_major/minor/patch` | ABI 版本 1.1.0 |
 | `hs_byte_buffer_free` / `hs_call_result_free` | 释放 |
 | `hs_runtime_create(config_json, len, out_runtime)` | 创建(JSON: `adb_path_utf8/default_timeout_ms/heartbeat_interval_ms/state_dir_utf8/event_capacity`, 均可选) |
 | `hs_runtime_shutdown(runtime)` | 幂等;NULL → 成功 |
@@ -32,6 +33,11 @@ typedef struct HsSubscription HsSubscription;
 | `hs_disconnect(runtime, session_id)` | 结果:`{"disconnected":true}` |
 | `hs_get_session(runtime, session_id)` | 结果:SessionSnapshot |
 | `hs_list_files(runtime, session_id, request_json, len)` | 结果:FileEntryDto 数组 |
+| `hs_transfer_start_download(runtime, session_id, request_json, len)` | 结果:`{"transfer_id":N}`(ABI 1.1) |
+| `hs_transfer_start_upload(runtime, session_id, request_json, len)` | 结果:`{"transfer_id":N}`(ABI 1.1) |
+| `hs_transfer_cancel(runtime, transfer_id)` | 结果:`{"cancelled":true}`(ABI 1.1) |
+| `hs_transfer_get(runtime, transfer_id)` | 结果:TransferSnapshot(ABI 1.1) |
+| `hs_transfer_list(runtime)` | 结果:TransferSnapshot 数组(ABI 1.1) |
 | `hs_subscribe_events(runtime, out_subscription)` | 订阅 |
 | `hs_subscription_next(subscription, timeout_ms)` | EventEnvelope JSON;超时 `{"timeout":true}`;关闭 `{"closed":true}`;Lagged → 错误 |
 | `hs_subscription_destroy(subscription)` | NULL 安全 |
@@ -54,9 +60,10 @@ typedef struct HsSubscription HsSubscription;
   NativeCall、NativeError)+ `Models/`(Codable DTO)+ `HandShakerClient.swift`(
   `protocol BackendClient: Sendable`);SwiftUI View 不直接触碰 C 类型。
 
-## 5. v1 已导出 vs 未导出
+## 5. v1.1 已导出 vs 未导出
 
-- 已导出:Runtime 生命周期、设备列表、连接/断开/快照、文件列表、事件订阅;
-- 未导出(v1 后按需追加,minor):传输任务(start_download/upload/cancel/get)、
-  stat/create/move/delete、媒体、剪贴板、同步;
+- 已导出:Runtime 生命周期、设备列表、连接/断开/快照、文件列表、**传输任务
+  (start_download/start_upload/cancel/get/list,ABI 1.1)**、事件订阅;
+- 未导出(v1 后按需追加,minor):stat/create/move/delete、批量传输(batch)、媒体、
+  剪贴板、同步;
 - 大文件字节**不**经过 JSON/FFI(Rust 直接写文件,任务 ID + 进度事件)。

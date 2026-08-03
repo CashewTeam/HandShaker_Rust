@@ -56,6 +56,7 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
 - **USB AOA 连接（M7，0.6.0）**：传输层抽象（握手/帧读写泛型化，Session 对 TCP/USB 透明）；`rusb` 集成——枚举 accessory（0x18d1）与 Smartisan 常驻 accessory（0x29a9）设备、AOA identification（对照 Mac 版 `sendAOAStartupRequest`：请求码十进制 51/52/53、字符串 0 基 index、UTF-8 编码）与 `--usb [--serial <bus-ports>]` 直连（复用 ADB 裸握手）；`device list` 同时列出 ADB 与 USB 设备；真机完整业务验收通过（连接/文件/传输 MD5/剪贴板/重命名，单连接批量）。
 - **长连接批量会话（0.6.1）**：`handshaker batch` 从 stdin 逐行读取命令、在单个持久连接上顺序执行（心跳保活，规避手机端 accessory 会话单次性）；输出遵循 `--output`，命令级失败继续、致命错误中断、`exit`/`quit`/EOF 结束并 QUIT。
 - **Workspace 拆分与应用服务模型（M8，0.7.0）**：仓库改为 Cargo Workspace（`handshaker-core`/`handshaker-application`/`handshaker-cli`/`handshaker-ffi`），CLI 行为与 JSON 契约不变；冻结应用层 v1 契约（`HandShakerRuntime`、Session/Transfer/事件、`PublicError` 分区码，见 `docs/application-api-v1.md` 与 `docs/architecture.md`）；新增 `handshaker-ffi`（稳定 C ABI 1.0.0：Runtime/设备/连接/文件列表/事件订阅，panic 隔离 + Buffer 所有权，C 与 Swift smoke 测试通过，见 `docs/ffi-v1.md`）。
+- **CLI 渐进迁移与 FFI 传输面（M8 后续，0.7.1）**：CLI 连接统一走 `HandShakerRuntime`（`session_client` 过渡 API 供未迁移命令复用同一连接，冻结前移除）；`fs ls/stat/exists/mkdir/mv` 与 `fs pull/push` 批量用例迁移到 Application（树枚举与路径逃逸防护保留在 core，CLI 只留参数/确认/展示；`rm`/`count` 因输出契约暂留 core）；`handshaker-ffi` 升至 ABI 1.1.0，导出 `hs_transfer_start_download/start_upload/cancel/get/list`，Swift smoke 覆盖传输面。
 - 剪贴板/目录监控之外的推送发送侧仍属于后续里程碑。
 
 ## 命令行教程

@@ -36,8 +36,33 @@
 
 ## 4. 已知迁移遗留(非回归)
 
-- CLI 其余命令(fs/clipboard/media/sync/watch/batch/shell)仍直连 core,
-  按文档 Phase 3 渐进迁移(下一阶段:fs 命令族 → 传输/事件/同步);
+- CLI 其余命令(clipboard/media/sync/watch/batch/shell)仍直连 core,
+  按文档 Phase 3 渐进迁移(下一阶段:clipboard/media → watch/sync/shell);
 - `handshaker-test-support` crate 尚未拆分(当前 core 内部 `#[cfg(test)]`),预留;
 - Application 的 Clipboard/Media/RemoteFile 事件为预留变体,未桥接;
-- FFI 未导出传输任务与文件变更方法(见 `docs/ffi-v1.md §5`)。
+- `fs.rm`/`fs.count` 暂留 core:rm 的 JSON 契约是 `RemoteFile` 数组(Application
+  `DeleteResultDto` 返回路径字符串数组),count 携带 CLI 专用 exclusions 语义;
+- CLI fs pull/push 的 human 实时进度降级为完成后汇总(JSONL 本就无每文件进度),
+  `render_batch_progress` 已删除。
+
+## 5. 0.7.1 迁移记录(提交 6bd6abf / 8bb89c5 / d7e516d / fd8b96b)
+
+- **连接统一走 runtime(6bd6abf)**:`connect()` 构造 `DeviceDescriptor` 并经
+  `HandShakerRuntime::connect` 建会话;无 serial 时经 `list_devices` 自动选唯一在线
+  ADB 设备(0/多台 → DeviceSelection,同 i18n key,exit 3);`close_session` 消费式
+  drop CLI 的 client 句柄使 `disconnect` 独占发 QUIT;`session_client` 过渡 API
+  (冻结前移除)供未迁移命令复用同一连接;watch 保留独立 all-callbacks 连接。
+  adb 缺失时错误文案从 `adb.spawn_failed` 收敛为 `adb.no_online_device`(exit 仍 3)。
+- **fs 基础命令(8bb89c5)**:`ls/stat/exists/mkdir/mv` 走 runtime;CliFileEntry
+  适配层保持与 core `RemoteFile` 相同的 JSON 字段集(单测锁定);mkdir 后 stat-back
+  保持 RemoteFile 形状输出。
+- **fs pull/push 批量上移(7e516d 之 d7e516d)**:`BatchTransferRequest{files, trees,
+  overwrite}`;runtime `batch_download/batch_upload` 把 trees 交给 core
+  `download_tree/upload_tree`(递归枚举与路径逃逸防护留在 core),files 交给
+  `download_many/upload_many`(串行、并发 1、失败聚合不中止);CLI 只留参数解析/
+  路径 resolve/misparsed 检查/确认/展示;dry-run 留在 CLI(pull 用 runtime
+  `list_files` 枚举,push 复用 `collect_local_tree`);`BatchTransferResultDto` JSON
+  与 legacy core 结果一致。
+- **FFI 传输面(fd8b96b)**:ABI 1.1.0;`hs_transfer_start_download/start_upload/
+  cancel/get/list`;header 追加;Swift smoke 覆盖错误路径与空列表。
+- 测试 186 → 192(core 120 / bin 22 / cli 12 / app 22 / ffi 15 / localization 1)。
