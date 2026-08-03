@@ -158,6 +158,7 @@ final class DeviceAcceptanceTests: XCTestCase {
             uploadID = try await runtime.startUpload(sessionID: sessionID, remotePath: remote, localPath: local.path)
         } catch {
             try skipOnPhoneWriteRejection(error, "upload")  // always throws
+            return
         }
         try await waitForTransfer(runtime, uploadID, step: "upload")
         let downloaded = FileManager.default.temporaryDirectory
@@ -170,6 +171,7 @@ final class DeviceAcceptanceTests: XCTestCase {
             )
         } catch {
             try skipOnPhoneWriteRejection(error, "download")  // always throws
+            return
         }
         try await waitForTransfer(runtime, downloadID, step: "download")
         XCTAssertEqual(try Data(contentsOf: downloaded), payload)
@@ -180,6 +182,7 @@ final class DeviceAcceptanceTests: XCTestCase {
             try await runtime.movePath(sessionID: sessionID, source: remote, target: moved)
         } catch {
             try skipOnPhoneWriteRejection(error, "move")  // always throws
+            return
         }
         let movedStat = try await runtime.statFile(sessionID: sessionID, path: moved)
         XCTAssertNotNil(movedStat)
