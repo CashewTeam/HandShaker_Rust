@@ -139,14 +139,57 @@ connect/disconnect/get session、list files、subscribe/next/destroy。
 - `bc72aba` fix:batch_download/upload 内做远端路径解析;FFI 信任模型文档化;
 - `72d978a` / `2965f64` docs:修正 stale `BatchTransferItemDto`/`TreeTransferDto` 注释。
 
-### 6.6 待办清单(按优先级)
+### 6.6 待办清单(按优先级,截至 §7 记录)
 
-1. FFI 补 `hs_create_directory`(application 已就绪,纯包装 + header + smoke);
-2. FFI 补 `hs_ping`(device info 语义,走 session);
-3. `fs.rm` 迁移:Application `DeleteResultDto` 需扩展为携带 RemoteFile 形状(或
-   CLI 适配层重建),并核对 `delete` 的 trash/sync 选项透传;
-4. `fs.count` 迁移:exclusions 语义上移或文档化 CLI 专用;
-5. Phase 7 脚本:`build-ffi-linux.sh`、`generate-ffi-header.sh`、`dist/apple/` 产物;
-6. 其余 CLI 命令按 Phase 3 顺序(clipboard/media → watch/sync/shell)渐进迁移;
-7. `handshaker-test-support` 拆分(计划 §4.5,当前 core 内部 `#[cfg(test)]`)。
+1. ✅ FFI `hs_create_directory` + `hs_ping`(ABI 1.2.0,8122ca1);
+2. ✅ `fs.rm` 迁移(DeleteResultDto 携带 FileEntryDto,fdf7025);
+3. ✅ `fs.count` 迁移(runtime.count_files,d127c76);
+4. ✅ Phase 7 脚本:`generate-ffi-header.sh`、`build-ffi-linux.sh`、`dist/apple/`
+   产物(4724070);
+5. ✅ `clipboard` 迁移(5d06a1e)、`media` 迁移(57529d3);
+6. ⏳ `shell`/`batch`/`watch`/`sync` 评估保留 core(§7 边界记录,后续事项
+   见 §7.3:事件桥接、sync 上移、device info/ping CLI 侧迁移);
+7. ⏳ `handshaker-test-support` 拆分(计划 §4.5,当前 core 内部 `#[cfg(test)]`)。
+
+## 7. CLI 交互层边界评估(HEAD 8122ca1 之后,逐项落库)
+
+> 结论先行:`fs` 全量(ls/stat/exists/mkdir/mv/count/rm/pull/push)、`clipboard`
+> 全量、`media` 全量(photo/video/audio/thumbnail)已迁移;`shell`/`batch`/
+> `watch`/`sync` 评估为**保留 core**,理由与边界如下。
+
+### 7.1 已迁移命令(截至本记录)
+
+| 命令 | 迁移方式 |
+|---|---|
+| `fs ls/stat/exists/mkdir/mv` | runtime 文件服务(8bb89c5) |
+| `fs pull/push` | runtime batch_download/batch_upload(d7e516d;编排残留 `client.stat`/`file_exists` 仅作存在性判断) |
+| `fs rm` | runtime.stat_file + runtime.delete_paths,DeleteResultDto 携带 FileEntryDto(fdf7025) |
+| `fs count` | runtime.count_files(协议 exclusions 透传,d127c76) |
+| `clipboard get/set/delete/clear` | runtime.list/set/delete/clear_clipboards(5d06a1e) |
+| `media photo/video/audio/thumbnail` | runtime media 服务,DTO 镜像 core 字段(57529d3) |
+
+### 7.2 保留 core 的命令与理由
+
+- **`shell`(REPL)**:TTY 交互层(stdin/提示符/history/嵌套 shell 拒绝)。
+  Application 是 UI/binding 无关服务层,不承载终端交互;保留 core 是设计
+  决定,不是迁移欠账。
+- **`batch`(stdin 单连接批量)**:CLI 编排层,逐行命令复用 REPL 解析与确认
+  规则,底层命令已随各自迁移;无独立服务面。
+- **`watch`(长连接事件监听)**:使用 `connect_with_all_callbacks`(core 连接
+  层注册 photo/audio/video/device 回调);runtime.connect 无回调参数,
+  Application 事件总线对 device 事件的桥接未做。CLI watch 走独立连接路径,
+  不受影响。
+- **`sync plan/run/watch/status`**:跨会话状态工作流(独立台账 `SyncStore` +
+  core 状态机 `plan_diff`/`execute_plan`/`apply_file_change`),深度耦合 CLI
+  目录/确认/输出;保留 core,后续可整体上移为 application sync 域服务。
+
+### 7.3 后续边界事项
+
+1. **事件桥接**:`BackendEvent::ClipboardChanged/MediaChanged/RemoteFileChanged`
+   预留变体仍未桥接;需要 FFI/GUI 接收设备推送时,在 runtime.connect 增加
+   回调注册(ConnectRequest 扩展属冻结契约变更,需 minor 决策);
+2. **sync 上移**:如 GUI 需要同步能力,将 `SyncStore`+状态机包装为
+   application 服务,CLI 仅做展示;
+3. `device info/ping` 仍走 `session.client`(core);`ping` 的 FFI 面已补齐
+   (hs_ping,ABI 1.2),CLI 侧可随后续 device 迁移一起处理。
 
