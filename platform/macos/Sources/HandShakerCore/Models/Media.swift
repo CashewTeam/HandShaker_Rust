@@ -41,7 +41,7 @@ public struct ImageFile: Codable, Sendable, Equatable {
     public let starred: Bool
 
     /// Byte view of `thumbnail` (the JSON wire format is a number array).
-    public var thumbnailData: Data? { thumbnail.map(Data.init) }
+    public var thumbnailData: Data? { thumbnail.map { Data($0) } }
 
     private enum CodingKeys: String, CodingKey {
         case path
@@ -113,7 +113,7 @@ public struct VideoFile: Codable, Sendable, Equatable {
     public let duration: Double?
 
     /// Byte view of `thumbnail` (the JSON wire format is a number array).
-    public var thumbnailData: Data? { thumbnail.map(Data.init) }
+    public var thumbnailData: Data? { thumbnail.map { Data($0) } }
 
     private enum CodingKeys: String, CodingKey {
         case path
@@ -206,7 +206,7 @@ public struct AudioAlbum: Codable, Sendable, Equatable {
     public let thumbnailError: Bool
 
     /// Byte view of `thumbnail` (the JSON wire format is a number array).
-    public var thumbnailData: Data? { thumbnail.map(Data.init) }
+    public var thumbnailData: Data? { thumbnail.map { Data($0) } }
 
     private enum CodingKeys: String, CodingKey {
         case path
