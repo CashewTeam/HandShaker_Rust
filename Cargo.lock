@@ -475,6 +475,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "handshaker-application"
+version = "0.6.1"
+dependencies = [
+ "handshaker-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "handshaker-cli"
 version = "0.6.1"
 dependencies = [

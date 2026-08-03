@@ -1,0 +1,14 @@
+[package]
+name = "handshaker-application"
+version.workspace = true
+edition.workspace = true
+description = "Smartisan HandShaker application service layer (UI/CLI/binding agnostic)"
+
+[dependencies]
+handshaker-core = { path = "../handshaker-core" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/handshaker-core",
     "crates/handshaker-cli",
+    "crates/handshaker-application",
 ]
 
 [workspace.package]
