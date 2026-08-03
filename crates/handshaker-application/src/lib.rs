@@ -13,6 +13,7 @@ mod event;
 mod file_plan;
 mod media;
 mod runtime;
+mod sync;
 mod transfer;
 mod trust;
 
@@ -35,6 +36,9 @@ pub use media::{
     PhotoLibraryDto, ThumbnailsDto, VideoAlbumDto, VideoFileDto, VideoLibraryDto,
 };
 pub use runtime::{HandShakerRuntime, normalize_remote_path, resolve_remote_path};
+pub use sync::{
+    SyncActionDto, SyncConflictDto, SyncPlanDto, SyncProfileDto, SyncRunResultDto, SyncStatusDto,
+};
 pub use transfer::{
     BatchTransferItemDto, BatchTransferRequest, BatchTransferResultDto, DownloadRequest,
     TransferDirectionDto, TransferFailureDto, TransferId, TransferRegistry, TransferSnapshot,

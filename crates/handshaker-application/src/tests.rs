@@ -1,16 +1,24 @@
 //! Application-layer unit tests: DTO semantics, error mapping, path rules,
 //! and runtime lifecycle that does not require a real device.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use handshaker_core::{DeviceInfo, RemoteFile};
+use handshaker_core::{
+    DeviceInfo, FileChange, FileChangeStatus, RemoteFile, SyncConfig, SyncDiff, SyncFileRecord,
+    SyncSnapshot,
+};
 
 use crate::dto::{
     DeviceDescriptor, DeviceId, FileEntryDto, RuntimeConfig, SessionId, TransportKind,
 };
 use crate::error::{PublicErrorCode, from_core_error};
 use crate::runtime::normalize_remote_path;
+use crate::sync::{
+    SyncActionDto, SyncPlanDto, SyncProfileDto, SyncRunResultDto, SyncStatusDto, one_entry_diff,
+    snapshot_to_remote_files, sync_plan_to_dto, sync_run_result_to_dto,
+};
 use crate::transfer::{
     BatchTransferItemDto, BatchTransferRequest, BatchTransferResultDto, TransferState,
 };
@@ -2123,6 +2131,8 @@ fn backend_event_change_payloads_serialize_with_stable_kinds() {
         change: crate::dto::RemoteFileChangeDto {
             change_kind: crate::dto::RemoteFileChangeKind::FileChanged,
             paths: vec!["/x".to_string()],
+            files: vec![],
+            statuses: vec![],
         },
     })
     .unwrap();
@@ -2162,6 +2172,8 @@ fn backend_event_change_payloads_serialize_with_stable_kinds() {
             change: crate::dto::RemoteFileChangeDto {
                 change_kind: crate::dto::RemoteFileChangeKind::DirectoryChanged,
                 paths: vec![],
+                files: vec![],
+                statuses: vec![],
             },
         })
         .unwrap(),
@@ -2177,4 +2189,496 @@ fn backend_event_change_payloads_serialize_with_stable_kinds() {
                 | BackendEvent::RemoteFileChanged { .. }
         ));
     }
+}
+
+// ---- Phase D / D6: photo-sync service ----
+//
+// Network paths (photo_sync / execute_plan / apply_file_change against a
+// real phone) are intentionally not tested here: core's own integration
+// tests cover them, and FakeWifiSsp is a core-internal facility the
+// application layer must not depend on. These tests cover the pure mappings,
+// ledger/store resolution, and job lifecycle/state transitions only.
+
+fn sync_profile(id: &str, session: u64) -> SyncProfileDto {
+    SyncProfileDto {
+        id: id.to_string(),
+        session_id: SessionId(session),
+        device_uuid: "dev-1".to_string(),
+        remote_root: "/storage/emulated/0/DCIM/Camera".to_string(),
+        local_root: "/tmp/photos".to_string(),
+        enabled: true,
+    }
+}
+
+#[test]
+fn sync_dto_json_fixtures_are_stable() {
+    let profile = sync_profile("photos", 7);
+    let value = serde_json::to_value(&profile).expect("serialize profile");
+    assert_eq!(value["id"], "photos");
+    assert_eq!(value["session_id"], 7);
+    assert_eq!(value["device_uuid"], "dev-1");
+    assert_eq!(value["remote_root"], "/storage/emulated/0/DCIM/Camera");
+    assert_eq!(value["local_root"], "/tmp/photos");
+    assert_eq!(value["enabled"], true);
+    let back: SyncProfileDto = serde_json::from_value(value).expect("deserialize profile");
+    assert_eq!(back, profile);
+
+    let plan = SyncPlanDto {
+        profile_id: "photos".to_string(),
+        downloads: vec![SyncActionDto {
+            remote_path: "/p/a.jpg".to_string(),
+            local_path: "/tmp/photos/a.jpg".to_string(),
+            size: 10,
+        }],
+        metadata_updates: vec![],
+        deletions: vec![],
+        conflicts: vec![],
+        total_bytes: 10,
+        executable: true,
+    };
+    let value = serde_json::to_value(&plan).expect("serialize plan");
+    assert_eq!(value["profile_id"], "photos");
+    assert_eq!(value["downloads"][0]["remote_path"], "/p/a.jpg");
+    assert_eq!(value["downloads"][0]["local_path"], "/tmp/photos/a.jpg");
+    assert_eq!(value["downloads"][0]["size"], 10);
+    assert_eq!(value["metadata_updates"], serde_json::json!([]));
+    assert_eq!(value["total_bytes"], 10);
+    assert_eq!(value["executable"], true);
+    let back: SyncPlanDto = serde_json::from_value(value).expect("deserialize plan");
+    assert_eq!(back, plan);
+
+    let status = SyncStatusDto {
+        profile_id: "photos".to_string(),
+        running: true,
+        monitoring: false,
+        last_run_at_ms: Some(123),
+        last_error: None,
+    };
+    let value = serde_json::to_value(&status).expect("serialize status");
+    assert_eq!(value["profile_id"], "photos");
+    assert_eq!(value["running"], true);
+    assert_eq!(value["monitoring"], false);
+    assert_eq!(value["last_run_at_ms"], 123);
+    assert!(value.get("last_error").unwrap().is_null());
+    let back: SyncStatusDto = serde_json::from_value(value).expect("deserialize status");
+    assert_eq!(back, status);
+}
+
+#[test]
+fn snapshot_to_remote_files_maps_record_fields() {
+    let snapshot = SyncSnapshot {
+        files: BTreeMap::from([(
+            "/storage/emulated/0/DCIM/Camera/a.jpg".to_string(),
+            SyncFileRecord {
+                size: 42,
+                checksum: Some("c-a".to_string()),
+                ext_data: Some(r#"{"star":true}"#.to_string()),
+                modified_at: Some(9),
+                local_path: "/tmp/photos/a.jpg".to_string(),
+                local_sha256: Some("sha".to_string()),
+            },
+        )]),
+    };
+    let files = snapshot_to_remote_files(&snapshot);
+    assert_eq!(files.len(), 1);
+    let file = &files[0];
+    assert_eq!(file.path, "/storage/emulated/0/DCIM/Camera/a.jpg");
+    assert_eq!(file.size, 42);
+    assert_eq!(file.checksum.as_deref(), Some("c-a"));
+    assert_eq!(file.ext_data.as_deref(), Some(r#"{"star":true}"#));
+    assert_eq!(file.modified_at, Some(9));
+    assert!(!file.is_directory);
+    assert_eq!(file.created_at, None);
+    assert_eq!(file.is_trash, None);
+    assert_eq!(file.id, None);
+}
+
+#[test]
+fn plan_mapping_counts_actions_and_flags_conflicts() {
+    let snapshot = SyncSnapshot {
+        files: BTreeMap::from([(
+            "/storage/emulated/0/DCIM/Camera/gone.jpg".to_string(),
+            SyncFileRecord {
+                size: 7,
+                checksum: Some("c-gone".to_string()),
+                ext_data: None,
+                modified_at: Some(1),
+                local_path: "/tmp/photos/gone.jpg".to_string(),
+                local_sha256: Some("sha".to_string()),
+            },
+        )]),
+    };
+    let phone_files = vec![
+        RemoteFile {
+            path: "/storage/emulated/0/DCIM/Camera/new.jpg".to_string(),
+            size: 10,
+            created_at: None,
+            modified_at: Some(2),
+            is_directory: false,
+            checksum: Some("c-new".to_string()),
+            is_trash: None,
+            id: None,
+            ext_data: None,
+        },
+        RemoteFile {
+            path: "/storage/emulated/0/DCIM/Camera/meta.jpg".to_string(),
+            size: 5,
+            created_at: None,
+            modified_at: Some(3),
+            is_directory: false,
+            checksum: Some("c-meta".to_string()),
+            is_trash: None,
+            id: None,
+            ext_data: Some(r#"{"star":true}"#.to_string()),
+        },
+    ];
+    let diff = SyncDiff {
+        added: vec!["/storage/emulated/0/DCIM/Camera/new.jpg".to_string()],
+        info_modified: vec!["/storage/emulated/0/DCIM/Camera/meta.jpg".to_string()],
+        deleted: vec!["/storage/emulated/0/DCIM/Camera/gone.jpg".to_string()],
+        conflicts: vec![],
+    };
+    let config = SyncConfig {
+        device_uuid: "dev-1".to_string(),
+        phone_root: "/storage/emulated/0/DCIM/Camera".to_string(),
+        local_root: "/tmp/photos".to_string(),
+        pc_id: "hs-1".to_string(),
+    };
+    let plan = sync_plan_to_dto(
+        "photos",
+        &config,
+        &diff,
+        &["/storage/emulated/0/DCIM/Camera/gone.jpg".to_string()],
+        &phone_files,
+        &snapshot,
+    )
+    .expect("plan");
+    assert_eq!(plan.profile_id, "photos");
+    assert_eq!(plan.downloads.len(), 1);
+    assert_eq!(
+        plan.downloads[0].remote_path,
+        "/storage/emulated/0/DCIM/Camera/new.jpg"
+    );
+    assert_eq!(
+        plan.downloads[0].local_path,
+        std::path::Path::new("/tmp/photos")
+            .join("new.jpg")
+            .display()
+            .to_string()
+    );
+    assert_eq!(plan.downloads[0].size, 10);
+    assert_eq!(plan.metadata_updates.len(), 1);
+    assert_eq!(
+        plan.metadata_updates[0].remote_path,
+        "/storage/emulated/0/DCIM/Camera/meta.jpg"
+    );
+    assert_eq!(plan.metadata_updates[0].size, 5);
+    assert_eq!(plan.deletions.len(), 1);
+    assert_eq!(plan.deletions[0].local_path, "/tmp/photos/gone.jpg");
+    assert_eq!(plan.deletions[0].size, 7);
+    assert_eq!(plan.conflicts.len(), 1);
+    assert_eq!(
+        plan.conflicts[0].remote_path,
+        "/storage/emulated/0/DCIM/Camera/gone.jpg"
+    );
+    assert_eq!(plan.conflicts[0].reason, "local_modified");
+    assert_eq!(plan.total_bytes, 10);
+    assert!(!plan.executable);
+
+    // Without conflicts the same diff is executable.
+    let plan =
+        sync_plan_to_dto("photos", &config, &diff, &[], &phone_files, &snapshot).expect("plan");
+    assert!(plan.executable);
+    assert!(plan.conflicts.is_empty());
+}
+
+#[test]
+fn sync_run_result_dto_matches_cli_json_contract() {
+    let dto = SyncRunResultDto {
+        downloaded: vec!["/p/a.jpg".to_string()],
+        deleted: vec!["/p/gone.jpg".to_string()],
+        failures: vec!["/p/bad.jpg".to_string()],
+        conflicts: vec!["/p/edited.jpg".to_string()],
+    };
+    let value = serde_json::to_value(&dto).expect("serialize");
+    assert_eq!(value["downloaded"][0], "/p/a.jpg");
+    assert_eq!(value["deleted"][0], "/p/gone.jpg");
+    assert_eq!(value["failures"][0], "/p/bad.jpg");
+    assert_eq!(value["conflicts"][0], "/p/edited.jpg");
+    // CLI `sync run` emits exactly these four keys.
+    assert_eq!(value.as_object().expect("object").len(), 4);
+}
+
+#[test]
+fn sync_run_result_maps_to_dto() {
+    let result = handshaker_core::SyncRunResult {
+        downloaded: vec!["/p/a.jpg".to_string()],
+        deleted: vec![],
+        failures: vec!["/p/b.jpg".to_string()],
+        conflicts: vec!["/p/c.jpg".to_string()],
+    };
+    let dto = sync_run_result_to_dto(result);
+    assert_eq!(dto.downloaded, vec!["/p/a.jpg".to_string()]);
+    assert!(dto.deleted.is_empty());
+    assert_eq!(dto.failures, vec!["/p/b.jpg".to_string()]);
+    assert_eq!(dto.conflicts, vec!["/p/c.jpg".to_string()]);
+}
+
+#[test]
+fn one_entry_diff_maps_status_to_plan_category() {
+    let file = Some(RemoteFile {
+        path: "/storage/emulated/0/DCIM/Camera/a.jpg".to_string(),
+        size: 1,
+        created_at: None,
+        modified_at: None,
+        is_directory: false,
+        checksum: None,
+        is_trash: None,
+        id: None,
+        ext_data: None,
+    });
+    let added = one_entry_diff(&FileChange {
+        file: file.clone(),
+        status: FileChangeStatus::Added,
+    });
+    assert_eq!(
+        added.added,
+        vec!["/storage/emulated/0/DCIM/Camera/a.jpg".to_string()]
+    );
+    let deleted = one_entry_diff(&FileChange {
+        file: file.clone(),
+        status: FileChangeStatus::Deleted,
+    });
+    assert_eq!(
+        deleted.deleted,
+        vec!["/storage/emulated/0/DCIM/Camera/a.jpg".to_string()]
+    );
+    // Metadata-only changes never enter the diff (no local-file risk).
+    let info = one_entry_diff(&FileChange {
+        file,
+        status: FileChangeStatus::InfoModified,
+    });
+    assert!(info.added.is_empty() && info.deleted.is_empty());
+    // Directories never enter the diff.
+    let dir = one_entry_diff(&FileChange {
+        file: Some(RemoteFile {
+            path: "/storage/emulated/0/DCIM/Camera/dir".to_string(),
+            size: 0,
+            created_at: None,
+            modified_at: None,
+            is_directory: true,
+            checksum: None,
+            is_trash: None,
+            id: None,
+            ext_data: None,
+        }),
+        status: FileChangeStatus::Added,
+    });
+    assert!(dir.added.is_empty());
+}
+
+#[tokio::test]
+async fn sync_store_for_uses_configured_state_dir() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = test_config();
+    config.state_dir = Some(temp.path().to_path_buf());
+    let runtime = HandShakerRuntime::create(config).await.expect("create");
+    let profile = sync_profile("photos", 1);
+    let store = runtime.sync_store_for(&profile).expect("store");
+    store.save(&SyncSnapshot::default()).expect("save");
+    assert!(
+        temp.path().join("sync/dev-1.json").exists(),
+        "ledger must live under <state_dir>/sync/<device_uuid>.json"
+    );
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn start_sync_without_session_returns_session_not_found() {
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    let error = runtime
+        .start_sync(sync_profile("photos", 999))
+        .await
+        .expect_err("must fail");
+    assert_eq!(error.code, PublicErrorCode::SessionNotFound);
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn sync_ops_on_unknown_profile_return_not_found() {
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    let error = runtime.stop_sync("nope").await.expect_err("stop must fail");
+    assert_eq!(error.code, PublicErrorCode::NotFound);
+    let error = runtime
+        .get_sync_status("nope")
+        .await
+        .expect_err("status must fail");
+    assert_eq!(error.code, PublicErrorCode::NotFound);
+    let error = runtime
+        .last_sync_result("nope")
+        .await
+        .expect_err("result must fail");
+    assert_eq!(error.code, PublicErrorCode::NotFound);
+    let error = runtime
+        .start_sync_watch("nope")
+        .await
+        .expect_err("watch must fail");
+    assert_eq!(error.code, PublicErrorCode::NotFound);
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn duplicate_sync_job_registration_is_rejected_while_running() {
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    let profile = sync_profile("photos", 1);
+    let first = runtime
+        .register_sync_job(profile.clone())
+        .await
+        .expect("register");
+    assert!(first.status().running);
+    let error = runtime
+        .register_sync_job(profile.clone())
+        .await
+        .expect_err("duplicate");
+    assert_eq!(error.code, PublicErrorCode::InvalidState);
+    // A finished job can be replaced with a fresh one.
+    first.set_status(|status| status.running = false);
+    let second = runtime
+        .register_sync_job(profile)
+        .await
+        .expect("re-register");
+    assert!(second.status().running);
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn stop_sync_removes_the_job() {
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    runtime
+        .register_sync_job(sync_profile("photos", 1))
+        .await
+        .expect("register");
+    assert!(runtime.get_sync_status("photos").await.is_ok());
+    runtime.stop_sync("photos").await.expect("stop");
+    let error = runtime
+        .get_sync_status("photos")
+        .await
+        .expect_err("removed");
+    assert_eq!(error.code, PublicErrorCode::NotFound);
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn reserve_sync_watch_enforces_run_watch_mutual_exclusion() {
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    let profile = sync_profile("photos", 1);
+    let job = runtime.register_sync_job(profile).await.expect("register");
+
+    // A running job cannot be watched (review fix: decided under the lock).
+    let error = runtime
+        .reserve_sync_watch(&job)
+        .await
+        .expect_err("running job must refuse watch");
+    assert_eq!(error.code, PublicErrorCode::InvalidState);
+
+    // A finished job can reserve the watch slot; a second reservation is
+    // refused while the first is active.
+    job.set_status(|status| status.running = false);
+    runtime
+        .reserve_sync_watch(&job)
+        .await
+        .expect("reserve after run finished");
+    assert!(job.status().monitoring);
+    let error = runtime
+        .reserve_sync_watch(&job)
+        .await
+        .expect_err("already monitoring");
+    assert_eq!(error.code, PublicErrorCode::InvalidState);
+
+    // Releasing rolls the flag back so the slot can be reserved again.
+    runtime.release_sync_watch(&job).await;
+    assert!(!job.status().monitoring);
+    runtime
+        .reserve_sync_watch(&job)
+        .await
+        .expect("reserve after release");
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn remove_sync_job_if_current_preserves_replaced_job() {
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    let profile = sync_profile("photos", 1);
+    let first = runtime
+        .register_sync_job(profile.clone())
+        .await
+        .expect("register first");
+    // Simulate the finished job being replaced by a fresh registration
+    // while a stale stop_sync still holds the old Arc.
+    first.set_status(|status| status.running = false);
+    let second = runtime
+        .register_sync_job(profile)
+        .await
+        .expect("register replacement");
+    assert!(!Arc::ptr_eq(&first, &second));
+
+    // The stale stop must not delete the replacement...
+    assert!(!runtime.remove_sync_job_if_current("photos", &first).await);
+    assert!(runtime.get_sync_status("photos").await.is_ok());
+    // ...and stopping the current job does.
+    assert!(runtime.remove_sync_job_if_current("photos", &second).await);
+    let error = runtime
+        .get_sync_status("photos")
+        .await
+        .expect_err("removed");
+    assert_eq!(error.code, PublicErrorCode::NotFound);
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn watch_is_rejected_while_run_is_active() {
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    runtime
+        .register_sync_job(sync_profile("photos", 999))
+        .await
+        .expect("register");
+    let error = runtime
+        .start_sync_watch("photos")
+        .await
+        .expect_err("must fail");
+    assert_eq!(error.code, PublicErrorCode::InvalidState);
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn start_sync_watch_without_session_fails_closed() {
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    let job = runtime
+        .register_sync_job(sync_profile("photos", 999))
+        .await
+        .expect("register");
+    // Mark the job finished so the watch is not rejected for running.
+    job.set_status(|status| status.running = false);
+    let error = runtime
+        .start_sync_watch("photos")
+        .await
+        .expect_err("must fail");
+    assert_eq!(error.code, PublicErrorCode::SessionNotFound);
+    runtime.shutdown().await.expect("shutdown");
 }

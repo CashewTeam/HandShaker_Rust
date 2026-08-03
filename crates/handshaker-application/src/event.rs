@@ -151,3 +151,73 @@ impl EventHub {
         guard.as_ref().map(|tx| tx.receiver_count()).unwrap_or(0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dto::{FileEntryDto, RemoteFileChangeKind};
+
+    fn sample_file(path: &str) -> FileEntryDto {
+        FileEntryDto {
+            path: path.to_string(),
+            size: 7,
+            created_at_ms: Some(1000),
+            modified_at_ms: Some(2000),
+            is_directory: false,
+            checksum: Some("abc".to_string()),
+            is_trash: Some(false),
+            media_id: Some(42),
+        }
+    }
+
+    #[test]
+    fn remote_file_change_v1_payload_stays_byte_identical() {
+        // v1 contract: only `change_kind` + `paths` serialize when the
+        // optional metadata is absent (fixtures predating files/statuses
+        // must keep producing identical JSON).
+        let change = RemoteFileChangeDto {
+            change_kind: RemoteFileChangeKind::DirectoryChanged,
+            paths: vec!["/storage/emulated/0/DCIM".to_string()],
+            files: Vec::new(),
+            statuses: Vec::new(),
+        };
+        let value = serde_json::to_value(&change).expect("serialize");
+        assert_eq!(value["change_kind"], "directory_changed");
+        assert_eq!(value["paths"][0], "/storage/emulated/0/DCIM");
+        assert!(value.get("files").is_none(), "empty files must be skipped");
+        assert!(
+            value.get("statuses").is_none(),
+            "empty statuses must be skipped"
+        );
+    }
+
+    #[test]
+    fn remote_file_change_accepts_legacy_json_without_metadata() {
+        let value = serde_json::json!({
+            "change_kind": "file_changed",
+            "paths": ["/storage/emulated/0/a.txt"],
+        });
+        let change: RemoteFileChangeDto =
+            serde_json::from_value(value).expect("legacy payload decodes");
+        assert_eq!(change.change_kind, RemoteFileChangeKind::FileChanged);
+        assert_eq!(change.paths, vec!["/storage/emulated/0/a.txt"]);
+        assert!(change.files.is_empty(), "files default to empty");
+        assert!(change.statuses.is_empty(), "statuses default to empty");
+    }
+
+    #[test]
+    fn remote_file_change_round_trips_full_metadata() {
+        let change = RemoteFileChangeDto {
+            change_kind: RemoteFileChangeKind::FileChanged,
+            paths: vec!["/storage/emulated/0/a.txt".to_string()],
+            files: vec![sample_file("/storage/emulated/0/a.txt")],
+            statuses: vec!["modified".to_string()],
+        };
+        let value = serde_json::to_value(&change).expect("serialize");
+        assert_eq!(value["files"][0]["path"], "/storage/emulated/0/a.txt");
+        assert_eq!(value["files"][0]["size"], 7);
+        assert_eq!(value["statuses"][0], "modified");
+        let back: RemoteFileChangeDto = serde_json::from_value(value).expect("round trip decodes");
+        assert_eq!(back, change);
+    }
+}

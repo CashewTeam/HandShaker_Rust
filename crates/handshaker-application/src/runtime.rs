@@ -11,8 +11,8 @@ use tokio::sync::Mutex;
 
 use handshaker_core::{
     BatchTransferOptions, ClientEvent, ClientOptions, ConnectionTarget, DeviceInfo, ErrorCode,
-    EventCallbacks, EventFilter, EventStreamError, EventSubscription, HandShakerClient, MediaItem,
-    MediaKind, MediaLibraryChange, RemoteFile,
+    EventCallbacks, EventFilter, EventKind, EventStreamError, EventSubscription, FileChange,
+    FileChangeStatus, HandShakerClient, MediaItem, MediaKind, MediaLibraryChange, RemoteFile,
 };
 
 use crate::discovery::{
@@ -37,6 +37,10 @@ use crate::media::{
     AudioAlbumDto, AudioLibraryDto, ExifDataDto, ImageFileDto, PhotoLibraryDto, ThumbnailsDto,
     VideoFileDto, VideoLibraryDto, dto_to_audio_album, dto_to_image_file, dto_to_video_file,
 };
+use crate::sync::{
+    SyncJob, SyncPlanDto, SyncProfileDto, SyncRunResultDto, SyncStatusDto, one_entry_diff,
+    snapshot_to_remote_files, sync_plan_to_dto, sync_run_result_to_dto,
+};
 use crate::transfer::{
     BatchTransferItemDto, BatchTransferRequest, BatchTransferResultDto, DownloadRequest,
     TransferDirectionDto, TransferFailureDto, TransferId, TransferRegistry, TransferSnapshot,
@@ -60,6 +64,16 @@ fn now_ms() -> u64 {
 /// deterministic close (M8.1 Phase B / B2). A fixed constant on purpose:
 /// adding a config knob would require real configuration plumbing.
 const SESSION_CLOSE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Bounded wait for sync run/watch tasks during stop and shutdown (Phase D /
+/// D6). Core `execute_plan` has no cooperative cancellation mid-download, so
+/// a deadline plus abort is the only guarantee; fixed on purpose, mirroring
+/// `SESSION_CLOSE_DEADLINE`.
+const SYNC_STOP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Watch debounce window (Phase D / D6): a debounced batch of file-change
+/// events is applied at most once per window after the last event.
+const SYNC_WATCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// One open session: the core client (shared with transfer tasks) plus its
 /// stable descriptors. Kept behind an `Arc` so short registry critical
@@ -136,6 +150,21 @@ struct RuntimeInner {
     shutting_down: AtomicBool,
     event_hub: EventHub,
     transfers: Arc<TransferRegistry>,
+    /// Photo-sync jobs keyed by profile id (Phase D / D6). Jobs are created
+    /// by `start_sync`/`register_sync_job`, queried by `get_sync_status`,
+    /// and removed by `stop_sync` / shutdown.
+    sync_jobs: Mutex<HashMap<String, Arc<SyncJob>>>,
+}
+
+/// Everything the plan mapping and the executor need, in core types. Never
+/// crosses the application boundary (Phase D / D6).
+struct SyncPipeline {
+    client: Arc<HandShakerClient>,
+    config: handshaker_core::SyncConfig,
+    snapshot: handshaker_core::SyncSnapshot,
+    phone_files: Vec<RemoteFile>,
+    diff: handshaker_core::SyncDiff,
+    conflicts: Vec<String>,
 }
 
 /// The application service root. `create` is async by contract; callers
@@ -172,6 +201,7 @@ impl HandShakerRuntime {
                 sessions: Mutex::new(HashMap::new()),
                 next_session_id: AtomicU64::new(1),
                 shutting_down: AtomicBool::new(false),
+                sync_jobs: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -207,6 +237,33 @@ impl HandShakerRuntime {
         {
             let _ = self.inner.transfers.cancel(id);
         }
+        // Cancel all sync jobs (run + watch) so their tasks release session
+        // clients too (Phase D / D6). Bounded joins; a task that ignores
+        // cancellation is aborted, mirroring the transfer handling above.
+        let sync_jobs: Vec<Arc<SyncJob>> = {
+            let guard = self.inner.sync_jobs.lock().await;
+            guard.values().cloned().collect()
+        };
+        let mut sync_joins = Vec::new();
+        for job in sync_jobs {
+            job.cancel.cancel();
+            if let Some(task) = job.task.lock().await.take() {
+                sync_joins.push(task);
+            }
+            if let Some(task) = job.watch_task.lock().await.take() {
+                sync_joins.push(task);
+            }
+        }
+        for mut join in sync_joins {
+            if tokio::time::timeout(SYNC_STOP_DEADLINE, &mut join)
+                .await
+                .is_err()
+            {
+                join.abort();
+                let _ = join.await;
+            }
+        }
+        self.inner.sync_jobs.lock().await.clear();
         // Deterministically close every session in parallel (bounded joins
         // inside close_session prove the tasks finished).
         let sessions = std::mem::take(&mut *self.inner.sessions.lock().await);
@@ -1572,6 +1629,617 @@ impl HandShakerRuntime {
     fn event_hub(&self) -> EventHub {
         self.inner.event_hub.clone()
     }
+
+    // ---- Phase D / D6: photo-sync service ----
+
+    /// Sync ledger store rooted at the runtime's configured `state_dir`
+    /// (Phase D / D6). `SyncStore::discover` joins "sync" itself and
+    /// sanitizes the device_uuid, so the ledger lands at
+    /// `<state_dir>/sync/<device_uuid>.json` — the same layout the CLI used
+    /// with the core default config dir, so existing ledgers keep working.
+    /// `pub(crate)` only so tests can assert the resolved path.
+    pub(crate) fn sync_store_for(
+        &self,
+        profile: &SyncProfileDto,
+    ) -> AppResult<handshaker_core::SyncStore> {
+        let config_dir = match &self.inner.config.state_dir {
+            Some(dir) => dir.clone(),
+            None => handshaker_core::default_config_dir()
+                .map_err(|error| from_core_error(error, "sync.store"))?,
+        };
+        Ok(handshaker_core::SyncStore::discover(
+            &config_dir,
+            &profile.device_uuid,
+        ))
+    }
+
+    /// Short critical section: clone the job Arc, then drop the registry
+    /// lock before any await on the job's task handles.
+    async fn sync_job_for(&self, profile_id: &str) -> Option<Arc<SyncJob>> {
+        let guard = self.inner.sync_jobs.lock().await;
+        guard.get(profile_id).cloned()
+    }
+
+    fn sync_job_not_found(operation: &'static str) -> PublicError {
+        PublicError::new(PublicErrorCode::NotFound, "sync job not found").operation(operation)
+    }
+
+    /// Shared core pipeline for plan and run: resolve the session, load the
+    /// ledger, ask the phone for its current state (PHOTO_SYNC_REQUEST), then
+    /// diff against the ledger and check local conflicts. Phone files outside
+    /// the configured root are dropped (the phone answers with its whole
+    /// library; `Path::strip_prefix` is segment-wise, so a sibling like
+    /// DCIM/Camera2 never matches phone_root DCIM/Camera).
+    async fn sync_pipeline(&self, profile: &SyncProfileDto) -> AppResult<SyncPipeline> {
+        let session = self.session_handle(profile.session_id).await?;
+        let store = self.sync_store_for(profile)?;
+        let snapshot = store
+            .load()
+            .map_err(|error| from_core_error(error, "sync.plan"))?
+            .unwrap_or_default();
+        let state = self
+            .state_store()?
+            .load_or_create()
+            .map_err(|error| from_core_error(error, "sync.plan"))?;
+        let host_uuid = state.host_uuid.to_string();
+        let config = handshaker_core::sync_config(
+            &profile.device_uuid,
+            &profile.remote_root,
+            &profile.local_root,
+            &host_uuid,
+        );
+        let pc_id = handshaker_core::pc_id_from_host_uuid(&host_uuid);
+        let phone = session
+            .client
+            .photo_sync(&pc_id, &snapshot_to_remote_files(&snapshot))
+            .await;
+        session.record_activity();
+        let phone = phone.map_err(|error| from_core_error(error, "sync.plan"))?;
+        if phone.is_success == Some(false) {
+            return Err(PublicError::new(
+                PublicErrorCode::SyncError,
+                "phone rejected photo sync request",
+            )
+            .operation("sync.plan"));
+        }
+        let phone_files: Vec<RemoteFile> = phone
+            .files
+            .into_iter()
+            .filter(|file| {
+                std::path::Path::new(&file.path)
+                    .strip_prefix(std::path::Path::new(&profile.remote_root))
+                    .is_ok()
+            })
+            .collect();
+        let diff = handshaker_core::plan_diff(&phone_files, &snapshot);
+        let conflicts = handshaker_core::check_conflicts(&diff, &snapshot);
+        Ok(SyncPipeline {
+            client: session.client.clone(),
+            config,
+            snapshot,
+            phone_files,
+            diff,
+            conflicts,
+        })
+    }
+
+    /// Preview one sync run: diff the phone state against the ledger and map
+    /// the plan onto the public DTO. No files are touched.
+    pub async fn plan_sync(&self, profile: SyncProfileDto) -> AppResult<SyncPlanDto> {
+        self.ensure_open()?;
+        if !profile.enabled {
+            return Err(PublicError::new(
+                PublicErrorCode::InvalidState,
+                "sync profile is disabled",
+            )
+            .operation("sync.plan"));
+        }
+        let pipeline = self.sync_pipeline(&profile).await?;
+        sync_plan_to_dto(
+            &profile.id,
+            &pipeline.config,
+            &pipeline.diff,
+            &pipeline.conflicts,
+            &pipeline.phone_files,
+            &pipeline.snapshot,
+        )
+    }
+
+    /// Register a fresh job for a profile under the sync_jobs lock. A job
+    /// whose run is still live is refused with `InvalidState` (the caller
+    /// must `stop_sync` first); a finished job is replaced with a clean
+    /// cancellation token and status. Marking `running` inside the critical
+    /// section closes the race between two concurrent `start_sync` calls for
+    /// the same profile. No await while the registry lock is held.
+    pub(crate) async fn register_sync_job(
+        &self,
+        profile: SyncProfileDto,
+    ) -> AppResult<Arc<SyncJob>> {
+        let mut guard = self.inner.sync_jobs.lock().await;
+        if let Some(existing) = guard.get(&profile.id) {
+            let status = existing.status();
+            if status.running {
+                return Err(PublicError::new(
+                    PublicErrorCode::InvalidState,
+                    "sync job already running for this profile",
+                )
+                .operation("sync.start"));
+            }
+            if status.monitoring {
+                return Err(PublicError::new(
+                    PublicErrorCode::InvalidState,
+                    "sync watch is active for this profile; stop it before running",
+                )
+                .operation("sync.start"));
+            }
+        }
+        let job = Arc::new(SyncJob::new(profile));
+        job.set_status(|status| status.running = true);
+        guard.insert(job.profile.id.clone(), job.clone());
+        Ok(job)
+    }
+
+    /// Start a full sync run for a profile and return its job id (the
+    /// profile id). The plan must be executable; a plan with unresolved
+    /// conflicts is refused with `InvalidState` — the caller resolves them
+    /// (e.g. by backing up the local files) and re-plans. The ledger is
+    /// committed atomically after a completed run; per-file failures are
+    /// aggregated by `execute_plan` and the ledger still commits (failed
+    /// entries keep their old records, `SyncRunResult.failures` reports
+    /// them), while a transport-level failure leaves the old ledger
+    /// untouched and reports through [`Self::get_sync_status`].
+    pub async fn start_sync(&self, profile: SyncProfileDto) -> AppResult<String> {
+        self.ensure_open()?;
+        let plan = self.plan_sync(profile.clone()).await?;
+        if !plan.executable {
+            return Err(PublicError::new(
+                PublicErrorCode::InvalidState,
+                "sync plan contains unresolved conflicts",
+            )
+            .operation("sync.start"));
+        }
+        let job = self.register_sync_job(profile).await?;
+        let this = self.clone();
+        let task_job = job.clone();
+        let task = tokio::spawn(async move {
+            this.run_sync_job(task_job).await;
+        });
+        *job.task.lock().await = Some(task);
+        Ok(job.profile.id.clone())
+    }
+
+    /// Execute one full sync run to completion (spawned by `start_sync`).
+    /// The ledger is committed atomically only after a fully successful run;
+    /// a failed run leaves the old ledger untouched (re-run is idempotent).
+    async fn run_sync_job(&self, job: Arc<SyncJob>) {
+        let outcome = self.run_sync_once(&job).await;
+        match outcome {
+            Ok(Some((result, updated))) => {
+                let commit = self.sync_store_for(&job.profile).and_then(|store| {
+                    store
+                        .save(&updated)
+                        .map_err(|error| from_core_error(error, "sync.run.commit"))
+                });
+                match commit {
+                    Ok(()) => {
+                        job.set_last_result(sync_run_result_to_dto(result));
+                        job.set_status(|status| {
+                            status.running = false;
+                            status.last_run_at_ms = Some(now_ms());
+                            status.last_error = None;
+                        });
+                    }
+                    Err(error) => {
+                        job.set_status(|status| {
+                            status.running = false;
+                            status.last_error = Some(error);
+                        });
+                    }
+                }
+            }
+            Ok(None) => {
+                // Cancelled before any work started: not an error.
+                job.set_status(|status| status.running = false);
+            }
+            Err(error) => {
+                job.set_status(|status| {
+                    status.running = false;
+                    status.last_error = Some(error);
+                });
+            }
+        }
+        // The run task is done: clear the slot so the profile can start
+        // again (the job itself stays registered for status queries).
+        *job.task.lock().await = None;
+    }
+
+    /// The full core pipeline for one run: session + ledger + photo_sync +
+    /// diff + conflict check, then `execute_plan` (which skips conflicted
+    /// entries). `Ok(None)` means the run was cancelled before any network
+    /// work. `execute_plan` cannot be interrupted mid-download; `stop_sync`
+    /// aborts the task after a bounded wait instead.
+    async fn run_sync_once(
+        &self,
+        job: &SyncJob,
+    ) -> AppResult<
+        Option<(
+            handshaker_core::SyncRunResult,
+            handshaker_core::SyncSnapshot,
+        )>,
+    > {
+        if job.cancel.is_cancelled() {
+            return Ok(None);
+        }
+        let pipeline = self.sync_pipeline(&job.profile).await?;
+        if job.cancel.is_cancelled() {
+            return Ok(None);
+        }
+        let (result, updated) = handshaker_core::execute_plan(
+            &pipeline.client,
+            &pipeline.config,
+            &pipeline.phone_files,
+            &pipeline.diff,
+            &pipeline.snapshot,
+            &pipeline.conflicts,
+        )
+        .await
+        .map_err(|error| from_core_error(error, "sync.run"))?;
+        Ok(Some((result, updated)))
+    }
+
+    /// Live status of a registered sync job.
+    pub async fn get_sync_status(&self, profile_id: &str) -> AppResult<SyncStatusDto> {
+        self.ensure_open()?;
+        let job = self
+            .sync_job_for(profile_id)
+            .await
+            .ok_or_else(|| Self::sync_job_not_found("sync.status"))?;
+        Ok(job.status())
+    }
+
+    /// Result of the most recent completed run (or watch batch); `None` for
+    /// a job that never ran. Field names match the CLI `sync run` JSON
+    /// contract.
+    pub async fn last_sync_result(&self, profile_id: &str) -> AppResult<Option<SyncRunResultDto>> {
+        self.ensure_open()?;
+        let job = self
+            .sync_job_for(profile_id)
+            .await
+            .ok_or_else(|| Self::sync_job_not_found("sync.result"))?;
+        Ok(job.last_result())
+    }
+
+    /// Cancel a running sync run and drop the job. Also stops an active
+    /// watch on the same profile so nothing keeps running after the job is
+    /// gone. Per profile the second call reports `NotFound`.
+    pub async fn stop_sync(&self, profile_id: &str) -> AppResult<()> {
+        self.ensure_open()?;
+        let job = self
+            .sync_job_for(profile_id)
+            .await
+            .ok_or_else(|| Self::sync_job_not_found("sync.stop"))?;
+        job.cancel.cancel();
+        // Bounded join: core `execute_plan` has no cooperative cancellation,
+        // so a run that ignores the token is aborted after the deadline
+        // (same pattern as `close_session` — a deadline is not proof of
+        // completion; abort + await is).
+        let task = job.task.lock().await.take();
+        if let Some(mut task) = task
+            && tokio::time::timeout(SYNC_STOP_DEADLINE, &mut task)
+                .await
+                .is_err()
+        {
+            // A deadline is not proof of completion; abort + await so no
+            // sync task can outlive stop_sync (same pattern as close_session).
+            task.abort();
+            let _ = task.await;
+        }
+        // Defensive: a watch can only be active here if it was started after
+        // this run job was registered and never stopped; never leave a task
+        // running against a job that is about to be removed from the map.
+        let watch_task = job.watch_task.lock().await.take();
+        if let Some(task) = watch_task {
+            task.abort();
+            let _ = task.await;
+        }
+        // Only remove when the map still holds exactly this job: a
+        // concurrent re-registration during the bounded join must survive.
+        self.remove_sync_job_if_current(profile_id, &job).await;
+        Ok(())
+    }
+
+    /// Remove a job from the registry only when the map still holds exactly
+    /// this job (review fix): a `stop_sync` whose bounded join overlapped a
+    /// concurrent `start_sync` re-registration must not delete the fresh job.
+    pub(crate) async fn remove_sync_job_if_current(
+        &self,
+        profile_id: &str,
+        job: &Arc<SyncJob>,
+    ) -> bool {
+        let mut guard = self.inner.sync_jobs.lock().await;
+        match guard.get(profile_id) {
+            Some(current) if Arc::ptr_eq(current, job) => {
+                guard.remove(profile_id);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Reserve the watch slot for a job inside the registry critical
+    /// section: the run/watch mutual exclusion and the `monitoring` flag
+    /// flip must be atomic with respect to `register_sync_job` (review fix:
+    /// the previous check-then-await-then-flag had a TOCTOU window).
+    pub(crate) async fn reserve_sync_watch(&self, job: &Arc<SyncJob>) -> AppResult<()> {
+        let guard = self.inner.sync_jobs.lock().await;
+        match guard.get(&job.profile.id) {
+            Some(current) if !Arc::ptr_eq(current, job) => {
+                return Err(PublicError::new(
+                    PublicErrorCode::InvalidState,
+                    "sync job was replaced; retry",
+                )
+                .operation("sync.watch.start"));
+            }
+            None => return Err(Self::sync_job_not_found("sync.watch.start")),
+            _ => {}
+        }
+        let status = job.status();
+        if status.running {
+            return Err(PublicError::new(
+                PublicErrorCode::InvalidState,
+                "sync job is running; stop it before watching",
+            )
+            .operation("sync.watch.start"));
+        }
+        if status.monitoring {
+            return Err(PublicError::new(
+                PublicErrorCode::InvalidState,
+                "sync watch already active for this profile",
+            )
+            .operation("sync.watch.start"));
+        }
+        job.set_status(|status| status.monitoring = true);
+        Ok(())
+    }
+
+    /// Roll the watch reservation back after a failed activation.
+    pub(crate) async fn release_sync_watch(&self, job: &Arc<SyncJob>) {
+        let guard = self.inner.sync_jobs.lock().await;
+        if guard
+            .get(&job.profile.id)
+            .is_some_and(|current| Arc::ptr_eq(current, job))
+        {
+            job.set_status(|status| status.monitoring = false);
+        }
+    }
+
+    /// Start watching a profile for phone file changes and apply them
+    /// incrementally. Requires a registered job (created by `start_sync`) —
+    /// the job carries the profile configuration and the live status.
+    /// Rejected with `InvalidState` while a run is in progress or a watch is
+    /// already active for this profile.
+    pub async fn start_sync_watch(&self, profile_id: &str) -> AppResult<()> {
+        self.ensure_open()?;
+        let job = self
+            .sync_job_for(profile_id)
+            .await
+            .ok_or_else(|| Self::sync_job_not_found("sync.watch.start"))?;
+        if !job.profile.enabled {
+            return Err(PublicError::new(
+                PublicErrorCode::InvalidState,
+                "sync profile is disabled",
+            )
+            .operation("sync.watch.start"));
+        }
+        // Check + flag flip happen inside the registry lock (TOCTOU fix).
+        self.reserve_sync_watch(&job).await?;
+        let session = self.session_handle(job.profile.session_id).await?;
+        let client = session.client.clone();
+        let accepted = match client.sync_monitor(true).await {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                self.release_sync_watch(&job).await;
+                return Err(from_core_error(error, "sync.watch.start"));
+            }
+        };
+        if !accepted {
+            self.release_sync_watch(&job).await;
+            return Err(PublicError::new(
+                PublicErrorCode::SyncError,
+                "phone rejected sync monitor request",
+            )
+            .operation("sync.watch.start"));
+        }
+        session.record_activity();
+        let subscription = client.subscribe_events(EventFilter::only([EventKind::FileChanged]));
+        let this = self.clone();
+        let watch_job = job.clone();
+        let watch_task = tokio::spawn(async move {
+            this.run_sync_watch(watch_job, subscription).await;
+        });
+        *job.watch_task.lock().await = Some(watch_task);
+        Ok(())
+    }
+
+    /// Stop an active watch: cancel the watch task, disable the phone-side
+    /// monitor (when the session is still usable), and clear the monitoring
+    /// flag. The job stays registered so the profile can be watched again
+    /// or run again. The event-stream `Closed` observed by the watch task is
+    /// not an error, but a `sync_monitor(false)` failure on a live session
+    /// is returned as an error (it leaves the phone-side monitor on).
+    pub async fn stop_sync_watch(&self, profile_id: &str) -> AppResult<()> {
+        self.ensure_open()?;
+        let job = self
+            .sync_job_for(profile_id)
+            .await
+            .ok_or_else(|| Self::sync_job_not_found("sync.watch.stop"))?;
+        let watch_task = job.watch_task.lock().await.take();
+        if let Some(task) = watch_task {
+            // The watch task blocks on the event stream with no cooperative
+            // cancellation point; abort it and await the cancellation.
+            task.abort();
+            let _ = task.await;
+        }
+        job.set_status(|status| status.monitoring = false);
+        // Turn the phone-side monitor off when the session is still usable;
+        // a session that already died is not an error here (the watch task
+        // already observed the closed event stream).
+        if let Ok(session) = self.session_handle(job.profile.session_id).await {
+            session
+                .client
+                .sync_monitor(false)
+                .await
+                .map_err(|error| from_core_error(error, "sync.watch.stop"))?;
+            session.record_activity();
+        }
+        Ok(())
+    }
+
+    /// Surface a lagged file-change event: the missed changes are not
+    /// applied, so the incremental ledger would silently diverge — record it
+    /// in the job status and publish a warning telling the user to run a
+    /// full sync to reconcile (review fix: never swallow the gap).
+    async fn report_sync_watch_lag(&self, job: &Arc<SyncJob>, missed: u64) {
+        let error = PublicError::new(
+            PublicErrorCode::SyncError,
+            format!("sync watch lagged; missed {missed} file-change event(s) — run a full sync to reconcile"),
+        )
+        .operation("sync.watch");
+        job.set_status(|status| status.last_error = Some(error.clone()));
+        self.inner.event_hub.publish(BackendEvent::Warning(error));
+    }
+
+    /// Watch loop: wait for a file-change event, keep collecting during the
+    /// debounce window, apply the batch incrementally, repeat. Exits when
+    /// the session's event stream closes (monitoring=false,
+    /// last_error=ConnectionLost) or the task is aborted.
+    async fn run_sync_watch(&self, job: Arc<SyncJob>, mut subscription: EventSubscription) {
+        'watch: loop {
+            // Wait for the first event of a batch.
+            let mut batch: Vec<FileChange> = Vec::new();
+            loop {
+                match subscription.recv().await {
+                    Ok(ClientEvent::FileChanged(changes)) => {
+                        batch.extend(changes);
+                        break;
+                    }
+                    Ok(_) => continue,
+                    Err(EventStreamError::Lagged { missed }) => {
+                        // Review fix: lagged events are never applied; the
+                        // incremental ledger would silently diverge. Surface
+                        // it and ask for a full sync instead of hiding it.
+                        self.report_sync_watch_lag(&job, missed).await;
+                    }
+                    Err(EventStreamError::Closed) => break 'watch,
+                }
+            }
+            // Debounce: keep collecting for one window after the last event.
+            loop {
+                match tokio::time::timeout(SYNC_WATCH_DEBOUNCE, subscription.recv()).await {
+                    Ok(Ok(ClientEvent::FileChanged(changes))) => batch.extend(changes),
+                    Ok(Err(EventStreamError::Lagged { missed })) => {
+                        self.report_sync_watch_lag(&job, missed).await;
+                    }
+                    Ok(Err(EventStreamError::Closed)) => break 'watch,
+                    Ok(Ok(_)) => {}
+                    Err(_elapsed) => break,
+                }
+            }
+            match self.apply_watch_batch(&job.profile, &batch).await {
+                Ok(result) => {
+                    job.set_last_result(result);
+                    job.set_status(|status| {
+                        status.last_run_at_ms = Some(now_ms());
+                        status.last_error = None;
+                    });
+                }
+                Err(error) => {
+                    job.set_status(|status| status.last_error = Some(error));
+                }
+            }
+        }
+        // The session's event stream closed: connection lost, watch over.
+        job.set_status(|status| {
+            status.monitoring = false;
+            status.last_error = Some(
+                PublicError::new(
+                    PublicErrorCode::ConnectionLost,
+                    "sync watch stopped: session event stream closed",
+                )
+                .operation("sync.watch"),
+            );
+        });
+        *job.watch_task.lock().await = None;
+    }
+
+    /// Apply one debounced batch incrementally with the core
+    /// `apply_file_change` instead of a full re-plan. Rationale: the phone
+    /// rejects a second PHOTO_SYNC_REQUEST(37) while it is in the SYNCING
+    /// state (observed by the CLI), and the change events already carry full
+    /// file metadata — a re-plan would only re-fetch what the events contain.
+    /// Because `apply_file_change` has no conflict protection, every
+    /// download/delete is pre-checked with the core `check_conflicts` on a
+    /// one-entry diff, so a user-modified local file is preserved and
+    /// reported instead of being overwritten. The ledger is committed
+    /// atomically after the batch.
+    async fn apply_watch_batch(
+        &self,
+        profile: &SyncProfileDto,
+        changes: &[FileChange],
+    ) -> AppResult<SyncRunResultDto> {
+        let session = self.session_handle(profile.session_id).await?;
+        session.record_activity();
+        let store = self.sync_store_for(profile)?;
+        let mut snapshot = store
+            .load()
+            .map_err(|error| from_core_error(error, "sync.watch"))?
+            .unwrap_or_default();
+        let state = self
+            .state_store()?
+            .load_or_create()
+            .map_err(|error| from_core_error(error, "sync.watch"))?;
+        let host_uuid = state.host_uuid.to_string();
+        let config = handshaker_core::sync_config(
+            &profile.device_uuid,
+            &profile.remote_root,
+            &profile.local_root,
+            &host_uuid,
+        );
+        let mut run = handshaker_core::SyncRunResult::default();
+        let mut touched = false;
+        for change in changes {
+            let Some(file) = change.file.as_ref() else {
+                continue;
+            };
+            if file.is_directory {
+                continue;
+            }
+            // Conflict pre-check: skip downloads/deletes that would clobber
+            // a user-modified local file (core check_conflicts, one-entry
+            // diff — the algorithm is never copied here).
+            let guard = one_entry_diff(change);
+            if (!guard.added.is_empty() || !guard.deleted.is_empty())
+                && !handshaker_core::check_conflicts(&guard, &snapshot).is_empty()
+            {
+                run.conflicts.push(file.path.clone());
+                continue;
+            }
+            let result =
+                handshaker_core::apply_file_change(&session.client, &config, change, &mut snapshot)
+                    .await
+                    .map_err(|error| from_core_error(error, "sync.watch"))?;
+            touched = true;
+            run.downloaded.extend(result.downloaded);
+            run.deleted.extend(result.deleted);
+            run.failures.extend(result.failures);
+        }
+        if touched {
+            store
+                .save(&snapshot)
+                .map_err(|error| from_core_error(error, "sync.watch"))?;
+        }
+        Ok(sync_run_result_to_dto(run))
+    }
 }
 
 /// Does this transfer error imply the underlying core session is dead?
@@ -1687,6 +2355,22 @@ async fn run_event_bridge(
     }
 }
 
+/// Stable snake_case token for a core `FileChangeStatus` (mirrors the core
+/// serde token, so watch/sync consumers can match on it without touching
+/// core types).
+fn file_change_status_token(status: FileChangeStatus) -> String {
+    match status {
+        FileChangeStatus::None => "none",
+        FileChangeStatus::Added => "added",
+        FileChangeStatus::Deleted => "deleted",
+        FileChangeStatus::Modified => "modified",
+        FileChangeStatus::InfoModified => "info_modified",
+        FileChangeStatus::FileAndInfoModified => "file_and_info_modified",
+        FileChangeStatus::Unknown => "unknown",
+    }
+    .to_string()
+}
+
 /// Map one core `ClientEvent` to a stable backend event (M8.1 Phase C / C1).
 /// Device-info changes also refresh the session's cached DTO in place so
 /// `SessionSnapshot.device_info` stays current. Never leaks protobuf types
@@ -1730,9 +2414,15 @@ pub(crate) fn bridge_client_event(
             change: RemoteFileChangeDto {
                 change_kind: RemoteFileChangeKind::DirectoryChanged,
                 paths: events
-                    .into_iter()
-                    .filter_map(|event| event.file.map(|file| file.path))
+                    .iter()
+                    .filter_map(|event| event.file.as_ref().map(|file| file.path.clone()))
                     .collect(),
+                files: events
+                    .iter()
+                    .filter_map(|event| event.file.clone().map(remote_file_to_dto))
+                    .collect(),
+                // Directory-monitor events carry no per-path status.
+                statuses: Vec::new(),
             },
         },
         ClientEvent::FileChanged(changes) => BackendEvent::RemoteFileChanged {
@@ -1740,23 +2430,50 @@ pub(crate) fn bridge_client_event(
             change: RemoteFileChangeDto {
                 change_kind: RemoteFileChangeKind::FileChanged,
                 paths: changes
-                    .into_iter()
-                    .filter_map(|change| change.file.map(|file| file.path))
+                    .iter()
+                    .filter_map(|change| change.file.as_ref().map(|file| file.path.clone()))
+                    .collect(),
+                files: changes
+                    .iter()
+                    .filter_map(|change| change.file.clone().map(remote_file_to_dto))
+                    .collect(),
+                // Parallel to `paths`: one status token per changed file.
+                statuses: changes
+                    .iter()
+                    .filter_map(|change| {
+                        change
+                            .file
+                            .as_ref()
+                            .map(|_| file_change_status_token(change.status))
+                    })
                     .collect(),
             },
         },
-        ClientEvent::PhotoSyncChanged(change) => BackendEvent::RemoteFileChanged {
-            session_id,
-            change: RemoteFileChangeDto {
-                change_kind: RemoteFileChangeKind::PhotoSyncChanged,
-                paths: change.files.into_iter().map(|file| file.path).collect(),
-            },
-        },
+        ClientEvent::PhotoSyncChanged(change) => {
+            let files: Vec<FileEntryDto> = change
+                .files
+                .iter()
+                .cloned()
+                .map(remote_file_to_dto)
+                .collect();
+            let paths: Vec<String> = change.files.into_iter().map(|file| file.path).collect();
+            BackendEvent::RemoteFileChanged {
+                session_id,
+                change: RemoteFileChangeDto {
+                    change_kind: RemoteFileChangeKind::PhotoSyncChanged,
+                    paths,
+                    files,
+                    statuses: Vec::new(),
+                },
+            }
+        }
         ClientEvent::SyncMonitorChanged(_) => BackendEvent::RemoteFileChanged {
             session_id,
             change: RemoteFileChangeDto {
                 change_kind: RemoteFileChangeKind::SyncMonitorChanged,
                 paths: Vec::new(),
+                files: Vec::new(),
+                statuses: Vec::new(),
             },
         },
         ClientEvent::RequestCancelled(_) => BackendEvent::Warning(PublicError::new(

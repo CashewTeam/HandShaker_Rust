@@ -335,11 +335,25 @@ pub enum RemoteFileChangeKind {
     SyncMonitorChanged,
 }
 
-/// Summarized remote file change (paths only; full metadata can be added
-/// later without breaking the event schema). The category is `change_kind`
-/// (not `kind`) to keep the event JSON `kind` tag distinct from the payload.
+/// Summarized remote file change. `change_kind` + `paths` keep the v1
+/// contract byte-identical; `files` and `statuses` are optional v1.1
+/// additions for watch/sync incremental use — full metadata and the
+/// per-path `FileChangeStatus` snake_case string when the phone supplied
+/// them. Both default to empty and are skipped when empty, so legacy JSON
+/// without the new keys decodes and serializes unchanged. The category is
+/// `change_kind` (not `kind`) to keep the event JSON `kind` tag distinct
+/// from the payload.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RemoteFileChangeDto {
     pub change_kind: RemoteFileChangeKind,
     pub paths: Vec<String>,
+    /// Full metadata for each changed path, parallel to `paths` when the
+    /// phone supplied it (empty when only paths are known).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<FileEntryDto>,
+    /// Per-path `FileChangeStatus` snake_case strings (e.g. "added",
+    /// "deleted", "modified"), parallel to `paths`; empty when unknown
+    /// (directory-monitor events carry no status).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub statuses: Vec<String>,
 }
