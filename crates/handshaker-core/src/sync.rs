@@ -89,10 +89,11 @@ pub fn check_conflicts(diff: &SyncDiff, snapshot: &SyncSnapshot) -> Vec<String> 
         if !local.exists() {
             continue;
         }
-        if let Some(actual) = sha256_file(&local).ok() {
-            if actual != expected && seen.insert(path.clone(), ()).is_none() {
-                conflicts.push(path.clone());
-            }
+        if let Ok(actual) = sha256_file(&local)
+            && actual != expected
+            && seen.insert(path.clone(), ()).is_none()
+        {
+            conflicts.push(path.clone());
         }
     }
     conflicts

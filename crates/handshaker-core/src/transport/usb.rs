@@ -249,23 +249,22 @@ fn wait_for_accessory(location: &str) -> Result<rusb::Device<rusb::GlobalContext
     while std::time::Instant::now() < deadline {
         if let Ok(devices) = rusb::devices() {
             for device in devices.iter() {
-                if let Ok(descriptor) = device.device_descriptor() {
-                    if descriptor.vendor_id() == ACCESSORY_VID
-                        && ACCESSORY_PIDS.contains(&descriptor.product_id())
-                    {
-                        let ports = device.port_numbers().unwrap_or_default();
-                        let candidate = format!(
-                            "{}-{}",
-                            device.bus_number(),
-                            ports
-                                .iter()
-                                .map(u8::to_string)
-                                .collect::<Vec<_>>()
-                                .join("-")
-                        );
-                        if candidate == location {
-                            return Ok(device);
-                        }
+                if let Ok(descriptor) = device.device_descriptor()
+                    && descriptor.vendor_id() == ACCESSORY_VID
+                    && ACCESSORY_PIDS.contains(&descriptor.product_id())
+                {
+                    let ports = device.port_numbers().unwrap_or_default();
+                    let candidate = format!(
+                        "{}-{}",
+                        device.bus_number(),
+                        ports
+                            .iter()
+                            .map(u8::to_string)
+                            .collect::<Vec<_>>()
+                            .join("-")
+                    );
+                    if candidate == location {
+                        return Ok(device);
                     }
                 }
             }
@@ -470,10 +469,7 @@ impl UsbStream {
                         continue;
                     }
                     Err(error) => {
-                        let _ = tx.try_send(Err(io::Error::new(
-                            io::ErrorKind::Other,
-                            usb_error(error).to_string(),
-                        )));
+                        let _ = tx.try_send(Err(io::Error::other(usb_error(error).to_string())));
                         break;
                     }
                 }
@@ -577,10 +573,7 @@ impl AsyncWrite for UsbStream {
             }
             Poll::Ready(Err(_)) => {
                 self.write_pending = None;
-                Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "usb write task dropped",
-                )))
+                Poll::Ready(Err(io::Error::other("usb write task dropped")))
             }
             Poll::Pending => Poll::Pending,
         }
@@ -601,10 +594,7 @@ impl AsyncWrite for UsbStream {
                 }
                 Poll::Ready(Err(_)) => {
                     self.write_pending = None;
-                    Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        "usb write task dropped",
-                    )))
+                    Poll::Ready(Err(io::Error::other("usb write task dropped")))
                 }
                 Poll::Pending => Poll::Pending,
             }
@@ -619,7 +609,7 @@ impl AsyncWrite for UsbStream {
 }
 
 fn transport_io_error(error: rusb::Error) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, usb_error(error).to_string())
+    io::Error::other(usb_error(error).to_string())
 }
 
 #[cfg(test)]
@@ -647,7 +637,7 @@ mod tests {
         let location = format!(
             "{}-{}",
             1_u8,
-            vec![2_u8, 3]
+            [2_u8, 3]
                 .iter()
                 .map(u8::to_string)
                 .collect::<Vec<_>>()

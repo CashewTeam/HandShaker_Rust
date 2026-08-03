@@ -378,14 +378,14 @@ impl HandShakerClient {
             }
         };
         // Persist the trust record after a successful WiFi TRUST_ALWAYS.
-        if let Some(info) = &session.handshake_info {
-            if let Some(derived_key) = &info.derived_key {
-                state_store.upsert_trust(
-                    &info.device_uuid,
-                    info.device_name.as_deref(),
-                    derived_key,
-                )?;
-            }
+        if let Some(info) = &session.handshake_info
+            && let Some(derived_key) = &info.derived_key
+        {
+            state_store.upsert_trust(
+                &info.device_uuid,
+                info.device_name.as_deref(),
+                derived_key,
+            )?;
         }
         let mut client = Self {
             session: Some(session),
@@ -2522,8 +2522,8 @@ mod tests {
         );
         assert_eq!(image.width, Some(640));
         assert_eq!(image.orientation, Some(1));
-        assert_eq!(image.starred, true);
-        assert_eq!(image.thumbnail_error, false);
+        assert!(image.starred);
+        assert!(!image.thumbnail_error);
         assert_eq!(photo.albums[0].name.as_deref(), Some("Camera"));
         assert_eq!(photo.camera_album_id, Some(100));
 
@@ -2573,13 +2573,13 @@ mod tests {
             Some(&[0xFF, 0xD8, 0xFF, 0xE0][..]),
             "first thumbnail carries JPEG bytes"
         );
-        assert_eq!(thumbnails.images[0].thumbnail_error, false);
+        assert!(!thumbnails.images[0].thumbnail_error);
         assert_eq!(
             thumbnails.images[1].thumbnail.as_ref().map(Vec::len),
             None,
             "failed entry omits thumbnail bytes"
         );
-        assert_eq!(thumbnails.images[1].thumbnail_error, true);
+        assert!(thumbnails.images[1].thumbnail_error);
         assert!(thumbnails.videos.is_empty());
         assert!(thumbnails.audio_albums.is_empty());
 

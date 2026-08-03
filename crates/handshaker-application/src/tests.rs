@@ -328,7 +328,7 @@ fn transfer_state_transitions_are_one_way() {
     use crate::transfer::{TransferDirectionDto, TransferRegistry, TransferState};
 
     let registry = TransferRegistry::new();
-    let snapshot = registry.into_snapshot_for(
+    let snapshot = registry.snapshot_for(
         SessionId(1),
         TransferDirectionDto::Download,
         "/remote/a.bin".into(),
@@ -363,7 +363,7 @@ fn cancel_transfer_is_idempotent_and_missing_is_stable() {
     use crate::transfer::{TransferDirectionDto, TransferRegistry, TransferState};
 
     let registry = TransferRegistry::new();
-    let snapshot = registry.into_snapshot_for(
+    let snapshot = registry.snapshot_for(
         SessionId(1),
         TransferDirectionDto::Download,
         "/r".into(),
@@ -380,8 +380,7 @@ fn cancel_transfer_is_idempotent_and_missing_is_stable() {
     );
     let missing = registry
         .cancel(crate::transfer::TransferId(999))
-        .err()
-        .expect("missing");
+        .expect_err("missing");
     assert_eq!(missing.code, PublicErrorCode::TransferNotFound);
 }
 

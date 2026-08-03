@@ -576,7 +576,7 @@ mod tests {
         assert_eq!(info.derived_key.as_deref(), Some(derived_key.as_slice()));
         assert!(info.trust_waiting);
         assert_eq!(info.trust_type, Some(SspHandShakeTrustType::TrustAlways));
-        let _ = server.await.expect("server task");
+        server.await.expect("server task");
         drop(stream);
     }
 
@@ -639,7 +639,7 @@ mod tests {
             .expect("handshake");
         let info = outcome.wifi.expect("wifi info");
         assert!(!info.trust_waiting);
-        let _ = server.await.expect("server task");
+        server.await.expect("server task");
         drop(stream);
     }
 
@@ -694,15 +694,14 @@ mod tests {
             .expect_err("must fail");
         assert!(matches!(error, Error::Handshake(_)), "{error:?}");
         assert!(
-            store
+            !store
                 .load_or_create()
                 .expect("state")
                 .trust
-                .get(DEVICE_UUID)
-                .is_none(),
+                .contains_key(DEVICE_UUID),
             "stale trust record must be cleared after a failed reconnect"
         );
-        let _ = server.await.expect("server task");
+        server.await.expect("server task");
         drop(stream);
     }
 
@@ -746,7 +745,7 @@ mod tests {
             .await
             .expect_err("a failed trust remove must not be reported as success");
         assert!(matches!(error, Error::Handshake(_)), "{error:?}");
-        let _ = server.await.expect("server task");
+        server.await.expect("server task");
         drop(stream);
     }
 
@@ -790,7 +789,7 @@ mod tests {
             .await
             .expect("handshake");
         assert!(outcome.wifi.is_some());
-        let _ = server.await.expect("server task");
+        server.await.expect("server task");
         drop(stream);
     }
 }

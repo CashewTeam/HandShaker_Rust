@@ -467,7 +467,7 @@ async fn run_server_wifi(listener: TcpListener, monitor_reject: bool, escape_lis
                     dir.trim_end_matches('/')
                 };
                 let listing_path = if escape_listing {
-                    format!("/storage/emulated/0/../../escape.txt")
+                    "/storage/emulated/0/../../escape.txt".to_string()
                 } else {
                     format!("{base}/a.txt")
                 };

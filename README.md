@@ -64,6 +64,10 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
   变为条目对象数组——兼容性变化见 `docs/m8-migration.md` §7.1);Phase 7 脚本
   `generate-ffi-header.sh`/`build-ffi-linux.sh` 与 `dist/apple/` 产物;
   shell/batch/watch/sync 评估保留 core(边界见 §7.2)。
+- **CI clippy 清零（0.7.3）**：`clippy --all-targets --all-features -D warnings`
+  全部告警修复（collapsible-if/match-result-ok/io-other-error/needless-borrow
+  等，行为不变）；`BackendEvent::SessionStateChanged` 装箱为
+  `Box<SessionSnapshot>`（serde JSON 输出不变，Application 事件 API 源码级调整）。
 - 剪贴板/目录监控之外的推送发送侧仍属于后续里程碑。
 
 ## 命令行教程

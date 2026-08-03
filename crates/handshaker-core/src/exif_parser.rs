@@ -74,7 +74,7 @@ fn display_string(field: &exif::Field) -> Option<String> {
 /// Convert an EXIF "YYYY:MM:DD HH:MM:SS" timestamp (interpreted as UTC, since
 /// EXIF carries no timezone) to Unix seconds.
 fn exif_datetime_to_unix(text: &str) -> Option<u64> {
-    let parts: Vec<&str> = text.split(|c| c == ':' || c == ' ').collect();
+    let parts: Vec<&str> = text.split([':', ' ']).collect();
     if parts.len() < 6 {
         return None;
     }

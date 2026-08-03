@@ -17,7 +17,7 @@ use crate::buffer::{HsByteBuffer, free_buffer, from_str};
 
 /// Unified result for all FFI calls.
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct HsCallResult {
     /// 0 = success; non-zero = failure (error JSON in `error`).
     pub status: i32,
@@ -25,16 +25,6 @@ pub struct HsCallResult {
     pub value: HsByteBuffer,
     /// Failure payload: `PublicError` JSON (empty on success).
     pub error: HsByteBuffer,
-}
-
-impl Default for HsCallResult {
-    fn default() -> Self {
-        Self {
-            status: 0,
-            value: HsByteBuffer::default(),
-            error: HsByteBuffer::default(),
-        }
-    }
 }
 
 pub fn ok<T: serde::Serialize>(value: &T) -> HsCallResult {

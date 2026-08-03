@@ -22,7 +22,7 @@ pub enum BackendEvent {
     DeviceAdded(DeviceDescriptor),
     DeviceUpdated(DeviceDescriptor),
     DeviceRemoved(DeviceId),
-    SessionStateChanged(SessionSnapshot),
+    SessionStateChanged(Box<SessionSnapshot>),
     TransferUpdated(TransferSnapshot),
     /// Reserved: clipboard changes (M8.9).
     #[allow(dead_code)]

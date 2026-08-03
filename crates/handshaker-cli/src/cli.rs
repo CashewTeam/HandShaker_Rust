@@ -789,7 +789,6 @@ async fn watch(cli: &Cli) -> Result<()> {
 }
 
 fn watch_envelope(info: &DeviceInfo, event: &ClientEvent) -> serde_json::Value {
-    let info = info;
     serde_json::json!({
         "schema_version": 1,
         "ok": true,
@@ -1087,7 +1086,7 @@ async fn device_list(timeout: Duration) -> Result<Outcome> {
 async fn device_discover(cli: &Cli) -> Result<Outcome> {
     let timeout = match &cli.command {
         Command::Device(DeviceCommand::Discover { timeout }) => {
-            parse_duration(timeout).map_err(|message| Error::Usage(message))?
+            parse_duration(timeout).map_err(Error::Usage)?
         }
         _ => unreachable!("device_discover only runs for Device::Discover"),
     };
@@ -1407,7 +1406,7 @@ async fn execute_connected(
             // the second argument names an existing local path, it is almost
             // certainly a missing `--`; refuse loudly instead of fetching the
             // local path from the device.
-            if pull_target_misparsed(&remote, local.as_ref(), &context.local_cwd) {
+            if pull_target_misparsed(remote, local.as_ref(), &context.local_cwd) {
                 return Err(Error::Usage(
                     localizer.format(MessageKey::PullNeedsSeparator, &[]),
                 ));
@@ -1419,7 +1418,7 @@ async fn execute_connected(
             let mut total_bytes = 0_u64;
             let mut seen_targets = std::collections::BTreeSet::new();
             for remote_path in remote {
-                let remote_path = resolve_remote(&context.remote_cwd, &remote_path);
+                let remote_path = resolve_remote(&context.remote_cwd, remote_path);
                 let info = client.stat(&remote_path).await?;
                 if info.as_ref().is_some_and(|file| file.is_directory) {
                     if !*recursive {
@@ -1498,14 +1497,14 @@ async fn execute_connected(
                     bytes,
                     dry_run: true,
                 };
-                return Ok(Outcome::new(
+                return Outcome::new(
                     "fs.pull",
                     &report,
                     localizer.format(
                         MessageKey::DryRunReport,
                         &[&files.to_string(), &dirs.to_string(), &bytes.to_string()],
                     ),
-                )?);
+                );
             }
             if existing_targets > 0 {
                 if !overwrite {
@@ -1560,7 +1559,7 @@ async fn execute_connected(
             overwrite,
             dry_run,
         }) => {
-            let remote = resolve_remote(&context.remote_cwd, &remote);
+            let remote = resolve_remote(&context.remote_cwd, remote);
             let single_file_mode = local.len() == 1 && !recursive && !remote.ends_with('/');
             let mut items: Vec<BatchTransferItemDto> = Vec::new();
             let mut trees: Vec<TreeTransferDto> = Vec::new();
@@ -1569,7 +1568,7 @@ async fn execute_connected(
             let mut total_bytes = 0_u64;
             let mut seen_targets = std::collections::BTreeSet::new();
             for local_path in local {
-                let local_path = resolve_local(&context.local_cwd, &local_path);
+                let local_path = resolve_local(&context.local_cwd, local_path);
                 let metadata = match tokio::fs::metadata(&local_path).await {
                     Ok(metadata) => metadata,
                     Err(error) => {
@@ -1646,14 +1645,14 @@ async fn execute_connected(
                     bytes,
                     dry_run: true,
                 };
-                return Ok(Outcome::new(
+                return Outcome::new(
                     "fs.push",
                     &report,
                     localizer.format(
                         MessageKey::DryRunReport,
                         &[&files.to_string(), &dirs.to_string(), &bytes.to_string()],
                     ),
-                )?);
+                );
             }
             if existing_targets > 0 {
                 if !overwrite {
@@ -1797,10 +1796,10 @@ async fn execute_connected(
             return Err(Error::Usage(i18n::text("sync.watch_nested").to_string()));
         }
         Command::Media(command) => {
-            return media_command(session, &context, command).await;
+            return media_command(session, context, command).await;
         }
         Command::Sync(command) => {
-            return sync_command(client, &context, command, format).await;
+            return sync_command(client, context, command, format).await;
         }
     };
     Ok(outcome.with_device(client.device_info()))
@@ -1836,7 +1835,7 @@ async fn sync_command(
                 "sync.status_line",
                 &[&files.to_string(), &bytes.to_string()],
             );
-            return Ok(Outcome::new("sync.status", data, human)?);
+            Outcome::new("sync.status", data, human)
         }
         SyncCommand::Plan { root, output_dir } => {
             let output_dir = required_output_dir(output_dir, context)?;
@@ -1852,7 +1851,7 @@ async fn sync_command(
                 "total": diff.added.len() + diff.info_modified.len() + diff.deleted.len(),
             });
             let human = plan_human(&diff, &conflicts);
-            return Ok(Outcome::new("sync.plan", data, human)?);
+            Outcome::new("sync.plan", data, human)
         }
         SyncCommand::Run {
             root,
@@ -1861,7 +1860,7 @@ async fn sync_command(
         } => {
             let output_dir = required_output_dir(output_dir, context)?;
             let config = sync_config_for(client, root.as_deref(), &output_dir)?;
-            confirm(&i18n::text("sync.confirm_run"), *run_yes, format)?;
+            confirm(i18n::text("sync.confirm_run"), *run_yes, format)?;
             let store = SyncStore::discover(&default_config_dir()?, &config.device_uuid);
             let snapshot = store.load()?.unwrap_or_default();
             // Single PHOTO_SYNC_REQUEST(37): fetch state and diff in one pass
@@ -1882,7 +1881,7 @@ async fn sync_command(
                 "conflicts": result.conflicts,
             });
             let human = run_human(&result);
-            return Ok(Outcome::new("sync.run", data, human)?);
+            Outcome::new("sync.run", data, human)
         }
         SyncCommand::Watch {
             root,
@@ -1891,7 +1890,7 @@ async fn sync_command(
         } => {
             let output_dir = required_output_dir(output_dir, context)?;
             let config = sync_config_for(client, root.as_deref(), &output_dir)?;
-            confirm(&i18n::text("sync.confirm_run"), *watch_yes, format)?;
+            confirm(i18n::text("sync.confirm_run"), *watch_yes, format)?;
             let store = SyncStore::discover(&default_config_dir()?, &config.device_uuid);
             let snapshot = store.load()?.unwrap_or_default();
             // Single PHOTO_SYNC_REQUEST(37) (a second one would be rejected
@@ -2666,8 +2665,8 @@ async fn run_batch(cli: &Cli) -> Result<()> {
     let mut failed = 0u32;
     let mut fatal = None;
     let stdin = io::stdin();
-    let mut lines = stdin.lock().lines();
-    while let Some(line) = lines.next() {
+    let lines = stdin.lock().lines();
+    for line in lines {
         let line = match line {
             Ok(line) => line,
             Err(error) => {

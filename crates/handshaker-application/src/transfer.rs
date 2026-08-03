@@ -245,19 +245,19 @@ impl TransferRegistry {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         for entry in guard.values() {
-            if let Ok(mut join) = entry.join.lock() {
-                if let Some(handle) = join.take() {
-                    if handle.is_finished() {
-                        // Dropping the handle detaches the finished task.
-                    } else {
-                        *join = Some(handle);
-                    }
+            if let Ok(mut join) = entry.join.lock()
+                && let Some(handle) = join.take()
+            {
+                if handle.is_finished() {
+                    // Dropping the handle detaches the finished task.
+                } else {
+                    *join = Some(handle);
                 }
             }
         }
     }
 
-    pub(crate) fn into_snapshot_for(
+    pub(crate) fn snapshot_for(
         &self,
         session_id: SessionId,
         direction: TransferDirectionDto,

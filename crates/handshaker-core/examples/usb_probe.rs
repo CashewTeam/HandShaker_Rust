@@ -94,16 +94,17 @@ fn main() {
         // Re-enumerate after START.
         let mut saw_after = false;
         for d2 in context.devices().expect("devices").iter() {
-            if let Ok(dd) = d2.device_descriptor() {
-                if dd.vendor_id() == 0x18d1 || dd.vendor_id() == 0x29a9 || dd.vendor_id() == 0x05c6
-                {
-                    println!(
-                        "  after START: vid=0x{:04x} pid=0x{:04x}",
-                        dd.vendor_id(),
-                        dd.product_id()
-                    );
-                    saw_after = true;
-                }
+            if let Ok(dd) = d2.device_descriptor()
+                && (dd.vendor_id() == 0x18d1
+                    || dd.vendor_id() == 0x29a9
+                    || dd.vendor_id() == 0x05c6)
+            {
+                println!(
+                    "  after START: vid=0x{:04x} pid=0x{:04x}",
+                    dd.vendor_id(),
+                    dd.product_id()
+                );
+                saw_after = true;
             }
         }
         if !saw_after {

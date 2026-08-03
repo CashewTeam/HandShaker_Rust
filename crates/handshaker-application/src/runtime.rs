@@ -173,28 +173,26 @@ impl HandShakerRuntime {
                 }
             }
         }
-        if request.include_wifi {
-            match HandShakerClient::discover_wifi_devices(request.wifi_browse_timeout).await {
-                Ok(list) => {
-                    for device in list {
-                        let address = device
-                            .addresses
-                            .first()
-                            .cloned()
-                            .unwrap_or_else(|| device.host.clone());
-                        devices.push(DeviceDescriptor {
-                            id: DeviceId(format!("wifi:{}:{}", address, device.port)),
-                            display_name: Some(device.host.clone()),
-                            model: None,
-                            transport: TransportKind::Wifi,
-                            transport_address: format!("{address}:{}", device.port),
-                            available: true,
-                            adb: None,
-                            usb: None,
-                        });
-                    }
-                }
-                Err(_) => {}
+        if request.include_wifi
+            && let Ok(list) =
+                HandShakerClient::discover_wifi_devices(request.wifi_browse_timeout).await
+        {
+            for device in list {
+                let address = device
+                    .addresses
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| device.host.clone());
+                devices.push(DeviceDescriptor {
+                    id: DeviceId(format!("wifi:{}:{}", address, device.port)),
+                    display_name: Some(device.host.clone()),
+                    model: None,
+                    transport: TransportKind::Wifi,
+                    transport_address: format!("{address}:{}", device.port),
+                    available: true,
+                    adb: None,
+                    usb: None,
+                });
             }
         }
         if request.include_usb {
@@ -267,7 +265,7 @@ impl HandShakerRuntime {
         let snapshot = self.get_session_snapshot(id).await?;
         self.inner
             .event_hub
-            .publish(BackendEvent::SessionStateChanged(snapshot));
+            .publish(BackendEvent::SessionStateChanged(Box::new(snapshot)));
         Ok(id)
     }
 
@@ -289,14 +287,16 @@ impl HandShakerRuntime {
         };
         self.inner
             .event_hub
-            .publish(BackendEvent::SessionStateChanged(SessionSnapshot {
-                id: session_id,
-                device: session.device,
-                device_info: session.device_info,
-                state: SessionState::Closed,
-                connected_at_ms: session.connected_at_ms,
-                last_activity_at_ms: Some(session.last_activity_at_ms),
-            }));
+            .publish(BackendEvent::SessionStateChanged(Box::new(
+                SessionSnapshot {
+                    id: session_id,
+                    device: session.device,
+                    device_info: session.device_info,
+                    state: SessionState::Closed,
+                    connected_at_ms: session.connected_at_ms,
+                    last_activity_at_ms: Some(session.last_activity_at_ms),
+                },
+            )));
         result
     }
 
@@ -573,8 +573,8 @@ impl HandShakerRuntime {
     pub async fn start_download(&self, request: DownloadRequest) -> AppResult<TransferId> {
         self.ensure_open()?;
         let client = self.session_client(request.session_id).await?;
-        let remote = resolve_remote_path(&client.root_path(), &request.remote_path);
-        let snapshot = self.inner.transfers.into_snapshot_for(
+        let remote = resolve_remote_path(client.root_path(), &request.remote_path);
+        let snapshot = self.inner.transfers.snapshot_for(
             request.session_id,
             TransferDirectionDto::Download,
             remote.clone(),
@@ -606,7 +606,7 @@ impl HandShakerRuntime {
                         registry.set_error(id, from_core_error(error, "download"));
                         registry.transition(id, TransferState::Failed);
                     }
-                    if let Some(snapshot) = registry.get(id).ok() {
+                    if let Ok(snapshot) = registry.get(id) {
                         event_hub.publish(BackendEvent::TransferUpdated(snapshot));
                     }
                 }
@@ -623,8 +623,8 @@ impl HandShakerRuntime {
     pub async fn start_upload(&self, request: UploadRequest) -> AppResult<TransferId> {
         self.ensure_open()?;
         let client = self.session_client(request.session_id).await?;
-        let remote = resolve_remote_path(&client.root_path(), &request.remote_path);
-        let snapshot = self.inner.transfers.into_snapshot_for(
+        let remote = resolve_remote_path(client.root_path(), &request.remote_path);
+        let snapshot = self.inner.transfers.snapshot_for(
             request.session_id,
             TransferDirectionDto::Upload,
             request.local_path.display().to_string(),
@@ -656,7 +656,7 @@ impl HandShakerRuntime {
                         registry.set_error(id, from_core_error(error, "upload"));
                         registry.transition(id, TransferState::Failed);
                     }
-                    if let Some(snapshot) = registry.get(id).ok() {
+                    if let Ok(snapshot) = registry.get(id) {
                         event_hub.publish(BackendEvent::TransferUpdated(snapshot));
                     }
                 }

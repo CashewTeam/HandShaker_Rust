@@ -287,6 +287,10 @@ pub unsafe extern "C" fn hs_list_devices(
 
 /// `hs_connect` request JSON: a full `DeviceDescriptor` (as returned by
 /// `hs_list_devices`). Result JSON: `{"session_id": 1}`.
+///
+/// # Safety
+/// `runtime` must be a valid runtime from `hs_runtime_create`; `request_ptr`/
+/// `request_len` must describe valid, readable memory.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hs_connect(
     runtime: *mut c_void,

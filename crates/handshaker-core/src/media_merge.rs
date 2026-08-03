@@ -107,15 +107,14 @@ pub fn apply_audio(library: &mut AudioLibrary, change: &MediaLibraryChange) -> R
 }
 
 fn upsert_photo(library: &mut PhotoLibrary, item: &MediaItem) {
-    if let Some(key) = item_key(item) {
-        if let Some(existing) = library
+    if let Some(key) = item_key(item)
+        && let Some(existing) = library
             .images
             .iter_mut()
             .find(|image| image_matches(image, &key))
-        {
-            apply_image_overlap(existing, item);
-            return;
-        }
+    {
+        apply_image_overlap(existing, item);
+        return;
     }
     library.images.push(image_from_item(item));
 }
@@ -186,15 +185,14 @@ fn remove_photo(library: &mut PhotoLibrary, item: &MediaItem) {
 }
 
 fn upsert_video(library: &mut VideoLibrary, item: &MediaItem) {
-    if let Some(key) = item_key(item) {
-        if let Some(existing) = library
+    if let Some(key) = item_key(item)
+        && let Some(existing) = library
             .videos
             .iter_mut()
             .find(|video| video_matches(video, &key))
-        {
-            apply_video_overlap(existing, item);
-            return;
-        }
+    {
+        apply_video_overlap(existing, item);
+        return;
     }
     library.videos.push(video_from_item(item));
 }
@@ -260,15 +258,14 @@ fn remove_video(library: &mut VideoLibrary, item: &MediaItem) {
 }
 
 fn upsert_audio(library: &mut AudioLibrary, item: &MediaItem) {
-    if let Some(key) = item_key(item) {
-        if let Some(existing) = library
+    if let Some(key) = item_key(item)
+        && let Some(existing) = library
             .tracks
             .iter_mut()
             .find(|audio| audio_matches(audio, &key))
-        {
-            apply_audio_overlap(existing, item);
-            return;
-        }
+    {
+        apply_audio_overlap(existing, item);
+        return;
     }
     library.tracks.push(audio_from_item(item));
 }
@@ -400,10 +397,7 @@ mod tests {
         assert_eq!(library.images.len(), 1);
         assert_eq!(library.images[0].size, Some(4096));
         assert_eq!(library.images[0].orientation, Some(6));
-        assert_eq!(
-            library.images[0].starred, true,
-            "snapshot-only field preserved"
-        );
+        assert!(library.images[0].starred, "snapshot-only field preserved");
         assert_eq!(
             library.images[0].thumbnail,
             Some(vec![0xFF, 0xD8]),
