@@ -157,7 +157,9 @@ final class DeviceAcceptanceTests: XCTestCase {
         do {
             uploadID = try await runtime.startUpload(sessionID: sessionID, remotePath: remote, localPath: local.path)
         } catch {
-            try skipOnPhoneWriteRejection(error, "upload")  // always throws
+            // Helper always throws on phone write rejection; the return
+            // is required for definite-initialization (uploadID below).
+            try skipOnPhoneWriteRejection(error, "upload")
             return
         }
         try await waitForTransfer(runtime, uploadID, step: "upload")
@@ -170,7 +172,9 @@ final class DeviceAcceptanceTests: XCTestCase {
                 sessionID: sessionID, remotePath: remote, localPath: downloaded.path
             )
         } catch {
-            try skipOnPhoneWriteRejection(error, "download")  // always throws
+            // Helper always throws on phone write rejection; the return
+            // is required for definite-initialization (downloadID below).
+            try skipOnPhoneWriteRejection(error, "download")
             return
         }
         try await waitForTransfer(runtime, downloadID, step: "download")
@@ -181,7 +185,9 @@ final class DeviceAcceptanceTests: XCTestCase {
         do {
             try await runtime.movePath(sessionID: sessionID, source: remote, target: moved)
         } catch {
-            try skipOnPhoneWriteRejection(error, "move")  // always throws
+            // Helper always throws on phone write rejection; the return
+            // keeps the stat assertion below from running misleadingly.
+            try skipOnPhoneWriteRejection(error, "move")
             return
         }
         let movedStat = try await runtime.statFile(sessionID: sessionID, path: moved)
