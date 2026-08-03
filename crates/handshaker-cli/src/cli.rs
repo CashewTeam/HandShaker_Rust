@@ -11,16 +11,15 @@ use rustyline::error::ReadlineError;
 use serde::Serialize;
 
 use handshaker_core::{
-    ClientEvent, ClientOptions, ClipboardEntry, ConnectionTarget, DeviceInfo, Error,
-    EventCallbacks, EventFilter, EventStreamError, HandShakerClient, RemoteFile, Result,
-    StateStore, SyncConfig, SyncDiff, SyncRunResult, SyncSnapshot, SyncStore, apply_file_change,
-    check_conflicts, default_config_dir, execute_plan,
+    ClientEvent, ClipboardEntry, DeviceInfo, Error, EventFilter, EventStreamError,
+    HandShakerClient, RemoteFile, Result, StateStore, SyncConfig, SyncDiff, SyncRunResult,
+    SyncSnapshot, SyncStore, apply_file_change, check_conflicts, default_config_dir, execute_plan,
     i18n::{self, Localizer, MessageKey, ZhCn},
     plan_diff, sync_config,
 };
 
 use handshaker_application::{
-    BatchTransferItemDto, BatchTransferRequest, ConnectRequest, CountFilesRequest,
+    BackendEvent, BatchTransferItemDto, BatchTransferRequest, ConnectRequest, CountFilesRequest,
     CreateDirectoryRequest, DeletePathsRequest, DeviceDescriptor, DeviceId, DeviceInfoDto,
     FileConflictKind, FileEntryDto, HandShakerRuntime, ListDevicesRequest, ListFilesRequest,
     MovePathRequest, PlanDownloadRequest, PlanUploadRequest, PublicError, RemoveTrustRequest,
@@ -732,52 +731,83 @@ pub(crate) async fn run(cli: Cli) -> Result<()> {
     }
 }
 
+/// `watch`: register directory monitors and stream backend events until
+/// Ctrl-C or the event hub closes.
+///
+/// Migration (M8 Phase 2 / B): the connection and the event stream run
+/// through `HandShakerRuntime` — events are delivered via
+/// `subscribe_events()` and serialized as application `BackendEvent` instead
+/// of the core `ClientEvent`. Directory-monitor registration still uses the
+/// core client (`AppSession.client`) because the application layer has no
+/// `monitor_folder` service yet; the event *source* is unchanged (the core
+/// observer), only the delivery path moved.
+///
+/// Mapping notes for the runtime bridge (see `bridge_client_event` in
+/// handshaker-application): `DirectoryChanged`/`FileChanged`/`PhotoSyncChanged`
+/// are already bridged to `BackendEvent::RemoteFileChanged`, so watch keeps
+/// receiving directory-monitor events. Two details are not carried over the
+/// bridge: the per-event `FileEventKind` (create/delete/...) of directory
+/// events and the `FileChangeStatus` of sync changes — both surface as
+/// `change_kind` + `paths` (+ `files`/`statuses` once the bridge fills them)
+/// in `RemoteFileChangeDto`.
 async fn watch(cli: &Cli) -> Result<()> {
-    let client = connect_with_all_callbacks(cli).await?;
+    let app = connect(cli).await?;
     let localizer = ZhCn;
     let Command::Watch { paths } = &cli.command else {
         unreachable!("watch command");
     };
     for (index, path) in paths.iter().enumerate() {
-        if let Err(error) = client.monitor_folder(path, true).await {
+        if let Err(error) = app.client.monitor_folder(path, true).await {
             // Unregister everything registered before the failing entry. The
             // phone treats duplicate unregister calls as idempotent no-ops,
             // so repeated --path values are safe to unregister twice.
             for registered in paths.iter().take(index) {
-                let _ = client.monitor_folder(registered, false).await;
+                let _ = app.client.monitor_folder(registered, false).await;
             }
+            let _ = app.runtime.shutdown().await;
             return Err(error);
         }
     }
     if !paths.is_empty() {
         eprintln!("{}", localizer.text(MessageKey::WatchRegistered));
     }
-    let mut events = client.subscribe_events(EventFilter::all());
+    // Envelope device identity comes from the connected phone; fetch it per
+    // event so a phone-initiated device-info update is reflected (review
+    // fix: the old pre-migration loop re-read it every event). During the
+    // migration the core client still owns it; once the runtime exposes a
+    // snapshot-based source this can move off the transition client.
+    let mut events = app.runtime.subscribe_events();
     loop {
         tokio::select! {
             event = events.recv() => match event {
-                Ok(event) => {
+                Ok(envelope) => {
+                    let device = app.client.device_info().clone();
                     match cli.output {
                         OutputFormat::Jsonl => {
-                            let envelope = watch_envelope(client.device_info(), &event);
+                            let envelope = watch_envelope(&device, &envelope.event);
                             println!("{envelope}");
                         }
                         _ => println!(
                             "{}",
                             sanitize_human(
-                                &serde_json::to_string(&event).expect("event json")
+                                &serde_json::to_string(&envelope.event).expect("event json")
                             )
                         ),
                     }
                     let _ = io::stdout().flush();
                 }
-                Err(EventStreamError::Lagged { missed }) => {
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
                     eprintln!(
                         "{}",
                         localizer.format(MessageKey::WatchLagged, &[&missed.to_string()])
                     );
                 }
-                Err(EventStreamError::Closed) => {
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    // The hub only closes when the runtime shuts down; a
+                    // transport loss is delivered as
+                    // `BackendEvent::ConnectionLost` instead (the hub stays
+                    // open). This branch is defensive.
+                    let _ = app.runtime.shutdown().await;
                     return Err(Error::Transport(
                         localizer.text(MessageKey::WatchDisconnected).to_string(),
                     ));
@@ -785,17 +815,23 @@ async fn watch(cli: &Cli) -> Result<()> {
             },
             _ = tokio::signal::ctrl_c() => {
                 // Graceful stop: unregister every monitor so the phone stops
-                // watching, then report the user interrupt.
+                // watching, shut the runtime down, then report the user
+                // interrupt.
                 for path in paths {
-                    let _ = client.monitor_folder(path, false).await;
+                    let _ = app.client.monitor_folder(path, false).await;
                 }
+                let _ = app.runtime.shutdown().await;
                 return Err(Error::Interrupted);
             }
         }
     }
 }
 
-fn watch_envelope(info: &DeviceInfo, event: &ClientEvent) -> serde_json::Value {
+/// Watch envelope: the legacy top-level shape (`schema_version`, `ok`,
+/// `command`, `device`, `event`, `data`, `warnings`) is preserved; `data`
+/// now carries the application-layer `BackendEvent` (migrated from the core
+/// `ClientEvent`).
+fn watch_envelope(info: &DeviceInfo, event: &BackendEvent) -> serde_json::Value {
     serde_json::json!({
         "schema_version": 1,
         "ok": true,
@@ -989,46 +1025,6 @@ async fn connect(cli: &Cli) -> Result<AppSession> {
         session_id,
         client,
     })
-}
-
-/// Connect for `watch`, enabling every phone-side push callback so directory,
-/// clipboard, device and media events are all delivered.
-async fn connect_with_all_callbacks(cli: &Cli) -> Result<HandShakerClient> {
-    if cli.wifi.is_some() {
-        // First connects and resets require acting on the phone; give a hint
-        // before the handshake blocks waiting for the trust dialog.
-        eprintln!("{}", ZhCn.text(MessageKey::WifiTrustHint));
-    }
-    let target = connection_target(cli);
-    HandShakerClient::connect_with_event_callbacks(
-        target,
-        ClientOptions {
-            timeout: cli.timeout,
-            wire_log: cli.wire_log.clone(),
-            ..Default::default()
-        },
-        EventCallbacks {
-            device_info: true,
-            photo_library: true,
-            audio_library: true,
-            video_library: true,
-        },
-    )
-    .await
-}
-
-fn connection_target(cli: &Cli) -> ConnectionTarget {
-    if cli.usb {
-        return ConnectionTarget::Usb {
-            location_id: cli.serial.clone(),
-        };
-    }
-    match cli.wifi {
-        Some(address) => ConnectionTarget::Wifi { address },
-        None => ConnectionTarget::Adb {
-            serial: cli.serial.clone(),
-        },
-    }
 }
 
 async fn device_list(timeout: Duration) -> Result<Outcome> {
@@ -1551,10 +1547,13 @@ async fn execute_connected(
                         ));
                     }
                     FileConflictKind::SourceMissing => {
+                        // Localized per-file failure text matching the legacy
+                        // CLI output (previously the raw plan message).
                         collected_failures.push(TransferFailureDto {
                             source: conflict.source.clone(),
                             target: conflict.destination.clone(),
-                            message: conflict.message.clone(),
+                            message: localizer
+                                .format(MessageKey::RemoteMissing, &[&conflict.source]),
                         });
                     }
                     FileConflictKind::DestinationTypeMismatch => {
@@ -2688,7 +2687,14 @@ async fn run_shell(cli: &Cli) -> Result<()> {
             }
             Some("cd") if words.len() == 2 => {
                 let path = resolve_remote(&context.remote_cwd, &words[1]);
-                match client.stat(&path).await {
+                match app
+                    .runtime
+                    .stat_file(StatFileRequest {
+                        session_id: app.session_id,
+                        path: path.clone(),
+                    })
+                    .await
+                {
                     Ok(Some(file)) if file.is_directory => context.remote_cwd = path,
                     Ok(_) => eprintln!(
                         "{}",
@@ -2696,7 +2702,7 @@ async fn run_shell(cli: &Cli) -> Result<()> {
                     ),
                     Err(error) => eprintln!(
                         "{}",
-                        localizer.format(MessageKey::Error, &[&error.to_string()])
+                        localizer.format(MessageKey::Error, &[&app_error(error).to_string()])
                     ),
                 }
                 continue;
@@ -2860,7 +2866,14 @@ async fn run_batch(cli: &Cli) -> Result<()> {
             }
             Some("cd") if words.len() == 2 => {
                 let path = resolve_remote(&context.remote_cwd, &words[1]);
-                match client.stat(&path).await {
+                match app
+                    .runtime
+                    .stat_file(StatFileRequest {
+                        session_id: app.session_id,
+                        path: path.clone(),
+                    })
+                    .await
+                {
                     Ok(Some(file)) if file.is_directory => context.remote_cwd = path,
                     Ok(_) => eprintln!(
                         "{}",
@@ -2868,7 +2881,7 @@ async fn run_batch(cli: &Cli) -> Result<()> {
                     ),
                     Err(error) => eprintln!(
                         "{}",
-                        localizer.format(MessageKey::Error, &[&error.to_string()])
+                        localizer.format(MessageKey::Error, &[&app_error(error).to_string()])
                     ),
                 }
                 continue;
@@ -3490,10 +3503,17 @@ mod tests {
 
     #[test]
     fn watch_envelope_carries_event_payload() {
-        let event = ClientEvent::ClipboardChanged(vec![handshaker_core::ClipboardEntry {
-            text: "hello".to_string(),
-            timestamp_ms: 42,
-        }]);
+        use handshaker_application::ClipboardEntryDto;
+        // The envelope `data` is the application-layer BackendEvent now
+        // (migrated from the core ClientEvent): internally tagged, so
+        // `data.kind` stays a snake_case tag with the payload fields inline.
+        let event = BackendEvent::ClipboardChanged {
+            session_id: SessionId(7),
+            entries: vec![ClipboardEntryDto {
+                text: "hello".to_string(),
+                timestamp_ms: 42,
+            }],
+        };
         let device = DeviceInfo {
             serial: "serial-1".to_string(),
             name: Some("phone".to_string()),
@@ -3505,6 +3525,8 @@ mod tests {
         assert_eq!(envelope["ok"], true);
         assert_eq!(envelope["event"], "watch");
         assert_eq!(envelope["data"]["kind"], "clipboard_changed");
+        assert_eq!(envelope["data"]["session_id"], 7);
+        assert_eq!(envelope["data"]["entries"][0]["text"], "hello");
         assert_eq!(envelope["device"]["serial"], "serial-1");
     }
 
