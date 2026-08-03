@@ -82,6 +82,14 @@ HsCallResult hs_get_session(HsRuntime *runtime, uint64_t session_id);
 HsCallResult hs_list_files(HsRuntime *runtime, uint64_t session_id,
                            const uint8_t *request_json, size_t request_len);
 
+/* Files (ABI 1.2). request_json: {"path":"/sdcard/new"}.
+ * Result: {"created":true}. */
+HsCallResult hs_create_directory(HsRuntime *runtime, uint64_t session_id,
+                                 const uint8_t *request_json, size_t request_len);
+
+/* Session (ABI 1.2). Result: {"round_trip_ms": N}. */
+HsCallResult hs_ping(HsRuntime *runtime, uint64_t session_id);
+
 /* Transfers (ABI 1.1). request_json (start_*):
  * {"remote_path":"/sdcard/a.bin","local_path":"/tmp/a.bin","overwrite":false}
  * (overwrite optional, default false). Result: {"transfer_id": N}.

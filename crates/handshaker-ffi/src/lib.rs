@@ -25,9 +25,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use handshaker_application::{
-    ConnectRequest, DeviceDescriptor, DownloadRequest, HandShakerRuntime, ListDevicesRequest,
-    ListFilesRequest, PublicError, PublicErrorCode, RuntimeConfig, SessionId, TransferId,
-    UploadRequest,
+    ConnectRequest, CreateDirectoryRequest, DeviceDescriptor, DownloadRequest, HandShakerRuntime,
+    ListDevicesRequest, ListFilesRequest, PublicError, PublicErrorCode, RuntimeConfig, SessionId,
+    TransferId, UploadRequest,
 };
 use serde::Deserialize;
 use tokio::sync::broadcast;
@@ -37,7 +37,7 @@ use result::{HsCallResult, catch, err, free_result, input_str, ok, out_slot};
 
 /// ABI version (M8 §7.3), independent of Cargo versions.
 pub const ABI_VERSION_MAJOR: u32 = 1;
-pub const ABI_VERSION_MINOR: u32 = 1;
+pub const ABI_VERSION_MINOR: u32 = 2;
 pub const ABI_VERSION_PATCH: u32 = 0;
 
 /// Runtime handle: owns a tokio executor and the application runtime.
@@ -392,6 +392,64 @@ pub unsafe extern "C" fn hs_list_files(
     })
 }
 
+/// `hs_create_directory` request JSON: `{"path":"/sdcard/new"}`.
+/// Result JSON: `{"created":true}`. (ABI 1.2)
+///
+/// # Safety
+/// `runtime` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hs_create_directory(
+    runtime: *mut c_void,
+    session_id: u64,
+    request_ptr: *const u8,
+    request_len: usize,
+) -> HsCallResult {
+    catch("create_directory", || {
+        let runtime = ffi_try!(runtime_ref(runtime, "create_directory"));
+        let json = ffi_try!(input_str(request_ptr, request_len, "create_directory"));
+        #[derive(Deserialize)]
+        struct FfiCreateDirectoryRequest {
+            path: String,
+        }
+        let ffi: FfiCreateDirectoryRequest = ffi_try!(serde_json::from_str(json).map_err(|error| {
+            err(
+                &PublicError::new(PublicErrorCode::InvalidArgument, "invalid request JSON")
+                    .with_detail(error.to_string()),
+            )
+        }));
+        let request = CreateDirectoryRequest {
+            session_id: SessionId(session_id),
+            path: ffi.path,
+        };
+        match runtime
+            ._tokio
+            .block_on(async { runtime.app.create_directory(request).await })
+        {
+            Ok(()) => ok(&serde_json::json!({ "created": true })),
+            Err(error) => err(&error),
+        }
+    })
+}
+
+/// `hs_ping` pings an open session.
+/// Result JSON: `{"round_trip_ms": N}`. (ABI 1.2)
+///
+/// # Safety
+/// `runtime` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hs_ping(runtime: *mut c_void, session_id: u64) -> HsCallResult {
+    catch("ping", || {
+        let runtime = ffi_try!(runtime_ref(runtime, "ping"));
+        match runtime
+            ._tokio
+            .block_on(async { runtime.app.ping(SessionId(session_id)).await })
+        {
+            Ok(result) => ok(&result),
+            Err(error) => err(&error),
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Transfers (M8 Phase 6 suggested surface, ABI 1.1)
 // ---------------------------------------------------------------------------
@@ -691,10 +749,61 @@ mod ffi_smoke_tests {
     }
 
     #[test]
-    fn abi_version_is_1_1_0() {
+    fn abi_version_is_1_2_0() {
         assert_eq!(hs_abi_version_major(), 1);
-        assert_eq!(hs_abi_version_minor(), 1);
+        assert_eq!(hs_abi_version_minor(), 2);
         assert_eq!(hs_abi_version_patch(), 0);
+    }
+
+    #[test]
+    fn ping_null_handle_returns_invalid_argument() {
+        let result = unsafe { hs_ping(std::ptr::null_mut(), 1) };
+        assert_eq!(result.status, 1);
+        let bytes = unsafe { crate::buffer::into_vec(result.error) };
+        let decoded: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(decoded["code"], "invalid_argument");
+        unsafe { free_result(HsCallResult::default()) };
+    }
+
+    #[test]
+    fn ping_missing_session_returns_session_not_found() {
+        let runtime = runtime_ptr();
+        let result = unsafe { hs_ping(runtime, 999) };
+        assert_eq!(result.status, 1);
+        let bytes = unsafe { crate::buffer::into_vec(result.error) };
+        let decoded: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(decoded["code"], "session_not_found");
+        unsafe { free_result(HsCallResult::default()) };
+        unsafe { hs_runtime_destroy(runtime) };
+    }
+
+    #[test]
+    fn create_directory_null_handle_returns_invalid_argument() {
+        let result = unsafe {
+            hs_create_directory(
+                std::ptr::null_mut(),
+                1,
+                br#"{"path":"/a"}"#.as_ptr(),
+                12,
+            )
+        };
+        assert_eq!(result.status, 1);
+        let bytes = unsafe { crate::buffer::into_vec(result.error) };
+        let decoded: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(decoded["code"], "invalid_argument");
+        unsafe { free_result(HsCallResult::default()) };
+    }
+
+    #[test]
+    fn create_directory_bad_json_is_rejected() {
+        let runtime = runtime_ptr();
+        let result = unsafe { hs_create_directory(runtime, 1, b"{oops".as_ptr(), 6) };
+        assert_eq!(result.status, 1);
+        let bytes = unsafe { crate::buffer::into_vec(result.error) };
+        let decoded: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(decoded["code"], "invalid_argument");
+        unsafe { free_result(HsCallResult::default()) };
+        unsafe { hs_runtime_destroy(runtime) };
     }
 
     #[test]

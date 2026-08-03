@@ -17,7 +17,8 @@ use handshaker_core::{
 use crate::dto::{
     ConnectRequest, CreateDirectoryRequest, DeletePathsRequest, DeleteResultDto, DeviceDescriptor,
     DeviceId, DeviceInfoDto, FileEntryDto, ListDevicesRequest, ListFilesRequest, MovePathRequest,
-    RuntimeConfig, SessionId, SessionSnapshot, SessionState, StatFileRequest, TransportKind,
+    PingResultDto, RuntimeConfig, SessionId, SessionSnapshot, SessionState, StatFileRequest,
+    TransportKind,
 };
 use crate::error::{AppResult, PublicError, PublicErrorCode, from_core_error};
 use crate::event::{BackendEvent, EventEnvelope, EventHub};
@@ -309,6 +310,19 @@ impl HandShakerRuntime {
             connected_at_ms: session.connected_at_ms,
             last_activity_at_ms: Some(session.last_activity_at_ms),
         })
+    }
+
+    /// Ping an open session; returns round-trip latency in milliseconds.
+    pub async fn ping(&self, session_id: SessionId) -> AppResult<PingResultDto> {
+        self.ensure_open()?;
+        let client = self.session_client(session_id).await?;
+        client
+            .ping()
+            .await
+            .map(|result| PingResultDto {
+                round_trip_ms: result.round_trip_ms as u64,
+            })
+            .map_err(|error| from_core_error(error, "ping"))
     }
 
     /// List one directory level (or `depth` levels) for an open session.

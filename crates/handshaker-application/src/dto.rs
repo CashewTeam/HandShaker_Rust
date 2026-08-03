@@ -125,6 +125,12 @@ pub struct SessionSnapshot {
     pub last_activity_at_ms: Option<u64>,
 }
 
+/// Round-trip latency of a device ping.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PingResultDto {
+    pub round_trip_ms: u64,
+}
+
 /// Runtime configuration (Rust-native; FFI uses `FfiRuntimeConfig`).
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {

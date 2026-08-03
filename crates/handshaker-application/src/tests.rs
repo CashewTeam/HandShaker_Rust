@@ -96,6 +96,11 @@ async fn unknown_session_errors_are_stable() {
         Ok(_) => panic!("expected missing session"),
     };
     assert_eq!(error.code, PublicErrorCode::SessionNotFound);
+    let error = runtime
+        .ping(SessionId(42))
+        .await
+        .expect_err("missing session");
+    assert_eq!(error.code, PublicErrorCode::SessionNotFound);
 }
 
 #[test]
@@ -286,9 +291,7 @@ fn unknown_enum_values_are_rejected_not_guessed() {
 
 #[test]
 fn transfer_state_transitions_are_one_way() {
-    use crate::transfer::{
-        TransferDirectionDto, TransferRegistry, TransferSnapshot, TransferState,
-    };
+    use crate::transfer::{TransferDirectionDto, TransferRegistry, TransferState};
 
     let registry = TransferRegistry::new();
     let snapshot = registry.into_snapshot_for(

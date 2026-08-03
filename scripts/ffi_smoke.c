@@ -8,7 +8,7 @@
 #include <string.h>
 
 int main(void) {
-    if (hs_abi_version_major() != 1 || hs_abi_version_minor() != 0) {
+    if (hs_abi_version_major() != 1 || hs_abi_version_minor() != 2) {
         fprintf(stderr, "unexpected ABI version\n");
         return 1;
     }

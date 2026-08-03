@@ -83,6 +83,23 @@ func main() throws {
     guard let ljson = stringAndFree(lresult.value), ljson == "[]" else { throw NSError(domain: "ffi", code: 9) }
     try transfer.shutdown()
 
+    // ABI 1.2 surface: hs_create_directory / hs_ping link and report the
+    // stable session_not_found error for a missing session.
+    let abi12 = try RuntimeHandle()
+    let mkdir = "{\"path\":\"/sdcard/new\"}"
+    let mresult = mkdir.withCString { cstr in
+        hs_create_directory(
+            abi12.ptrForTest, 999, UnsafePointer<UInt8>(OpaquePointer(cstr)), mkdir.utf8.count)
+    }
+    guard mresult.status != 0 else { throw NSError(domain: "ffi", code: 10) }
+    guard let merror = stringAndFree(mresult.error),
+          merror.contains("session_not_found") else { throw NSError(domain: "ffi", code: 11) }
+    let presult = hs_ping(abi12.ptrForTest, 999)
+    guard presult.status != 0 else { throw NSError(domain: "ffi", code: 12) }
+    guard let perror = stringAndFree(presult.error),
+          perror.contains("session_not_found") else { throw NSError(domain: "ffi", code: 13) }
+    try abi12.shutdown()
+
     print("swift ffi smoke ok")
 }
 
