@@ -1,8 +1,8 @@
 use std::env;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use handshaker_rust::i18n;
-use handshaker_rust::{
+use handshaker_core::i18n;
+use handshaker_core::{
     ClientEvent, ClientOptions, ConnectionTarget, EventCallbacks, EventFilter, HandShakerClient,
 };
 

@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use handshaker_rust::{
+use handshaker_core::{
     ClientOptions, ConnectionTarget, DeleteOptions, HandShakerClient, TransferOptions,
 };
 

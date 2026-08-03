@@ -129,7 +129,7 @@ pub struct PingResult {
 /// # Examples
 ///
 /// ```no_run
-/// use handshaker_rust::{ClientOptions, ConnectionTarget, HandShakerClient};
+/// use handshaker_core::{ClientOptions, ConnectionTarget, HandShakerClient};
 ///
 /// # #[tokio::main]
 /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -317,7 +317,7 @@ impl HandShakerClient {
                                 }
                             })
                     };
-                    let mut connected = match attempt() {
+                    let connected = match attempt() {
                         Ok(connected) => connected,
                         Err(first) => {
                             std::thread::sleep(Duration::from_secs(3));

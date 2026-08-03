@@ -219,8 +219,9 @@ static LANGUAGE: OnceLock<LanguageFile> = OnceLock::new();
 
 fn language_file() -> &'static LanguageFile {
     LANGUAGE.get_or_init(|| {
-        let language: LanguageFile = serde_json::from_str(include_str!("../locales/zh-CN.json"))
-            .expect("bundled language file must be valid JSON");
+        let language: LanguageFile =
+            serde_json::from_str(include_str!("../../../locales/zh-CN.json"))
+                .expect("bundled language file must be valid JSON");
         assert_eq!(language.language, DEFAULT_LANGUAGE);
         language
     })
