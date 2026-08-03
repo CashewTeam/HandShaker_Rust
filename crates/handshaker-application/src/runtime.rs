@@ -1729,19 +1729,37 @@ impl HandShakerRuntime {
             &host_uuid,
         );
         let pc_id = handshaker_core::pc_id_from_host_uuid(&host_uuid);
-        let phone = session
-            .client
-            .photo_sync(&pc_id, &snapshot_to_remote_files(&snapshot))
+        // The phone rejects a PHOTO_SYNC_REQUEST while it is still in SYNCING
+        // state (a plan followed by an immediate run hits this). The state is
+        // transient, so retry with a short backoff instead of failing the
+        // run (the legacy CLI hit the same wall).
+        const PHOTO_SYNC_REJECT_RETRIES: u32 = 3;
+        const PHOTO_SYNC_REJECT_BACKOFF_MS: u64 = 1_500;
+        let mut phone = None;
+        for attempt in 0..=PHOTO_SYNC_REJECT_RETRIES {
+            let result = session
+                .client
+                .photo_sync(&pc_id, &snapshot_to_remote_files(&snapshot))
+                .await;
+            session.record_activity();
+            let result = result.map_err(|error| from_core_error(error, "sync.plan"))?;
+            if result.is_success != Some(false) {
+                phone = Some(result);
+                break;
+            }
+            if attempt == PHOTO_SYNC_REJECT_RETRIES {
+                return Err(PublicError::new(
+                    PublicErrorCode::SyncError,
+                    "phone rejected photo sync request",
+                )
+                .operation("sync.plan"));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(
+                PHOTO_SYNC_REJECT_BACKOFF_MS,
+            ))
             .await;
-        session.record_activity();
-        let phone = phone.map_err(|error| from_core_error(error, "sync.plan"))?;
-        if phone.is_success == Some(false) {
-            return Err(PublicError::new(
-                PublicErrorCode::SyncError,
-                "phone rejected photo sync request",
-            )
-            .operation("sync.plan"));
         }
+        let phone = phone.expect("loop sets phone on success or returns");
         let phone_files: Vec<RemoteFile> = phone
             .files
             .into_iter()
@@ -1850,6 +1868,13 @@ impl HandShakerRuntime {
     /// Execute one full sync run to completion (spawned by `start_sync`).
     /// The ledger is committed atomically only after a fully successful run;
     /// a failed run leaves the old ledger untouched (re-run is idempotent).
+    ///
+    /// Panics are caught by the caller's `JoinHandle` (start_sync spawns
+    /// this task; stop_sync observes the `JoinError` and marks the job
+    /// failed). There must be no nested `tokio::spawn` in here: aborting
+    /// the outer task would orphan the inner one, which then keeps the
+    /// session/client alive past disconnect (device finding: no QUIT, no
+    /// cleanup until process exit).
     async fn run_sync_job(&self, job: Arc<SyncJob>) {
         let outcome = self.run_sync_once(&job).await;
         match outcome {
@@ -1877,8 +1902,12 @@ impl HandShakerRuntime {
                 }
             }
             Ok(None) => {
-                // Cancelled before any work started: not an error.
-                job.set_status(|status| status.running = false);
+                // Cancelled before any work started: not an error, and it
+                // must not keep a stale last_error from a prior failed run.
+                job.set_status(|status| {
+                    status.running = false;
+                    status.last_error = None;
+                });
             }
             Err(error) => {
                 job.set_status(|status| {
@@ -1963,15 +1992,32 @@ impl HandShakerRuntime {
         // (same pattern as `close_session` — a deadline is not proof of
         // completion; abort + await is).
         let task = job.task.lock().await.take();
-        if let Some(mut task) = task
-            && tokio::time::timeout(SYNC_STOP_DEADLINE, &mut task)
-                .await
-                .is_err()
-        {
-            // A deadline is not proof of completion; abort + await so no
-            // sync task can outlive stop_sync (same pattern as close_session).
-            task.abort();
-            let _ = task.await;
+        if let Some(mut task) = task {
+            match tokio::time::timeout(SYNC_STOP_DEADLINE, &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(join_error)) => {
+                    // The run task panicked: mark the job failed so the
+                    // panic is observable (running can never stay true).
+                    let message = join_error.to_string();
+                    job.set_status(|status| {
+                        status.running = false;
+                        status.last_error = Some(
+                            PublicError::new(
+                                PublicErrorCode::Internal,
+                                format!("sync pipeline panicked: {message}"),
+                            )
+                            .operation("sync.run"),
+                        );
+                    });
+                }
+                Err(_) => {
+                    // A deadline is not proof of completion; abort + await so
+                    // no sync task can outlive stop_sync (same pattern as
+                    // close_session).
+                    task.abort();
+                    let _ = task.await;
+                }
+            }
         }
         // Defensive: a watch can only be active here if it was started after
         // this run job was registered and never stopped; never leave a task

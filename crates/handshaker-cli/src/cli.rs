@@ -786,15 +786,34 @@ async fn watch(cli: &Cli) -> Result<()> {
         tokio::select! {
             event = events.recv() => match event {
                 Ok(envelope) => {
-                    let snapshot = app
-                        .runtime
-                        .get_session_snapshot(app.session_id)
-                        .await
-                        .map_err(app_error)?;
                     match cli.output {
                         OutputFormat::Jsonl => {
-                            let envelope = watch_envelope(&snapshot.device_info, &envelope.event);
-                            println!("{envelope}");
+                            // The device summary is only needed for the JSONL
+                            // envelope; a failed fetch (session died) must not
+                            // skip the unregister/shutdown cleanup below.
+                            match app
+                                .runtime
+                                .get_session_snapshot(app.session_id)
+                                .await
+                            {
+                                Ok(snapshot) => {
+                                    let envelope = watch_envelope(
+                                        &snapshot.device_info,
+                                        &envelope.event,
+                                    );
+                                    println!("{envelope}");
+                                }
+                                Err(error) => {
+                                    for path in paths {
+                                        let _ = app
+                                            .runtime
+                                            .monitor_folder(app.session_id, path.clone(), false)
+                                            .await;
+                                    }
+                                    let _ = app.runtime.shutdown().await;
+                                    return Err(app_error(error));
+                                }
+                            }
                         }
                         _ => println!(
                             "{}",
@@ -2040,7 +2059,7 @@ async fn sync_command(
         } => {
             let output_dir = required_output_dir(output_dir, context)?;
             let profile = sync_profile_for(app, &device_uuid, root.as_deref(), &output_dir);
-            confirm(i18n::text("sync.confirm_run"), *run_yes, format)?;
+            confirm_interruptible(i18n::text("sync.confirm_run"), *run_yes, format).await?;
             // start_sync validates executability and runs the plan in the
             // background; the CLI waits (Ctrl-C stops the run).
             let profile_id = app.runtime.start_sync(profile).await.map_err(app_error)?;
@@ -2067,7 +2086,7 @@ async fn sync_command(
         } => {
             let output_dir = required_output_dir(output_dir, context)?;
             let profile = sync_profile_for(app, &device_uuid, root.as_deref(), &output_dir);
-            confirm(i18n::text("sync.confirm_run"), *watch_yes, format)?;
+            confirm_interruptible(i18n::text("sync.confirm_run"), *watch_yes, format).await?;
             // Full sync first (the phone must be in SYNCING state for the
             // monitor to be accepted), then switch to incremental watch.
             let profile_id = app.runtime.start_sync(profile).await.map_err(app_error)?;
@@ -2081,54 +2100,53 @@ async fn sync_command(
             let mut events = app.runtime.subscribe_events();
             loop {
                 tokio::select! {
-                    event = events.recv() => match event {
-                        Ok(envelope) => match envelope.event {
-                            BackendEvent::SyncWatchApplied(ref result) => {
-                                let applied = result.downloaded.len() + result.deleted.len();
-                                let failures = result.failures.len();
-                                if format == OutputFormat::Jsonl {
-                                    let snapshot = app
-                                        .runtime
-                                        .get_session_snapshot(app.session_id)
-                                        .await
-                                        .map_err(app_error)?;
-                                    let envelope =
-                                        sync_watch_envelope(&snapshot.device_info, result);
-                                    println!("{envelope}");
-                                } else {
-                                    println!(
-                                        "{}",
-                                        i18n::format(
-                                            "sync.watch_applied",
-                                            &[&applied.to_string(), &failures.to_string()]
-                                        )
-                                    );
-                                }
-                                let _ = io::stdout().flush();
+                event = events.recv() => match event {
+                    Ok(envelope) => match envelope.event {
+                        BackendEvent::SyncWatchApplied(ref result) => {
+                            let applied = result.downloaded.len() + result.deleted.len();
+                            let failures = result.failures.len();
+                            if format == OutputFormat::Jsonl {
+                                let snapshot = app
+                                    .runtime
+                                    .get_session_snapshot(app.session_id)
+                                    .await
+                                    .map_err(app_error)?;
+                                let envelope =
+                                    sync_watch_envelope(&snapshot.device_info, result);
+                                println!("{envelope}");
+                            } else {
+                                println!(
+                                    "{}",
+                                    i18n::format(
+                                        "sync.watch_applied",
+                                        &[&applied.to_string(), &failures.to_string()]
+                                    )
+                                );
                             }
-                            BackendEvent::Warning(ref error) => {
-                                eprintln!("{}", sanitize_human(&error.message));
-                            }
-                            _ => {}
-                        },
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
-                            eprintln!(
-                                "{}",
-                                i18n::format("watch.lagged", &[&missed.to_string()])
-                            );
+                            let _ = io::stdout().flush();
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            let _ = app.runtime.stop_sync_watch(&profile_id).await;
-                            return Err(Error::Transport(
-                                i18n::text("watch.disconnected").to_string(),
-                            ));
+                        BackendEvent::Warning(ref error) => {
+                            eprintln!("{}", sanitize_human(&error.message));
                         }
+                        _ => {}
                     },
-                    _ = tokio::signal::ctrl_c() => {
-                        let _ = app.runtime.stop_sync_watch(&profile_id).await;
-                        return Err(Error::Interrupted);
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                        eprintln!(
+                            "{}",
+                            i18n::format("watch.lagged", &[&missed.to_string()])
+                        );
                     }
-                }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        let _ = app.runtime.stop_sync_watch(&profile_id).await;
+                        return Err(Error::Transport(
+                            i18n::text("watch.disconnected").to_string(),
+                        ));
+                    }
+                },
+                _ = tokio::signal::ctrl_c() => {
+                    let _ = app.runtime.stop_sync_watch(&profile_id).await;
+                    return Err(Error::Interrupted);
+                }                }
             }
         }
     }
@@ -2982,6 +3000,39 @@ fn shell_command_argv(words: Vec<String>) -> Vec<String> {
     }
     argv.extend(words);
     argv
+}
+
+/// `confirm` variant that also handles Ctrl-C while waiting for input:
+/// `sync run`/`sync watch` are Ctrl-C self-handling (see main.rs), so a
+/// default SIGINT during the prompt would kill the process without closing
+/// the session or releasing the adb forward.
+async fn confirm_interruptible(action: &str, yes: bool, format: OutputFormat) -> Result<()> {
+    if yes {
+        return Ok(());
+    }
+    if format != OutputFormat::Human || !io::stdin().is_terminal() {
+        return Err(Error::ConfirmationRequired(
+            ZhCn.format(MessageKey::ConfirmationRequired, &[action]),
+        ));
+    }
+    let localizer = ZhCn;
+    print!("{}", i18n::format("confirm.prompt_with_action", &[action]));
+    io::stdout().flush()?;
+    let answer = tokio::select! {
+        line = async {
+            let mut answer = String::new();
+            io::stdin().read_line(&mut answer)?;
+            Ok::<String, Error>(answer)
+        } => line,
+        _ = tokio::signal::ctrl_c() => return Err(Error::Interrupted),
+    }?;
+    if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        Ok(())
+    } else {
+        Err(Error::ConfirmationRequired(
+            localizer.text(MessageKey::UserNotConfirmed).to_string(),
+        ))
+    }
 }
 
 fn confirm(action: &str, yes: bool, format: OutputFormat) -> Result<()> {

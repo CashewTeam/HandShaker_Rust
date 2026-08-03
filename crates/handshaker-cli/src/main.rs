@@ -7,8 +7,22 @@ use tracing_subscriber::EnvFilter;
 use crate::cli::{Cli, OutputFormat, command_name};
 use crate::output::render_error;
 
-#[tokio::main]
-async fn main() {
+/// Synchronous entry point: create the tokio runtime explicitly and
+/// `block_on`, so that returning `ExitCode` drops the runtime normally
+/// (all tasks aborted, transport `Drop` cleanup runs, a Ctrl-C'd session
+/// never leaks its adb forward).
+fn main() -> std::process::ExitCode {
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("failed to start async runtime: {error}");
+            return std::process::ExitCode::from(4);
+        }
+    };
+    runtime.block_on(cli_main())
+}
+
+async fn cli_main() -> std::process::ExitCode {
     let fallback_output = output_from_raw_args();
     let cli = match Cli::try_parse_localized() {
         Ok(cli) => cli,
@@ -19,14 +33,14 @@ async fn main() {
             ) =>
         {
             let _ = error.print();
-            return;
+            return std::process::ExitCode::SUCCESS;
         }
         Err(_error) => {
             let app_error = handshaker_core::Error::Usage(
                 handshaker_core::i18n::text("cli.parse_error").to_string(),
             );
             render_error(&app_error, "unknown", fallback_output);
-            std::process::exit(app_error.exit_code());
+            return std::process::ExitCode::from(app_error.exit_code() as u8);
         }
     };
     let command = command_name(&cli.command);
@@ -36,9 +50,15 @@ async fn main() {
     // `sync run` and `sync watch` drive their own Ctrl-C handling (stopping
     // the job/watch and cleaning the session up); the top-level select must
     // not race them, or SIGINT would exit the process before close_session
-    // releases the adb forward (Phase D device finding).
-    let is_self_handling_ctrl_c =
-        is_shell || is_watch || matches!(cli.command, cli::Command::Sync(_));
+    // releases the adb forward (Phase D device finding). Other sync commands
+    // (plan/status) keep the top-level interrupt.
+    let is_self_handling_ctrl_c = is_shell
+        || is_watch
+        || matches!(
+            cli.command,
+            cli::Command::Sync(cli::SyncCommand::Run { .. })
+                | cli::Command::Sync(cli::SyncCommand::Watch { .. })
+        );
     let filter = match cli.verbose {
         0 => "warn",
         1 => "info",
@@ -67,8 +87,13 @@ async fn main() {
     };
     if let Err(error) = result {
         render_error(&error, command, output);
-        std::process::exit(error.exit_code());
+        // Returning `ExitCode` (instead of `process::exit`) lets every
+        // value on the stack — including the tokio runtime — drop normally,
+        // so a Ctrl-C'd session still runs its transport cleanup and
+        // releases the adb forward (Phase D device finding).
+        return std::process::ExitCode::from(error.exit_code() as u8);
     }
+    std::process::ExitCode::SUCCESS
 }
 
 fn output_from_raw_args() -> OutputFormat {

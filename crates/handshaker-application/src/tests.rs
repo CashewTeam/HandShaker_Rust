@@ -2665,6 +2665,29 @@ async fn stop_sync_removes_the_job() {
 }
 
 #[tokio::test]
+async fn stop_sync_reports_a_panicked_run_task() {
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    let job = runtime
+        .register_sync_job(sync_profile("photos", 1))
+        .await
+        .expect("register");
+    // Simulate a run task that panics: the JoinHandle must surface the
+    // panic to stop_sync, which marks the job failed instead of leaving
+    // `running=true` behind (orphaned-task device finding regression).
+    let task = tokio::spawn(async { panic!("simulated sync panic") });
+    *job.task.lock().await = Some(task);
+    runtime.stop_sync("photos").await.expect("stop");
+    let error = runtime
+        .get_sync_status("photos")
+        .await
+        .expect_err("job removed");
+    assert_eq!(error.code, PublicErrorCode::NotFound);
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
 async fn reserve_sync_watch_enforces_run_watch_mutual_exclusion() {
     let runtime = HandShakerRuntime::create(test_config())
         .await
