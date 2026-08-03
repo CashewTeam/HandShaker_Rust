@@ -48,7 +48,7 @@
 | Application v1 契约稳定性 | 55% | 75%（明确 `1.0.0-preview.1`，DTO/事件 fixture 补齐，仍为 preview） |
 | FFI 基础设施 | 80% | 95%（ABI 单一事实来源、Header 校验、C/Swift smoke 本地全过） |
 | FFI 功能覆盖 | 40% | 100%（52 个符号：文件/剪贴板/信任/发现/监控/批量/媒体/诊断/照片同步/update file info/media merge 全导出，MVP 面齐） |
-| Apple 二进制与 Swift 包装交付 | 30% | 80%（静态 XCFramework + Swift Package 本地全过：43 测试；真机验收读路径通过；正式签名/分发仍待发布决策） |
+| Apple 二进制与 Swift 包装交付 | 30% | 80%（静态 XCFramework + Swift Package 本地全过：43 测试；真机读写路径验收通过；正式签名/分发仍待发布决策） |
 | Swift GUI 完整 MVP 后端准备 | 45% | 98%（后端与 FFI 100% 齐备 + Swift SDK 可用 + 真机读写路径验收通过，剩余 GUI 应用工程） |
 
 ### 最终判断
