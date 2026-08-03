@@ -490,6 +490,7 @@ name = "handshaker-cli"
 version = "0.6.1"
 dependencies = [
  "clap",
+ "handshaker-application",
  "handshaker-core",
  "rustyline",
  "serde",

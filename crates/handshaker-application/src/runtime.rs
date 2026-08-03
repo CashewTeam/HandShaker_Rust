@@ -147,6 +147,13 @@ impl HandShakerRuntime {
                             transport: TransportKind::Adb,
                             transport_address: device.serial.clone(),
                             available: device.state == "device",
+                            adb: Some(crate::dto::AdbDetailDto {
+                                state: device.state.clone(),
+                                product: device.product.clone(),
+                                model: device.model.clone(),
+                                device: device.device.clone(),
+                            }),
+                            usb: None,
                         });
                     }
                 }
@@ -174,6 +181,8 @@ impl HandShakerRuntime {
                             transport: TransportKind::Wifi,
                             transport_address: format!("{address}:{}", device.port),
                             available: true,
+                            adb: None,
+                            usb: None,
                         });
                     }
                 }
@@ -197,6 +206,14 @@ impl HandShakerRuntime {
                         accessory.vendor_id, accessory.product_id
                     ),
                     available: true,
+                    adb: None,
+                    usb: Some(crate::dto::UsbDetailDto {
+                        bus_number: accessory.bus_number,
+                        serial: accessory.serial.clone(),
+                        vendor_id: accessory.vendor_id,
+                        product_id: accessory.product_id,
+                        mode: format!("{:?}", accessory.mode),
+                    }),
                 });
             }
         }

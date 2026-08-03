@@ -29,6 +29,8 @@ fn fake_device() -> DeviceDescriptor {
         transport: TransportKind::Adb,
         transport_address: "serial-1".to_string(),
         available: true,
+        adb: None,
+        usb: None,
     }
 }
 
@@ -218,6 +220,8 @@ fn device_descriptor_json_contract_is_stable() {
         transport: TransportKind::Adb,
         transport_address: "serial-1".into(),
         available: true,
+        adb: None,
+        usb: None,
     };
     let json = serde_json::to_value(&device).expect("serialize");
     // Field names and enum token are the frozen contract.

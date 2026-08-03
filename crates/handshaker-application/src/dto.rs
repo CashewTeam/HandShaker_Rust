@@ -35,6 +35,27 @@ pub enum TransportKind {
     UsbAccessory = 3,
 }
 
+/// ADB-specific detail (preserved so CLI JSON stays byte-compatible).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdbDetailDto {
+    /// ADB state, such as `device` or `unauthorized`.
+    pub state: String,
+    pub product: Option<String>,
+    pub model: Option<String>,
+    pub device: Option<String>,
+}
+
+/// USB AOA detail (preserved for CLI JSON compatibility).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsbDetailDto {
+    pub bus_number: u8,
+    pub serial: Option<String>,
+    pub vendor_id: u16,
+    pub product_id: u16,
+    /// Accessory mode token as the core serializes it (`Accessory`/`Plain`).
+    pub mode: String,
+}
+
 /// A discovered device, UI-ready.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceDescriptor {
@@ -44,6 +65,9 @@ pub struct DeviceDescriptor {
     pub transport: TransportKind,
     pub transport_address: String,
     pub available: bool,
+    /// Transport-specific detail, when the transport reports it.
+    pub adb: Option<AdbDetailDto>,
+    pub usb: Option<UsbDetailDto>,
 }
 
 /// Application-layer session identifier (u64, no pointer handles).

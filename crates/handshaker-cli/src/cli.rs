@@ -824,41 +824,104 @@ fn connection_target(cli: &Cli) -> ConnectionTarget {
 }
 
 async fn device_list(timeout: Duration) -> Result<Outcome> {
-    let devices = HandShakerClient::list_adb_devices_with_timeout("adb", timeout).await?;
-    let accessories = handshaker_core::list_usb_accessories()?;
+    use handshaker_application::{
+        DeviceDescriptor, HandShakerRuntime, ListDevicesRequest, RuntimeConfig, TransportKind,
+    };
+
+    // Route through the application service layer (M8): the CLI keeps its
+    // output model; the application owns discovery + transport details.
+    let config = RuntimeConfig {
+        default_timeout: timeout,
+        adb_path: "adb".into(),
+        ..RuntimeConfig::default()
+    };
+    let runtime = HandShakerRuntime::create(config)
+        .await
+        .map_err(|error| handshaker_core::Error::LocalIo(error.message))?;
+    let request = ListDevicesRequest {
+        include_adb: true,
+        include_wifi: false,
+        include_usb: true,
+        wifi_browse_timeout: timeout,
+    };
+    let devices = runtime
+        .list_devices(request)
+        .await
+        .map_err(|error| handshaker_core::Error::LocalIo(error.message))?;
+    let _ = runtime.shutdown().await;
+
     let localizer = ZhCn;
     let mut lines = Vec::new();
-    if !devices.is_empty() {
+    let adb_rows: Vec<DeviceDescriptor> = devices
+        .iter()
+        .filter(|device| device.transport == TransportKind::Adb)
+        .cloned()
+        .collect();
+    if !adb_rows.is_empty() {
         lines.push(localizer.text(MessageKey::DeviceListHeader).to_string());
-        lines.extend(devices.iter().map(|device| {
+        lines.extend(adb_rows.iter().map(|device| {
+            let detail = device.adb.as_ref().expect("adb detail present");
             format!(
                 "{}\t{}\t{}\t{}",
-                device.serial,
-                device.state,
-                device.model.as_deref().unwrap_or("-"),
-                device.device.as_deref().unwrap_or("-")
+                device.id.0,
+                detail.state,
+                detail.model.as_deref().unwrap_or("-"),
+                detail.device.as_deref().unwrap_or("-")
             )
         }));
     }
-    if !accessories.is_empty() {
+    let usb_rows: Vec<DeviceDescriptor> = devices
+        .iter()
+        .filter(|device| device.transport == TransportKind::UsbAccessory)
+        .cloned()
+        .collect();
+    if !usb_rows.is_empty() {
         lines.push(localizer.text(MessageKey::UsbDeviceListHeader).to_string());
-        lines.extend(accessories.iter().map(|accessory| {
+        lines.extend(usb_rows.iter().map(|device| {
+            let detail = device.usb.as_ref().expect("usb detail present");
             format!(
                 "{}\t{:04x}:{:04x}\t{}",
-                accessory.location,
-                accessory.vendor_id,
-                accessory.product_id,
-                sanitize_human(accessory.serial.as_deref().unwrap_or("-"))
+                device.id.0,
+                detail.vendor_id,
+                detail.product_id,
+                sanitize_human(detail.serial.as_deref().unwrap_or("-"))
             )
         }));
     }
     if lines.is_empty() {
         lines.push(localizer.text(MessageKey::NoDevices).to_string());
     }
-    // Merge USB accessories into the JSON payload under "usb".
+    // Rebuild the legacy JSON payload so the CLI contract is unchanged.
+    let adb_payload: Vec<serde_json::Value> = adb_rows
+        .iter()
+        .map(|device| {
+            let detail = device.adb.as_ref().expect("adb detail present");
+            serde_json::json!({
+                "serial": device.id.0,
+                "state": detail.state,
+                "product": detail.product,
+                "model": detail.model,
+                "device": detail.device,
+            })
+        })
+        .collect();
+    let usb_payload: Vec<serde_json::Value> = usb_rows
+        .iter()
+        .map(|device| {
+            let detail = device.usb.as_ref().expect("usb detail present");
+            serde_json::json!({
+                "location": device.id.0,
+                "bus_number": detail.bus_number,
+                "serial": detail.serial,
+                "vendor_id": detail.vendor_id,
+                "product_id": detail.product_id,
+                "mode": detail.mode,
+            })
+        })
+        .collect();
     let payload = serde_json::json!({
-        "adb": devices,
-        "usb": accessories,
+        "adb": adb_payload,
+        "usb": usb_payload,
     });
     Outcome::new("device.list", payload, lines.join("\n"))
 }

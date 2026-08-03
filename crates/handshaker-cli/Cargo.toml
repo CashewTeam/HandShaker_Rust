@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 handshaker-core = { path = "../handshaker-core" }
+handshaker-application = { path = "../handshaker-application" }
 clap.workspace = true
 rustyline.workspace = true
 serde.workspace = true
