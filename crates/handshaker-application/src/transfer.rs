@@ -79,9 +79,9 @@ pub struct UploadRequest {
     pub overwrite: bool,
 }
 
-/// One source/target pair in a batch transfer. Paths are already resolved by
-/// the caller; the application layer does not re-resolve them (the CLI owns
-/// path input, the application owns the transfer use case).
+/// One source/target pair in a batch transfer. Remote side (source for
+/// download, target for upload) is resolved against the device root by the
+/// application layer; the local side is a host path string.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BatchTransferItemDto {
     /// Source path (remote for download, local for upload).
