@@ -1,0 +1,65 @@
+# macOS CI for HandShaker_Rust (Phase F/G, macOS only).
+#
+# Runs the full Rust verification, the FFI ABI check, the C/Swift smoke
+# tests, the static XCFramework build and the Swift Package tests.
+# Real-device acceptance (scripts/swift-device-acceptance.sh) is opt-in
+# (HS_ACCEPTANCE=1) and self-skips without a phone, so this job stays
+# green on runners without devices.
+name: macOS CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: macos-cargo-
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (all targets, all features, warnings as errors)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Workspace tests
+        run: cargo test
+
+      - name: Release build
+        run: cargo build --release
+
+      - name: FFI ABI check (Rust <-> header <-> snapshot, 52 exports)
+        run: bash scripts/generate-ffi-header.sh
+
+      - name: C and Swift smoke tests (ABI 1.5.0)
+        run: bash scripts/run-ffi-smoke-tests.sh
+
+      - name: Stage Apple artifacts and build static XCFramework
+        run: bash scripts/build-ffi-macos.sh
+
+      - name: Swift Package tests
+        working-directory: HandShakerCore
+        run: swift test
+
+      # Real-device acceptance is opt-in: without HS_ACCEPTANCE=1 the
+      # DeviceAcceptanceTests skip themselves, so the job stays green.
+      - name: Swift real-device acceptance (opt-in, skips without phone)
+        run: bash scripts/swift-device-acceptance.sh || true
