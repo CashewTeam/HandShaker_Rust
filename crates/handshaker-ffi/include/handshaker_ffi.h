@@ -1,10 +1,12 @@
-/* handshaker_ffi.h — stable C ABI for handshaker-application (M8 v1.3).
+/* handshaker_ffi.h — stable C ABI for handshaker-application (M8 v1.4).
  *
- * ABI version: 1.3.0 (independent of the Rust crate version). 1.3 adds
- * file stat/count/move/delete, clipboard, trust, device discovery,
- * directory monitor, batch transfers, media libraries/thumbnail/exif and
- * runtime diagnostics; 1.2 added hs_create_directory and hs_ping; 1.1
- * added the transfer surface (hs_transfer_*); 1.0 symbols are unchanged.
+ * ABI version: 1.4.0 (independent of the Rust crate version). 1.4 adds the
+ * photo-sync surface (hs_sync_plan/start/status/stop/start_watch/
+ * stop_watch); 1.3 added file stat/count/move/delete, clipboard, trust,
+ * device discovery, directory monitor, batch transfers, media
+ * libraries/thumbnail/exif and runtime diagnostics; 1.2 added
+ * hs_create_directory and hs_ping; 1.1 added the transfer surface
+ * (hs_transfer_*); 1.0 symbols are unchanged.
  *
  * Ownership rules:
  *  - Rust allocates; Rust frees. Buffers returned in HsCallResult must be
@@ -195,6 +197,33 @@ HsCallResult hs_media_fetch_exif(HsRuntime *runtime, uint64_t session_id,
  * state_dir/wire_log_enabled/active_sessions/active_transfers/
  * capabilities. adb probing never fails the call. */
 HsCallResult hs_runtime_diagnostics(HsRuntime *runtime);
+
+/* Photo sync (ABI 1.4). hs_sync_plan/start take a SyncProfileDto request
+ * {"id":"<optional, default device_uuid>",
+ *  "device_uuid":"phone:<uuid>","remote_root":"<optional, default
+ *  camera folder>","local_root":"/abs/path","enabled":true}
+ * (session id always comes from the call argument). hs_sync_plan result:
+ * SyncPlanDto. hs_sync_start launches the run in the background and
+ * returns {"profile_id":"<id>"}; progress is polled with hs_sync_status
+ * (SyncStatusDto) or observed via events (SyncWatchApplied/Transfer-
+ * Updated/Warning). hs_sync_stop result: {"stopped":true}.
+ * hs_sync_start_watch requires a finished run (phone in SYNCING state;
+ * poll hs_sync_status until running:false), then applies debounced
+ * batches as SyncWatchApplied events; result: {"started":true}.
+ * hs_sync_stop_watch result: {"stopped":true}. Errors: NotFound for an
+ * unknown profile id. */
+HsCallResult hs_sync_plan(HsRuntime *runtime, uint64_t session_id,
+                          const uint8_t *request_json, size_t request_len);
+HsCallResult hs_sync_start(HsRuntime *runtime, uint64_t session_id,
+                           const uint8_t *request_json, size_t request_len);
+HsCallResult hs_sync_status(HsRuntime *runtime, const uint8_t *profile_id,
+                            size_t profile_id_len);
+HsCallResult hs_sync_stop(HsRuntime *runtime, const uint8_t *profile_id,
+                          size_t profile_id_len);
+HsCallResult hs_sync_start_watch(HsRuntime *runtime, const uint8_t *profile_id,
+                                 size_t profile_id_len);
+HsCallResult hs_sync_stop_watch(HsRuntime *runtime, const uint8_t *profile_id,
+                                size_t profile_id_len);
 
 /* Events (queue-pull). hs_subscription_next returns EventEnvelope JSON;
  * on timeout: {"timeout":true}; after runtime shutdown: {"closed":true}.

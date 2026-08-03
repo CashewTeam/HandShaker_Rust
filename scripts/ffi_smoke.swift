@@ -47,7 +47,7 @@ struct DeviceDescriptor: Codable {
 
 func main() throws {
     guard hs_abi_version_major() == 1 else { throw NSError(domain: "abi", code: 1) }
-    guard hs_abi_version_minor() == 3 else { throw NSError(domain: "abi", code: 14) }
+    guard hs_abi_version_minor() == 4 else { throw NSError(domain: "abi", code: 14) }
     guard hs_abi_version_patch() == 0 else { throw NSError(domain: "abi", code: 15) }
 
     // RAII runtime; created and destroyed by the wrapper.
@@ -69,7 +69,7 @@ func main() throws {
     let dresult = hs_runtime_diagnostics(runtime.ptrForTest)
     guard dresult.status == 0 else { throw NSError(domain: "ffi", code: 30) }
     guard let djson = stringAndFree(dresult.value),
-          djson.contains("\"abi\":\"1.3.0\""),
+          djson.contains("\"abi\":\"1.4.0\""),
           djson.contains("\"capabilities\"") else { throw NSError(domain: "ffi", code: 31) }
     let trustResult = hs_trust_list(runtime.ptrForTest)
     guard trustResult.status == 0 else { throw NSError(domain: "ffi", code: 32) }

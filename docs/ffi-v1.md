@@ -1,6 +1,7 @@
-# handshaker-ffi v1.3(C ABI 契约)
+# handshaker-ffi v1.4(C ABI 契约)
 
-> ABI 版本:1.3.0(与 Rust crate 版本独立;major=签名破坏、minor=增函数/可选字段、patch=实现修复)
+> ABI 版本:1.4.0(与 Rust crate 版本独立;major=签名破坏、minor=增函数/可选字段、patch=实现修复)
+> 1.4 追加照片同步面(`hs_sync_plan/start/status/stop/start_watch/stop_watch`);
 > 1.3 追加文件 stat/count/move/delete、剪贴板、信任、设备发现、目录监控、
 > 批量传输、媒体库/缩略图/EXIF 与运行时诊断;1.2 追加 `hs_create_directory`
 > 与 `hs_ping`;1.1 追加传输任务面(`hs_transfer_*`),1.0 符号不变。
@@ -70,22 +71,27 @@ typedef struct HsSubscription HsSubscription;
   NativeCall、NativeError)+ `Models/`(Codable DTO)+ `HandShakerClient.swift`(
   `protocol BackendClient: Sendable`);SwiftUI View 不直接触碰 C 类型。
 
-## 5. v1.3 已导出 vs 未导出
+## 5. v1.4 已导出 vs 未导出
 
-- 已导出(共 44 个符号,Phase E 后):
-  - v1.0/1.1/1.2:Runtime 生命周期与诊断(`hs_runtime_diagnostics`,1.3)、
+- 已导出(共 50 个符号,Phase E + sync 后):
+  - v1.0/1.1/1.2/1.3:Runtime 生命周期与诊断(`hs_runtime_diagnostics`,1.3)、
     设备列表与发现(`hs_list_devices`/`hs_discover_devices`,1.3)、
     连接/断开/快照、文件列表、`hs_create_directory`/`hs_ping`(1.2)、
-    传输任务(start_download/start_upload/cancel/get/list,1.1;
+    传输任务(start_download/upload/cancel/get/list,1.1;
     `hs_transfer_start_batch_download/upload`,1.3)、事件订阅;
-  - v1.3 新增:文件(`hs_stat_file`/`hs_count_files`/`hs_move_path`/
+  - v1.3:文件(`hs_stat_file`/`hs_count_files`/`hs_move_path`/
     `hs_delete_paths`)、剪贴板(`hs_clipboard_list/set/delete/clear`)、
     信任(`hs_trust_list/remove/reset`)、目录监控(`hs_monitor_folder`)、
     媒体(`hs_media_photo_library/video_library/audio_library/thumbnail/
-    fetch_exif`);
-- 未导出(按需追加,minor):照片同步(sync plan/run/status/watch——Application
-  SyncService 已具备,FFI 未包装)、update file info、媒体增量合并;
+    fetch_exif`)、诊断(`hs_runtime_diagnostics`);
+  - v1.4(照片同步):`hs_sync_plan`/`hs_sync_start`(后台运行,立即返回
+    profile_id)/`hs_sync_status`/`hs_sync_stop`/`hs_sync_start_watch`/
+    `hs_sync_stop_watch`——进度用 status 轮询或事件订阅
+    (`SyncWatchApplied`/`TransferUpdated`/`Warning`);编排由调用方完成
+    (plan → start → poll/events → start_watch → stop_watch/stop),每个
+    调用都是短调用;
+- 未导出(按需追加,minor):update file info、媒体增量合并;
 - 大文件字节**不**经过 JSON/FFI(Rust 直接写文件,任务 ID + 进度事件);
 - 缩略图 bytes 经 FFI 写入 `<state_dir>/thumbnails/` 磁盘缓存并返回
-  `cache_path`(不经过 JSON 数字数组;缓存文件按 remote path hash 命名,
-  已存在则复用)。
+  `cache_path`(不经过 JSON 数字数组;缓存文件按设备+路径 hash 命名,
+  已存在则复用——全命中时跳过设备往返;无 TTL,幂等覆盖 + 原子写)。

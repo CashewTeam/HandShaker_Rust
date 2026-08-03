@@ -8,7 +8,7 @@
 #include <string.h>
 
 int main(void) {
-    if (hs_abi_version_major() != 1 || hs_abi_version_minor() != 3) {
+    if (hs_abi_version_major() != 1 || hs_abi_version_minor() != 4) {
         fprintf(stderr, "unexpected ABI version\n");
         return 1;
     }
@@ -36,6 +36,22 @@ int main(void) {
     if (r.status != 0 || r.value.len == 0) {
         fprintf(stderr, "diagnostics failed\n");
         return 30;
+    }
+    hs_call_result_free(r);
+
+    /* ABI 1.4 surface: sync status on an unknown profile is a stable
+     * NotFound, and a NULL runtime yields InvalidArgument. */
+    r = hs_sync_status(rt, (const uint8_t *)"phone:nope", 10);
+    if (r.status == 0) {
+        fprintf(stderr, "sync status must fail for unknown profile\n");
+        return 34;
+    }
+    hs_call_result_free(r);
+
+    r = hs_sync_plan(NULL, 1, (const uint8_t *)"{}", 2);
+    if (r.status == 0) {
+        fprintf(stderr, "sync plan with NULL runtime must fail\n");
+        return 35;
     }
     hs_call_result_free(r);
 
