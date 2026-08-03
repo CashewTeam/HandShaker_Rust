@@ -79,6 +79,53 @@ pub struct UploadRequest {
     pub overwrite: bool,
 }
 
+/// One source/target pair in a batch transfer. Paths are already resolved by
+/// the caller; the application layer does not re-resolve them (the CLI owns
+/// path input, the application owns the transfer use case).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BatchTransferItemDto {
+    /// Source path (remote for download, local for upload).
+    pub source: String,
+    /// Target path (local for download, remote for upload).
+    pub target: String,
+}
+
+/// One directory tree to mirror (source base -> target base). The recursive
+/// enumeration and path-escape hardening live in the core `download_tree` /
+/// `upload_tree`; the application layer only forwards the base pair.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TreeTransferDto {
+    pub source: String,
+    pub target: String,
+}
+
+/// Batch transfer request: serial execution, per-file failures aggregated
+/// (a failure never aborts the remaining files).
+#[derive(Debug, Clone)]
+pub struct BatchTransferRequest {
+    pub session_id: SessionId,
+    /// Explicit file pairs.
+    pub files: Vec<BatchTransferItemDto>,
+    /// Directory trees to mirror recursively.
+    pub trees: Vec<TreeTransferDto>,
+    pub overwrite: bool,
+}
+
+/// One failed item with its error message.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TransferFailureDto {
+    pub source: String,
+    pub target: String,
+    pub message: String,
+}
+
+/// Aggregated batch result.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BatchTransferResultDto {
+    pub ok: Vec<BatchTransferItemDto>,
+    pub failures: Vec<TransferFailureDto>,
+}
+
 /// Internal registry entry.
 pub(crate) struct ActiveTransfer {
     pub(crate) snapshot: Mutex<TransferSnapshot>,

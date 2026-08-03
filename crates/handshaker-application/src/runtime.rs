@@ -10,7 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 use handshaker_core::{
-    ClientOptions, ConnectionTarget, DeviceInfo, ErrorCode, HandShakerClient, RemoteFile,
+    BatchTransferOptions, ClientOptions, ConnectionTarget, DeviceInfo, ErrorCode, HandShakerClient,
+    RemoteFile,
 };
 
 use crate::dto::{
@@ -21,7 +22,8 @@ use crate::dto::{
 use crate::error::{AppResult, PublicError, PublicErrorCode, from_core_error};
 use crate::event::{BackendEvent, EventEnvelope, EventHub};
 use crate::transfer::{
-    DownloadRequest, TransferDirectionDto, TransferId, TransferRegistry, TransferSnapshot,
+    BatchTransferItemDto, BatchTransferRequest, BatchTransferResultDto, DownloadRequest,
+    TransferDirectionDto, TransferFailureDto, TransferId, TransferRegistry, TransferSnapshot,
     TransferState, UploadRequest, request_options, transfer_options,
 };
 
@@ -510,6 +512,66 @@ impl HandShakerRuntime {
         self.inner.transfers.cancel(id)
     }
 
+    /// Transfer a batch of resolved file pairs and directory trees (serial
+    /// execution; per-file failures are aggregated, never aborting the
+    /// remaining files). Tree enumeration and path-escape hardening stay in
+    /// the core `download_tree` implementation.
+    pub async fn batch_download(
+        &self,
+        request: BatchTransferRequest,
+    ) -> AppResult<BatchTransferResultDto> {
+        self.ensure_open()?;
+        let client = self.session_client(request.session_id).await?;
+        let mut result = handshaker_core::BatchTransferResult::default();
+        for tree in &request.trees {
+            let partial = client
+                .download_tree(
+                    &tree.source,
+                    std::path::Path::new(&tree.target),
+                    batch_options(&request),
+                )
+                .await
+                .map_err(|error| from_core_error(error, "batch_download"))?;
+            merge_core_batch(&mut result, partial);
+        }
+        let partial = client
+            .download_many(&core_batch_items(&request.files), batch_options(&request))
+            .await
+            .map_err(|error| from_core_error(error, "batch_download"))?;
+        merge_core_batch(&mut result, partial);
+        Ok(batch_result_to_dto(result))
+    }
+
+    /// Upload a batch of resolved file pairs and directory trees (serial
+    /// execution; per-file failures are aggregated, never aborting the
+    /// remaining files). Tree enumeration stays in the CLI (local filesystem)
+    /// and `upload_tree` handles the remote mirroring.
+    pub async fn batch_upload(
+        &self,
+        request: BatchTransferRequest,
+    ) -> AppResult<BatchTransferResultDto> {
+        self.ensure_open()?;
+        let client = self.session_client(request.session_id).await?;
+        let mut result = handshaker_core::BatchTransferResult::default();
+        for tree in &request.trees {
+            let partial = client
+                .upload_tree(
+                    std::path::Path::new(&tree.source),
+                    &tree.target,
+                    batch_options(&request),
+                )
+                .await
+                .map_err(|error| from_core_error(error, "batch_upload"))?;
+            merge_core_batch(&mut result, partial);
+        }
+        let partial = client
+            .upload_many(&core_batch_items(&request.files), batch_options(&request))
+            .await
+            .map_err(|error| from_core_error(error, "batch_upload"))?;
+        merge_core_batch(&mut result, partial);
+        Ok(batch_result_to_dto(result))
+    }
+
     pub async fn get_transfer(&self, id: TransferId) -> AppResult<TransferSnapshot> {
         self.ensure_open()?;
         self.inner.transfers.get(id)
@@ -629,5 +691,61 @@ pub(crate) fn remote_file_to_dto(file: RemoteFile) -> FileEntryDto {
         checksum: file.checksum,
         is_trash: file.is_trash,
         media_id: file.id,
+    }
+}
+
+/// Convert application batch items to core batch items.
+fn core_batch_items(items: &[BatchTransferItemDto]) -> Vec<handshaker_core::BatchTransferItem> {
+    items
+        .iter()
+        .map(|item| handshaker_core::BatchTransferItem {
+            source: item.source.clone(),
+            target: item.target.clone(),
+        })
+        .collect()
+}
+
+/// Serial, overwrite-permitting core batch options (no progress callback; the
+/// CLI renders the aggregated result after completion).
+fn batch_options(request: &BatchTransferRequest) -> BatchTransferOptions {
+    BatchTransferOptions {
+        overwrite: request.overwrite,
+        progress: None,
+        offset: 0,
+        concurrency: 1,
+    }
+}
+
+/// Merge one partial core batch result into an accumulator.
+fn merge_core_batch(
+    target: &mut handshaker_core::BatchTransferResult,
+    partial: handshaker_core::BatchTransferResult,
+) {
+    target.ok.extend(partial.ok);
+    target.failures.extend(partial.failures);
+}
+
+/// Convert a core batch result onto the application DTO.
+pub(crate) fn batch_result_to_dto(
+    result: handshaker_core::BatchTransferResult,
+) -> BatchTransferResultDto {
+    BatchTransferResultDto {
+        ok: result
+            .ok
+            .iter()
+            .map(|item| BatchTransferItemDto {
+                source: item.source.clone(),
+                target: item.target.clone(),
+            })
+            .collect(),
+        failures: result
+            .failures
+            .iter()
+            .map(|failure| TransferFailureDto {
+                source: failure.source.clone(),
+                target: failure.target.clone(),
+                message: failure.message.clone(),
+            })
+            .collect(),
     }
 }

@@ -90,53 +90,6 @@ pub(crate) fn render_error(error: &Error, command: &str, format: OutputFormat) {
     }
 }
 
-pub(crate) fn render_batch_progress(
-    command: &str,
-    info: &DeviceInfo,
-    progress: &handshaker_core::BatchTransferProgress,
-    format: OutputFormat,
-) {
-    match format {
-        OutputFormat::Human => {
-            let percent = if progress.total == 0 {
-                100
-            } else {
-                (progress.done * 100 / progress.total) as u64
-            };
-            eprint!(
-                "\r{}",
-                ZhCn.format(
-                    MessageKey::BatchProgress,
-                    &[
-                        &progress.done.to_string(),
-                        &progress.total.to_string(),
-                        &percent.to_string(),
-                    ],
-                )
-            );
-            if progress.done >= progress.total {
-                eprintln!();
-            }
-        }
-        OutputFormat::Json => {}
-        OutputFormat::Jsonl => {
-            let envelope = json!({
-                "schema_version": 1,
-                "ok": true,
-                "command": command,
-                "device": DeviceSummary {
-                    serial: info.serial.clone(),
-                    name: info.name.clone(),
-                },
-                "event": "progress",
-                "data": progress,
-                "warnings": [],
-            });
-            println!("{envelope}");
-        }
-    }
-}
-
 pub(crate) fn success_envelope(outcome: &Outcome) -> Value {
     json!({
         "schema_version": 1,

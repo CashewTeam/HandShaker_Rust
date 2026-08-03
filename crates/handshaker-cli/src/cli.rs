@@ -2,7 +2,7 @@ use std::env;
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{ArgAction, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
@@ -11,22 +11,22 @@ use rustyline::error::ReadlineError;
 use serde::Serialize;
 
 use handshaker_core::{
-    BatchTransferFailure, BatchTransferItem, BatchTransferOptions, BatchTransferProgress,
-    BatchTransferResult, ClientEvent, ClientOptions, ConnectionTarget, DeleteOptions, DeviceInfo,
-    Error, EventCallbacks, EventFilter, EventStreamError, HandShakerClient, RemoteFile, Result,
-    StateStore, SyncConfig, SyncDiff, SyncRunResult, SyncSnapshot, SyncStore, apply_file_change,
-    check_conflicts, default_config_dir, execute_plan,
+    ClientEvent, ClientOptions, ConnectionTarget, DeleteOptions, DeviceInfo, Error, EventCallbacks,
+    EventFilter, EventStreamError, HandShakerClient, RemoteFile, Result, StateStore, SyncConfig,
+    SyncDiff, SyncRunResult, SyncSnapshot, SyncStore, apply_file_change, check_conflicts,
+    default_config_dir, execute_plan,
     i18n::{self, Localizer, MessageKey, ZhCn},
     plan_diff, sync_config,
 };
 
 use handshaker_application::{
-    ConnectRequest, CreateDirectoryRequest, DeviceDescriptor, DeviceId, FileEntryDto,
-    HandShakerRuntime, ListDevicesRequest, ListFilesRequest, MovePathRequest, PublicError,
-    RuntimeConfig, SessionId, StatFileRequest, TransportKind,
+    BatchTransferItemDto, BatchTransferRequest, ConnectRequest, CreateDirectoryRequest,
+    DeviceDescriptor, DeviceId, FileEntryDto, HandShakerRuntime, ListDevicesRequest,
+    ListFilesRequest, MovePathRequest, PublicError, RuntimeConfig, SessionId, StatFileRequest,
+    TransferFailureDto, TransportKind, TreeTransferDto,
 };
 
-use crate::output::{Outcome, render, render_batch_progress};
+use crate::output::{Outcome, render};
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
 pub(crate) enum OutputFormat {
@@ -88,7 +88,7 @@ fn pull_target_misparsed(remote: &[String], local: Option<&PathBuf>, local_cwd: 
 fn collect_local_tree<T: Localizer>(
     local: &Path,
     remote: &str,
-    items: &mut Vec<BatchTransferItem>,
+    items: &mut Vec<BatchTransferItemDto>,
     directories: &mut std::collections::BTreeSet<String>,
     bytes: &mut u64,
     localizer: &T,
@@ -122,7 +122,7 @@ fn collect_local_tree<T: Localizer>(
             directories.insert(remote_dir.clone());
             collect_local_tree(&path, &remote_dir, items, directories, bytes, localizer)?;
         } else if file_type.is_file() {
-            items.push(BatchTransferItem {
+            items.push(BatchTransferItemDto {
                 source: path.display().to_string(),
                 target: format!("{remote_base}/{name}"),
             });
@@ -1394,8 +1394,8 @@ async fn execute_connected(
                 ));
             }
             let single_file_mode = remote.len() == 1 && !*recursive;
-            let mut items = Vec::new();
-            let mut trees = Vec::new();
+            let mut items: Vec<BatchTransferItemDto> = Vec::new();
+            let mut trees: Vec<TreeTransferDto> = Vec::new();
             let mut existing_targets = 0_usize;
             let mut total_bytes = 0_u64;
             let mut seen_targets = std::collections::BTreeSet::new();
@@ -1413,7 +1413,10 @@ async fn execute_connected(
                     } else {
                         context.local_cwd.clone()
                     };
-                    trees.push((remote_path, local_dir));
+                    trees.push(TreeTransferDto {
+                        source: remote_path,
+                        target: local_dir.display().to_string(),
+                    });
                 } else {
                     let local_target = if single_file_mode {
                         resolve_local_pull(&context.local_cwd, local.as_deref(), &remote_path)?
@@ -1441,7 +1444,7 @@ async fn execute_connected(
                     if let Some(file) = info.as_ref() {
                         total_bytes += file.size;
                     }
-                    items.push(BatchTransferItem {
+                    items.push(BatchTransferItemDto {
                         source: remote_path,
                         target: local_target.display().to_string(),
                     });
@@ -1451,8 +1454,17 @@ async fn execute_connected(
                 let mut files = items.len();
                 let mut dirs = trees.len();
                 let mut bytes = total_bytes;
-                for (remote_dir, _) in &trees {
-                    for entry in client.list_dir(remote_dir, u32::MAX).await? {
+                for tree in &trees {
+                    let entries = session
+                        .runtime
+                        .list_files(ListFilesRequest {
+                            session_id: session.session_id,
+                            path: tree.source.clone(),
+                            depth: u32::MAX,
+                        })
+                        .await
+                        .map_err(app_error)?;
+                    for entry in entries {
                         if entry.is_directory {
                             dirs += 1;
                         } else {
@@ -1492,24 +1504,16 @@ async fn execute_connected(
                     format,
                 )?;
             }
-            let mut result = BatchTransferResult::default();
-            for (remote_dir, local_dir) in trees {
-                let partial = client
-                    .download_tree(
-                        &remote_dir,
-                        &local_dir,
-                        batch_options(*overwrite, "fs.pull", client.device_info(), format),
-                    )
-                    .await?;
-                merge_batch(&mut result, partial);
-            }
-            let partial = client
-                .download_many(
-                    &items,
-                    batch_options(*overwrite, "fs.pull", client.device_info(), format),
-                )
-                .await?;
-            merge_batch(&mut result, partial);
+            let result = session
+                .runtime
+                .batch_download(BatchTransferRequest {
+                    session_id: session.session_id,
+                    files: items,
+                    trees,
+                    overwrite: *overwrite,
+                })
+                .await
+                .map_err(app_error)?;
             let outcome = Outcome::new(
                 "fs.pull",
                 &result,
@@ -1539,10 +1543,10 @@ async fn execute_connected(
         }) => {
             let remote = resolve_remote(&context.remote_cwd, &remote);
             let single_file_mode = local.len() == 1 && !recursive && !remote.ends_with('/');
-            let mut items = Vec::new();
-            let mut trees = Vec::new();
+            let mut items: Vec<BatchTransferItemDto> = Vec::new();
+            let mut trees: Vec<TreeTransferDto> = Vec::new();
             let mut existing_targets = 0_usize;
-            let mut collected_failures = Vec::new();
+            let mut collected_failures: Vec<TransferFailureDto> = Vec::new();
             let mut total_bytes = 0_u64;
             let mut seen_targets = std::collections::BTreeSet::new();
             for local_path in local {
@@ -1550,7 +1554,7 @@ async fn execute_connected(
                 let metadata = match tokio::fs::metadata(&local_path).await {
                     Ok(metadata) => metadata,
                     Err(error) => {
-                        collected_failures.push(BatchTransferFailure {
+                        collected_failures.push(TransferFailureDto {
                             source: local_path.display().to_string(),
                             target: remote.clone(),
                             message: error.to_string(),
@@ -1565,7 +1569,10 @@ async fn execute_connected(
                             &[&local_path.display().to_string()],
                         )));
                     }
-                    trees.push((local_path, remote.clone()));
+                    trees.push(TreeTransferDto {
+                        source: local_path.display().to_string(),
+                        target: remote.clone(),
+                    });
                 } else {
                     let target = if single_file_mode {
                         remote.clone()
@@ -1588,7 +1595,7 @@ async fn execute_connected(
                         ));
                     }
                     total_bytes += metadata.len();
-                    items.push(BatchTransferItem {
+                    items.push(BatchTransferItemDto {
                         source: local_path.display().to_string(),
                         target,
                     });
@@ -1598,13 +1605,13 @@ async fn execute_connected(
                 let mut files = items.len();
                 let mut dirs = trees.len();
                 let mut bytes = total_bytes;
-                for (local_dir, remote_dir) in &trees {
+                for tree in &trees {
                     let mut tree_items = Vec::new();
                     let mut tree_dirs = std::collections::BTreeSet::new();
                     let mut tree_bytes = 0_u64;
                     collect_local_tree(
-                        local_dir,
-                        remote_dir,
+                        Path::new(&tree.source),
+                        &tree.target,
                         &mut tree_items,
                         &mut tree_dirs,
                         &mut tree_bytes,
@@ -1646,24 +1653,16 @@ async fn execute_connected(
                     format,
                 )?;
             }
-            let mut result = BatchTransferResult::default();
-            for (local_dir, remote_dir) in trees {
-                let partial = client
-                    .upload_tree(
-                        &local_dir,
-                        &remote_dir,
-                        batch_options(*overwrite, "fs.push", client.device_info(), format),
-                    )
-                    .await?;
-                merge_batch(&mut result, partial);
-            }
-            let partial = client
-                .upload_many(
-                    &items,
-                    batch_options(*overwrite, "fs.push", client.device_info(), format),
-                )
-                .await?;
-            merge_batch(&mut result, partial);
+            let mut result = session
+                .runtime
+                .batch_upload(BatchTransferRequest {
+                    session_id: session.session_id,
+                    files: items,
+                    trees,
+                    overwrite: *overwrite,
+                })
+                .await
+                .map_err(app_error)?;
             result.failures.extend(collected_failures);
             let outcome = Outcome::new(
                 "fs.push",
@@ -2846,45 +2845,6 @@ fn remote_name(remote: &str) -> Option<String> {
 
 /// Batch options mirroring the CLI's overwrite switch and (for human output)
 /// a per-file progress line.
-fn batch_options(
-    overwrite: bool,
-    command: &'static str,
-    device: &handshaker_core::DeviceInfo,
-    format: OutputFormat,
-) -> BatchTransferOptions {
-    if format == OutputFormat::Json {
-        return BatchTransferOptions {
-            overwrite,
-            progress: None,
-            offset: 0,
-            concurrency: 1,
-        };
-    }
-    let device = device.clone();
-    let last_done = Arc::new(Mutex::new(None));
-    BatchTransferOptions {
-        overwrite,
-        offset: 0,
-        concurrency: 1,
-        progress: Some(Arc::new(move |progress: BatchTransferProgress| {
-            let Ok(mut last) = last_done.lock() else {
-                return;
-            };
-            if *last == Some(progress.done) {
-                return;
-            }
-            *last = Some(progress.done);
-            render_batch_progress(command, &device, &progress, format);
-        })),
-    }
-}
-
-/// Append a partial batch result into the aggregate.
-fn merge_batch(aggregate: &mut BatchTransferResult, partial: BatchTransferResult) {
-    aggregate.ok.extend(partial.ok);
-    aggregate.failures.extend(partial.failures);
-}
-
 fn normalize_local(path: PathBuf) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {

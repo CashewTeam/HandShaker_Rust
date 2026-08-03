@@ -22,8 +22,9 @@ pub use error::{AppResult, PublicError, PublicErrorCode, from_core_error};
 pub use event::{BackendEvent, EventEnvelope, EventHub};
 pub use runtime::{HandShakerRuntime, normalize_remote_path, resolve_remote_path};
 pub use transfer::{
-    DownloadRequest, TransferDirectionDto, TransferId, TransferRegistry, TransferSnapshot,
-    TransferState, UploadRequest,
+    BatchTransferItemDto, BatchTransferRequest, BatchTransferResultDto, DownloadRequest,
+    TransferDirectionDto, TransferFailureDto, TransferId, TransferRegistry, TransferSnapshot,
+    TransferState, TreeTransferDto, UploadRequest,
 };
 
 #[cfg(test)]

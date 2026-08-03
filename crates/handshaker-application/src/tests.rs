@@ -8,6 +8,7 @@ use handshaker_core::{DeviceInfo, RemoteFile};
 use crate::dto::{DeviceDescriptor, DeviceId, RuntimeConfig, SessionId, TransportKind};
 use crate::error::{PublicErrorCode, from_core_error};
 use crate::runtime::normalize_remote_path;
+use crate::transfer::{BatchTransferItemDto, BatchTransferRequest, BatchTransferResultDto};
 use crate::{HandShakerRuntime, resolve_remote_path};
 
 fn test_config() -> RuntimeConfig {
@@ -406,4 +407,51 @@ fn transfer_snapshot_json_contract_is_stable() {
     assert_eq!(json["state"], "running");
     let decoded: TransferSnapshot = serde_json::from_value(json).expect("deserialize");
     assert_eq!(decoded, snapshot);
+}
+
+#[test]
+fn batch_result_to_dto_preserves_ok_and_failures() {
+    let result = handshaker_core::BatchTransferResult {
+        ok: vec![handshaker_core::BatchTransferItem {
+            source: "/remote/a.txt".to_string(),
+            target: "/local/a.txt".to_string(),
+        }],
+        failures: vec![handshaker_core::BatchTransferFailure {
+            source: "/remote/b.txt".to_string(),
+            target: "/local/b.txt".to_string(),
+            message: "remote io".to_string(),
+        }],
+    };
+    let dto = crate::runtime::batch_result_to_dto(result);
+    assert_eq!(dto.ok.len(), 1);
+    assert_eq!(dto.ok[0].source, "/remote/a.txt");
+    assert_eq!(dto.failures.len(), 1);
+    assert_eq!(dto.failures[0].message, "remote io");
+}
+
+#[test]
+fn batch_request_json_round_trips() {
+    let request = BatchTransferRequest {
+        session_id: SessionId(3),
+        files: vec![BatchTransferItemDto {
+            source: "/remote/c.bin".to_string(),
+            target: "/local/c.bin".to_string(),
+        }],
+        trees: Vec::new(),
+        overwrite: true,
+    };
+    let dto = BatchTransferResultDto {
+        ok: request
+            .files
+            .iter()
+            .map(|item| BatchTransferItemDto {
+                source: item.source.clone(),
+                target: item.target.clone(),
+            })
+            .collect(),
+        failures: Vec::new(),
+    };
+    let json = serde_json::to_value(&dto).expect("serialize");
+    assert_eq!(json["ok"][0]["source"], "/remote/c.bin");
+    assert!(json["failures"].as_array().unwrap().is_empty());
 }
