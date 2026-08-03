@@ -44,6 +44,11 @@ HandShaker 的局域网设备发现使用 **Apple Bonjour（mDNS/DNS-SD）**，�
 | [21-m5-exif-batch](21-m5-exif-batch.md) | M5 EXIF 拉取、媒体库增量合并与批量/递归传输（设计与实现记录） |
 | [22-m6-photo-sync](22-m6-photo-sync.md) | M6 照片同步与实时同步（设计与实现记录） |
 | [23-m7-usb-aoa](23-m7-usb-aoa.md) | M7 USB AOA 连接（设计与实现记录） |
+| [architecture](architecture.md) | M8 架构：Workspace 分层与数据流 |
+| [application-api-v1](application-api-v1.md) | M8 应用服务模型 v1（冻结契约） |
+| [ffi-v1](ffi-v1.md) | M8 handshaker-ffi C ABI v1（契约与接入） |
+| [m8-migration](m8-migration.md) | M8 迁移记录（提交序列与兼容性结论） |
+| [m8-test-report](m8-test-report.md) | M8 测试报告（186 测试与 smoke 验证） |
 
 ## 术语
 

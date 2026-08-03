@@ -55,7 +55,9 @@ pub fn from_str(value: &str) -> HsByteBuffer {
 /// `buffer` must have been produced by `from_bytes` (or be the empty
 /// `{ NULL, 0, 0 }`) and must not have been freed already.
 pub unsafe fn free_buffer(buffer: HsByteBuffer) {
-    if buffer.ptr.is_null() {
+    if buffer.ptr.is_null() || buffer.len == 0 || buffer.len > buffer.capacity {
+        // Malformed buffer: refuse rather than fabricate an allocation from
+        // untrusted length/capacity values. Caller error per the contract.
         return;
     }
     let slice = std::slice::from_raw_parts_mut(buffer.ptr, buffer.capacity);
@@ -66,7 +68,7 @@ pub unsafe fn free_buffer(buffer: HsByteBuffer) {
 /// Convert back into a `Vec` (used only inside tests).
 #[allow(dead_code)]
 pub unsafe fn into_vec(buffer: HsByteBuffer) -> Vec<u8> {
-    if buffer.ptr.is_null() {
+    if buffer.ptr.is_null() || buffer.len == 0 || buffer.len > buffer.capacity {
         return Vec::new();
     }
     let slice = std::slice::from_raw_parts_mut(buffer.ptr, buffer.capacity);

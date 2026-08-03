@@ -46,9 +46,11 @@ pub struct HsRuntime {
 }
 
 /// Event subscription handle: a broadcast receiver owned by the caller.
+/// The receiver is mutex-guarded so concurrent `hs_subscription_next` calls
+/// on one handle are serialized instead of racing.
 pub struct HsSubscription {
     _tokio: tokio::runtime::Runtime,
-    receiver: broadcast::Receiver<handshaker_application::EventEnvelope>,
+    receiver: tokio::sync::Mutex<broadcast::Receiver<handshaker_application::EventEnvelope>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -77,13 +79,19 @@ pub extern "C" fn hs_abi_version_patch() -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn hs_byte_buffer_free(buffer: HsByteBuffer) {
     // Safety: documented contract — buffer must come from this library.
-    unsafe { buffer::free_buffer(buffer) };
+    // Panics (e.g. allocator double-free detection) must never unwind across
+    // the ABI, so catch and swallow them.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        buffer::free_buffer(buffer)
+    }));
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn hs_call_result_free(call_result: HsCallResult) {
     // Safety: documented contract — result must come from this library.
-    unsafe { free_result(call_result) };
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        free_result(call_result)
+    }));
 }
 
 // ---------------------------------------------------------------------------
@@ -198,11 +206,13 @@ pub unsafe extern "C" fn hs_runtime_destroy(runtime: *mut c_void) {
     if runtime.is_null() {
         return;
     }
-    let runtime = Box::from_raw(runtime as *mut HsRuntime);
-    let _ = runtime
-        ._tokio
-        .block_on(async { runtime.app.shutdown().await });
-    drop(runtime);
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let runtime = Box::from_raw(runtime as *mut HsRuntime);
+        let _ = runtime
+            ._tokio
+            .block_on(async { runtime.app.shutdown().await });
+        drop(runtime);
+    }));
 }
 
 // ---------------------------------------------------------------------------
@@ -411,7 +421,7 @@ pub unsafe extern "C" fn hs_subscribe_events(
                         .with_detail(error.to_string()))
                     })
             ),
-            receiver,
+            receiver: tokio::sync::Mutex::new(receiver),
         });
         *slot = Box::into_raw(subscription) as *mut c_void;
         ok(&serde_json::json!({ "subscribed": true }))
@@ -437,9 +447,11 @@ pub unsafe extern "C" fn hs_subscription_next(
         }
         let subscription = &mut *(subscription as *mut HsSubscription);
         let timeout = Duration::from_millis(timeout_ms as u64);
-        let outcome = subscription
-            ._tokio
-            .block_on(async { tokio::time::timeout(timeout, subscription.receiver.recv()).await });
+        let subscription = &mut *(subscription as *mut HsSubscription);
+        let timeout = Duration::from_millis(timeout_ms as u64);
+        let outcome = subscription._tokio.block_on(async {
+            tokio::time::timeout(timeout, subscription.receiver.lock().await.recv()).await
+        });
         match outcome {
             Ok(Ok(envelope)) => ok(&envelope),
             Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
@@ -464,7 +476,9 @@ pub unsafe extern "C" fn hs_subscription_destroy(subscription: *mut c_void) {
     if subscription.is_null() {
         return;
     }
-    drop(Box::from_raw(subscription as *mut HsSubscription));
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        drop(Box::from_raw(subscription as *mut HsSubscription));
+    }));
 }
 
 #[cfg(test)]

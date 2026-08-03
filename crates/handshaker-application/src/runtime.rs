@@ -244,7 +244,19 @@ impl HandShakerRuntime {
             last_activity_at_ms: now_ms(),
             state: SessionState::Ready,
         };
-        self.inner.sessions.lock().await.insert(id, session);
+        // Insert under the session lock and re-check shutdown so a racing
+        // shutdown cannot leave this session orphaned (shutdown takes the
+        // same lock after flipping the flag).
+        {
+            let mut guard = self.inner.sessions.lock().await;
+            if self.inner.shutting_down.load(Ordering::SeqCst) {
+                return Err(PublicError::new(
+                    PublicErrorCode::RuntimeClosed,
+                    "runtime is shut down",
+                ));
+            }
+            guard.insert(id, session);
+        }
         let snapshot = self.get_session_snapshot(id).await?;
         self.inner
             .event_hub
@@ -397,10 +409,11 @@ impl HandShakerRuntime {
     pub async fn start_download(&self, request: DownloadRequest) -> AppResult<TransferId> {
         self.ensure_open()?;
         let client = self.session_client(request.session_id).await?;
+        let remote = resolve_remote_path(&client.root_path(), &request.remote_path);
         let snapshot = self.inner.transfers.into_snapshot_for(
             request.session_id,
             TransferDirectionDto::Download,
-            request.remote_path.clone(),
+            remote.clone(),
             request.local_path.display().to_string(),
         );
         let id = snapshot.id;
@@ -409,7 +422,6 @@ impl HandShakerRuntime {
         let event_hub = self.event_hub();
         let options = transfer_options(registry.clone(), id, request.overwrite);
         let token = request_options(entry.cancel.clone());
-        let remote = request.remote_path;
         let local = request.local_path;
         let handle = tokio::spawn(async move {
             registry.transition(id, TransferState::Running);
@@ -436,7 +448,10 @@ impl HandShakerRuntime {
                 }
             }
         });
-        *entry.join.lock().expect("join poisoned") = Some(handle);
+        *entry
+            .join
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(handle);
         Ok(id)
     }
 
@@ -444,11 +459,12 @@ impl HandShakerRuntime {
     pub async fn start_upload(&self, request: UploadRequest) -> AppResult<TransferId> {
         self.ensure_open()?;
         let client = self.session_client(request.session_id).await?;
+        let remote = resolve_remote_path(&client.root_path(), &request.remote_path);
         let snapshot = self.inner.transfers.into_snapshot_for(
             request.session_id,
             TransferDirectionDto::Upload,
             request.local_path.display().to_string(),
-            request.remote_path.clone(),
+            remote.clone(),
         );
         let id = snapshot.id;
         let entry = self.inner.transfers.register(snapshot);
@@ -457,7 +473,6 @@ impl HandShakerRuntime {
         let options = transfer_options(registry.clone(), id, request.overwrite);
         let token = request_options(entry.cancel.clone());
         let local = request.local_path;
-        let remote = request.remote_path;
         let handle = tokio::spawn(async move {
             registry.transition(id, TransferState::Running);
             let result = client
@@ -483,7 +498,10 @@ impl HandShakerRuntime {
                 }
             }
         });
-        *entry.join.lock().expect("join poisoned") = Some(handle);
+        *entry
+            .join
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(handle);
         Ok(id)
     }
 
@@ -518,13 +536,14 @@ impl HandShakerRuntime {
 
 /// Resolve a possibly-relative remote path against the device root, exactly
 /// once (application layer owns this rule; GUI must not reimplement it).
+/// Absolute inputs are still normalized so `..` cannot escape above `/`.
 pub fn resolve_remote_path(root: &str, path: &str) -> String {
     let trimmed = path.trim();
     if trimmed.is_empty() || trimmed == "." {
         return root.to_string();
     }
     if trimmed.starts_with('/') {
-        return trimmed.to_string();
+        return normalize_remote_path(trimmed);
     }
     // Relative: join under root, normalizing a leading "./" or ".." safely.
     let joined = format!("{root}/{trimmed}");

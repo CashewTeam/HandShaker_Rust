@@ -1,6 +1,6 @@
 # HandShaker_Rust 后端现状与完整开发计划
 
-> 状态基线：2026-08-03，Cargo package `handshaker_rust 0.6.1`。
+> 状态基线：2026-08-03，Cargo workspace `handshaker_rust 0.7.0`（M8 拆分为 core/application/cli/ffi）。
 >
 > 本文只把已经存在于 Rust 代码中的能力标记为“已实现”。协议文档、proto schema 或抓包已经确认，
 > 但尚未形成正式 Rust API/CLI 的能力，仍标记为“未实现”。
@@ -506,9 +506,11 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 - ✅ USB 下完成与 ADB 相同的设备、文件、传输和剪贴板验收。
 - ✅ 拔线能立即结束任务并给出明确错误，不残留资源。
 
-### M8：内部分层整理、应用服务模型冻结与 handshaker-ffi（Swift UniFFI 接入）
+### M8：内部分层整理、应用服务模型冻结与 handshaker-ffi（Swift UniFFI 接入）（已完成，2026-08，0.7.0）
 
 目标：把 0.6.1 之后的后端整理成可被 GUI 长期依赖的分层结构，并建立 FFI 边界。
+实现记录见 `docs/architecture.md`、`docs/application-api-v1.md`、`docs/ffi-v1.md`、
+`docs/m8-migration.md`、`docs/m8-test-report.md`。
 
 任务：
 
@@ -577,7 +579,9 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ## 9. 版本建议
 
-- 当前 `0.6.1`：ADB 基线 + 事件/取消 + WiFi 连接与信任 + 目录监控/主动推送 watch + 媒体库与缩略图 + EXIF/增量合并/批量传输 + 照片同步（PHOTO_SYNC/SYNC_MONITOR 发送侧与增量状态机）。
+- 当前 `0.7.0`（M8）：ADB/WiFi/USB 基线能力全保留；Workspace 拆分 core/application/cli/ffi；
+  应用服务模型冻结（Runtime/Session/Transfer/事件/PublicError v1）；FFI C ABI 1.0.0 最小闭环
+  （设备/连接/文件/事件订阅，C 与 Swift smoke 通过）。
 - 媒体、同步或 USB 等较大里程碑：根据 public API 兼容性由维护者决定 Y 版本。
 - `1.0.0` 前提：至少 ADB + WiFi 稳定、公开 API 和 JSON schema 有兼容承诺、跨平台发布流程成熟。
 - 单次 Bug 修复和简单功能默认只递增 Z；纯文档不递增版本。

@@ -109,21 +109,31 @@ impl TransferRegistry {
         });
         self.transfers
             .lock()
-            .expect("transfer registry poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(id, entry.clone());
         entry
     }
 
     pub fn get(&self, id: TransferId) -> AppResult<TransferSnapshot> {
-        let guard = self.transfers.lock().expect("transfer registry poisoned");
+        let guard = self
+            .transfers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let entry = guard.get(&id).ok_or_else(|| {
             PublicError::new(PublicErrorCode::TransferNotFound, "transfer not found")
         })?;
-        Ok(entry.snapshot.lock().expect("snapshot poisoned").clone())
+        Ok(entry
+            .snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone())
     }
 
     pub fn list(&self) -> Vec<TransferSnapshot> {
-        let guard = self.transfers.lock().expect("transfer registry poisoned");
+        let guard = self
+            .transfers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         guard
             .values()
             .filter_map(|entry| entry.snapshot.lock().ok().map(|snapshot| snapshot.clone()))
@@ -137,9 +147,15 @@ impl TransferRegistry {
         id: TransferId,
         next: TransferState,
     ) -> Option<TransferSnapshot> {
-        let guard = self.transfers.lock().expect("transfer registry poisoned");
+        let guard = self
+            .transfers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let entry = guard.get(&id)?;
-        let mut snapshot = entry.snapshot.lock().expect("snapshot poisoned");
+        let mut snapshot = entry
+            .snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let current = snapshot.state;
         let terminal = matches!(
             current,
@@ -158,7 +174,10 @@ impl TransferRegistry {
     /// Cancel a transfer: idempotent.
     pub fn cancel(&self, id: TransferId) -> AppResult<()> {
         let token = {
-            let guard = self.transfers.lock().expect("transfer registry poisoned");
+            let guard = self
+                .transfers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let entry = guard.get(&id).ok_or_else(|| {
                 PublicError::new(PublicErrorCode::TransferNotFound, "transfer not found")
             })?;
@@ -173,7 +192,10 @@ impl TransferRegistry {
 
     /// Reap finished join handles (best-effort).
     pub(crate) fn reap(&self) {
-        let guard = self.transfers.lock().expect("transfer registry poisoned");
+        let guard = self
+            .transfers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         for entry in guard.values() {
             if let Ok(mut join) = entry.join.lock() {
                 if let Some(handle) = join.take() {
@@ -212,18 +234,30 @@ impl TransferRegistry {
 
     /// Called from the progress callback (sync context).
     pub(crate) fn set_progress(&self, id: TransferId, transferred: u64) {
-        let guard = self.transfers.lock().expect("transfer registry poisoned");
+        let guard = self
+            .transfers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(entry) = guard.get(&id) {
-            let mut snapshot = entry.snapshot.lock().expect("snapshot poisoned");
+            let mut snapshot = entry
+                .snapshot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             snapshot.transferred_bytes = transferred;
             snapshot.state = TransferState::Running;
         }
     }
 
     pub(crate) fn set_error(&self, id: TransferId, error: PublicError) {
-        let guard = self.transfers.lock().expect("transfer registry poisoned");
+        let guard = self
+            .transfers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(entry) = guard.get(&id) {
-            let mut snapshot = entry.snapshot.lock().expect("snapshot poisoned");
+            let mut snapshot = entry
+                .snapshot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             snapshot.error = Some(error);
         }
     }

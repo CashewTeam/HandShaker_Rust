@@ -126,6 +126,12 @@ fn resolve_remote_path_rules() {
     // ".." collapses and never escapes above root.
     assert_eq!(resolve_remote_path("/root", "a/../b"), "/root/b");
     assert_eq!(resolve_remote_path("/root", "../../etc"), "/etc");
+    // Absolute inputs are normalized too: ".." cannot escape above "/".
+    assert_eq!(resolve_remote_path("/root", "/a/../../etc"), "/etc");
+    assert_eq!(
+        resolve_remote_path("/root", "/../../etc/passwd"),
+        "/etc/passwd"
+    );
 }
 
 #[test]
