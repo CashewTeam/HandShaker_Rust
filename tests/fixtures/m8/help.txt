@@ -1,0 +1,25 @@
+兼容 Smartisan HandShaker 的命令行客户端
+
+用法：handshaker [OPTIONS] <COMMAND>
+
+命令：
+  device     设备信息与连通性
+  fs         远端文件管理
+  clipboard  手机剪贴板管理
+  trust      管理 WiFi 信任记录
+  media      媒体库查询与缩略图
+  sync       照片同步（手机 → 主机）
+  shell      进入常驻交互会话
+  batch      从 stdin 逐行读取命令，在单个持久连接上顺序执行
+  watch      监听设备事件（目录监控、剪贴板等主动推送）
+选项：
+      --serial <设备序列号>     指定 ADB 设备序列号
+      --wifi <IP:PORT>     通过 WiFi 直连手机（IP:PORT）
+      --usb                Connect over USB AOA instead of ADB/WiFi. With `--serial`, the value is the accessory `bus-ports` location (e.g. `1-2`)
+      --output <输出格式>      设置输出格式
+      --timeout <超时时间>     设置操作超时时间
+      --yes                确认危险操作
+  -v, --verbose...         增加日志详细程度
+      --wire-log <线路日志路径>  记录完整 SSP 字节流（可能包含敏感内容）
+  -h, --help               显示帮助
+  -V, --version            显示版本
