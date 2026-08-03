@@ -105,6 +105,32 @@ final class DeviceAcceptanceTests: XCTestCase {
         XCTAssertEqual(merged.images.count, photos.images.count)
     }
 
+    /// `startUpload`/`startDownload` only *launch* the transfer (they return
+    /// a `TransferID`); the underlying FFI call must not block on a full
+    /// transfer. Wait for the terminal state so the following operations
+    /// observe a completed file (a premature move would hit
+    /// FILE_IO_INVALID_SOURCE — the source file does not exist yet).
+    private func waitForTransfer(
+        _ runtime: HandShakerRuntime,
+        _ transferID: TransferID,
+        step: String
+    ) async throws {
+        for _ in 0..<150 {  // up to ~30 s
+            let snapshot = try await runtime.transfer(transferID.value)
+            switch snapshot.state {
+            case .completed, .failed, .cancelled:
+                guard snapshot.state == .completed else {
+                    throw XCTSkip("transfer \(step) ended \(snapshot.state.rawValue): \(snapshot.error?.message ?? "no error")")
+                }
+                return
+            default:
+                break
+            }
+            try await Task.sleep(nanoseconds: 200_000_000)
+        }
+        throw XCTSkip("transfer \(step) did not finish within 30 s")
+    }
+
     func testWritePathAcceptance() async throws {
         guard let runtime, let sessionID else {
             throw XCTSkip("setup did not attach a session")
@@ -127,21 +153,27 @@ final class DeviceAcceptanceTests: XCTestCase {
         try payload.write(to: local)
         defer { try? FileManager.default.removeItem(at: local) }
         let remote = "\(testDir)/payload.txt"
+        let uploadID: TransferID
         do {
-            _ = try await runtime.startUpload(sessionID: sessionID, remotePath: remote, localPath: local.path)
+            uploadID = try await runtime.startUpload(sessionID: sessionID, remotePath: remote, localPath: local.path)
         } catch {
             try skipOnPhoneWriteRejection(error, "upload")
+            return
         }
+        try await waitForTransfer(runtime, uploadID, step: "upload")
         let downloaded = FileManager.default.temporaryDirectory
             .appendingPathComponent("hs-acceptance-down-\(UUID().uuidString).txt")
         defer { try? FileManager.default.removeItem(at: downloaded) }
+        let downloadID: TransferID
         do {
-            _ = try await runtime.startDownload(
+            downloadID = try await runtime.startDownload(
                 sessionID: sessionID, remotePath: remote, localPath: downloaded.path
             )
         } catch {
             try skipOnPhoneWriteRejection(error, "download")
+            return
         }
+        try await waitForTransfer(runtime, downloadID, step: "download")
         XCTAssertEqual(try Data(contentsOf: downloaded), payload)
 
         // 3. move + stat.
@@ -150,6 +182,7 @@ final class DeviceAcceptanceTests: XCTestCase {
             try await runtime.movePath(sessionID: sessionID, source: remote, target: moved)
         } catch {
             try skipOnPhoneWriteRejection(error, "move")
+            return
         }
         let movedStat = try await runtime.statFile(sessionID: sessionID, path: moved)
         XCTAssertNotNil(movedStat)
