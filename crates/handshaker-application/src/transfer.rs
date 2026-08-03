@@ -90,9 +90,10 @@ pub struct BatchTransferItemDto {
     pub target: String,
 }
 
-/// One directory tree to mirror (source base -> target base). The recursive
-/// enumeration and path-escape hardening live in the core `download_tree` /
-/// `upload_tree`; the application layer only forwards the base pair.
+/// One directory tree to mirror (source base -> target base). The remote
+/// base is resolved against the device root by the application layer;
+/// recursive enumeration and path-escape hardening live in the core
+/// `download_tree` / `upload_tree`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TreeTransferDto {
     pub source: String,
