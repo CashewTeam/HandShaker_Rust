@@ -359,8 +359,13 @@ impl TransferRegistry {
         for (id, token) in entries {
             token.cancel();
             // Transition after dropping the registry lock (std Mutex is not
-            // re-entrant).
-            self.transition(id, TransferState::Cancelled);
+            // re-entrant); publish the terminal event synchronously so the
+            // transfer events precede the caller's session-level events
+            // (M8.1 Phase C / C5 "terminal events first").
+            if let Some(snapshot) = self.transition(id, TransferState::Cancelled) {
+                self.event_hub
+                    .publish(BackendEvent::TransferUpdated(snapshot));
+            }
             let join = {
                 let guard = self
                     .transfers
@@ -517,6 +522,7 @@ mod tests {
     #[test]
     fn cancel_for_session_only_cancels_that_sessions_transfers() {
         let registry = test_registry();
+        let mut receiver = registry.event_hub.clone().subscribe();
         let entry1 = registry.register(registry.snapshot_for(
             SessionId(1),
             TransferDirectionDto::Download,
@@ -544,6 +550,21 @@ mod tests {
             TransferState::Queued,
             "other session untouched"
         );
+
+        // M8.1 Phase C / C5: the cancelled transfer's terminal event is
+        // published synchronously (before any caller-level session event).
+        let envelope = receiver.try_recv().expect("terminal event published");
+        match envelope.event {
+            BackendEvent::TransferUpdated(snapshot) => {
+                assert_eq!(snapshot.id, id1);
+                assert_eq!(snapshot.state, TransferState::Cancelled);
+            }
+            other => panic!("expected TransferUpdated(Cancelled), got {other:?}"),
+        }
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]

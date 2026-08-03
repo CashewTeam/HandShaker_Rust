@@ -259,3 +259,63 @@ pub struct ClipboardEntryDto {
     pub text: String,
     pub timestamp_ms: i64,
 }
+
+// ---- phone-initiated change events (M8.1 Phase C / C1 bridge) ----
+
+/// Media library that produced a change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MediaKindDto {
+    Photo,
+    Video,
+    Audio,
+}
+
+/// One media entry inside a library change (a stable subset of core
+/// `MediaItem`; album payloads are intentionally not bridged yet).
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct MediaChangeItemDto {
+    pub media_id: Option<u64>,
+    pub path: Option<String>,
+    pub size: Option<u64>,
+    pub created_at: Option<u64>,
+    pub modified_at: Option<u64>,
+    pub mime_type: Option<String>,
+    pub title: Option<String>,
+    pub album_name: Option<String>,
+}
+
+/// A media library change pushed by the phone. The library category is
+/// `media_kind` (not `kind`) so the event JSON keeps its own `kind` tag
+/// distinct from the payload (serde internally-tagged contract).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MediaChangeDto {
+    pub media_kind: MediaKindDto,
+    pub added: Vec<MediaChangeItemDto>,
+    pub deleted: Vec<MediaChangeItemDto>,
+    pub updated: Vec<MediaChangeItemDto>,
+}
+
+/// Category of a phone-initiated remote file change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteFileChangeKind {
+    /// A directory monitor event.
+    DirectoryChanged,
+    /// A synchronization file change.
+    FileChanged,
+    /// A one-shot photo synchronization response.
+    PhotoSyncChanged,
+    /// A synchronization monitor response.
+    SyncMonitorChanged,
+}
+
+/// Summarized remote file change (paths only; full metadata can be added
+/// later without breaking the event schema). The category is `change_kind`
+/// (not `kind`) to keep the event JSON `kind` tag distinct from the payload.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RemoteFileChangeDto {
+    pub change_kind: RemoteFileChangeKind,
+    pub paths: Vec<String>,
+}

@@ -8,11 +8,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::broadcast;
 
-use crate::dto::{DeviceDescriptor, DeviceId, SessionSnapshot};
+use crate::dto::{
+    ClipboardEntryDto, DeviceDescriptor, DeviceId, MediaChangeDto, RemoteFileChangeDto, SessionId,
+    SessionSnapshot,
+};
 use crate::transfer::TransferSnapshot;
 
 /// Backend event kinds for v1 (Session and Transfer are fully implemented;
-/// Clipboard/Media/RemoteFile are reserved for M8.9+).
+/// Clipboard/Media/RemoteFile carry phone-initiated change payloads bridged
+/// from core (M8.1 Phase C / C1)).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[non_exhaustive]
@@ -21,18 +25,25 @@ pub enum BackendEvent {
     RuntimeStopping,
     DeviceAdded(DeviceDescriptor),
     DeviceUpdated(DeviceDescriptor),
-    DeviceRemoved(DeviceId),
+    DeviceRemoved {
+        device_id: DeviceId,
+    },
     SessionStateChanged(Box<SessionSnapshot>),
     TransferUpdated(TransferSnapshot),
-    /// Reserved: clipboard changes (M8.9).
-    #[allow(dead_code)]
-    ClipboardChanged,
-    /// Reserved: media-library changes (M8.9).
-    #[allow(dead_code)]
-    MediaChanged,
-    /// Reserved: remote file changes (M8.9).
-    #[allow(dead_code)]
-    RemoteFileChanged,
+    /// The core session died under a request or transfer (M8.1 Phase C / C5):
+    /// the session is marked `Failed`, its transfers cancelled, and a
+    /// `SessionStateChanged(Failed)` event follows.
+    ConnectionLost {
+        session_id: SessionId,
+    },
+    /// Clipboard history pushed by the phone.
+    ClipboardChanged {
+        entries: Vec<ClipboardEntryDto>,
+    },
+    /// A media library change pushed by the phone.
+    MediaChanged(MediaChangeDto),
+    /// A remote file change (directory monitor / sync) pushed by the phone.
+    RemoteFileChanged(RemoteFileChangeDto),
     Warning(crate::error::PublicError),
 }
 

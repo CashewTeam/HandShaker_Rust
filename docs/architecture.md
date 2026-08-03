@@ -51,7 +51,10 @@ handshaker-core(协议、传输、会话)
   clone client);
 - 事件:`EventEnvelope { sequence, timestamp_ms, event }`,broadcast,
   Lagged 显式上报;Runtime shutdown 后订阅流以 `Closed` 结束;
-  v1 完整实现 Runtime/Session/Transfer 事件,Clipboard/Media/RemoteFile 预留;
+  v1 完整实现 Runtime/Session/Transfer 事件;Core typed events 桥接
+  (M8.1 Phase C/C1):`DeviceUpdated`/`ClipboardChanged`/`MediaChanged`/
+  `RemoteFileChanged` 携带 DTO payload,未知事件安全 `Warning`;请求或
+  传输发现连接丢失时发布 `ConnectionLost` 并将 Session 置 `Failed`(C5);
 - 错误:`PublicError { code, message, detail, retryable, operation }`,
   分区码 1001–9001,`code` 是唯一程序判断依据。
 

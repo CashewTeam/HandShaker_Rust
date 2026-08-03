@@ -373,3 +373,72 @@ connect/disconnect/get session、list files、subscribe/next/destroy。
   `SessionStateChanged(Failed)`(下载取消关闭 Core 会话);
 - 确定性关闭:Failed 会话 disconnect 幂等清理,无残留 adb forward;
 - 测试目录与本地临时文件全部清理。
+
+## 11. M8.1 Phase C 记录(事件桥接与连接丢失,C1/C5)
+
+> C1/C5 于 Phase C 收尾阶段完成,与 §10(C2/C3/C4)共同构成完整 Phase C。
+
+### 11.1 Core typed event 桥接(C1)
+
+- `connect()` 全开 `EventCallbacks`(device_info/photo_library/audio_library/
+  video_library),手机端推送在初始 device-info 请求时注册;
+- 每个 Session 创建 `run_event_bridge` 任务:
+  `client.subscribe_events(EventFilter::all())` → 映射 → `EventHub.publish`;
+  任务只捕获 `DeviceDescriptor` + `Arc<RwLock<DeviceInfoDto>>` + EventHub,
+  **不持有 session/client Arc**,保证 `close_session` 的 `Arc::try_unwrap`
+  仍可成功;Core session sender drop(显式 close)后 recv 返回 `Closed`,
+  任务退出;`close_session` 以 5s 有界 join;client 仍有持有者时 abort;
+- 映射规则(`bridge_client_event`,全 DTO,不泄露 protobuf/线路帧):
+  - `DeviceInfoChanged` → 刷新 Session 缓存 DTO + `DeviceUpdated`;
+  - `ClipboardChanged` → `ClipboardChanged { entries }`;
+  - `MediaLibraryChanged` → `MediaChanged`(新增 `MediaChangeDto`);
+  - `DirectoryChanged/FileChanged/PhotoSyncChanged/SyncMonitorChanged`
+    → `RemoteFileChanged`(新增 `RemoteFileChangeDto`,路径摘要);
+  - `RequestCancelled` → `Warning(RemoteCancelled)`;
+  - `Unknown` → `Warning(ProtocolError)`(含 sid/reason 安全摘要);
+  - `Lagged { missed }` → `Warning`(hub 继续工作,不 panic)。
+- serde 契约:BackendEvent 为 internally-tagged;payload 字段名规避 tag
+  冲突(`MediaChangeDto.media_kind`、`RemoteFileChangeDto.change_kind`),
+  `ConnectionLost { session_id }`/`ClipboardChanged { entries }` 为 struct
+  variant(newtype 包装非 map payload 在 internally-tagged 下不可序列化)。
+
+### 11.2 连接丢失检测(C5)
+
+- 统一 `request()` 包装:所有文件/剪贴板/媒体/ping 请求经
+  `session_client_arc`(短锁)后执行;核心失败经 `from_core_error` 映射,
+  若 `connection_lost_code`(仅 `ConnectFailed`,即 Core Transport 族;
+  `ConnectionLost` 还覆盖 Core `Timeout`,请求超时可能连接仍可用,慢响应
+  不误杀会话)→ `mark_connection_lost`:
+  1. 短锁 CAS `Ready → Failed`(终态幂等,非 Ready no-op);
+  2. `cancel_for_session` 取消该 Session 剩余传输(终态事件先发布);
+  3. 发布 `ConnectionLost { session_id }` → `SessionStateChanged(Failed)`;
+- transfer 闭包原 `mark_session_failed` 调用点升级为 `mark_connection_lost`
+  (传输中取消/传输丢失同样触发完整连接丢失事件流);
+- `session_client_arc` 对非 Ready 状态返回 `SessionClosed(2104)`:
+  连接丢失后的后续请求快速失败,不再等待死 transport;
+- 事件序:Transfer 终态 → `ConnectionLost` → Session `Failed`;
+- 连接丢失时中止该 Session 的桥接任务(`event_task.abort()`),避免半死
+  连接下 Failed 会话继续无归属广播剪贴板/媒体事件(security review
+  MEDIUM 修复);
+- 已知 LOW(记录,暂不修):剪贴板事件广播无 `session_id` 归属且无大小
+  上限(上层持久化事件流需自行过滤/截断);无心跳探测,半开连接下会话
+  可能长期 Ready 并持续请求超时(建议后续周期性 ping 兜底)。
+
+### 11.3 测试与真机验收
+
+- 新增 4 项自动化测试:9 类 ClientEvent 映射(含 DeviceInfoChanged 缓存
+  刷新)、`connection_lost_code` 判定表、`mark_connection_lost` 无 session
+  no-op(transfer 不误取消)、BackendEvent 新 payload JSON fixture
+  (kind token + 字段形状);
+- 真机(ADB,Smartisan U2 Pro/OD103):30MB 下载开始流动后取消 →
+  立即 `Cancelled`(finished_at 置位)→ `ConnectionLost` 事件 →
+  `SessionStateChanged(Failed)` → 后续 `ping` 快速返回
+  `SessionClosed` → disconnect 幂等;输出 `PHASE_C1_C5_DEVICE_OK`;
+  测试目录/临时文件/adb forward 全部清理,example 已删除。
+
+### 11.4 遗留
+
+- `BackendEvent::DeviceAdded/DeviceRemoved` 仍无 discovery watcher 支撑
+  (Phase D 范围);`RemoteFileChangeDto` 仅路径摘要(全元数据后续可加,
+  不破坏 schema);media album payload 未桥接(MediaChangeItemDto 子集);
+- batch 传输仍无逐文件进度事件(任务面 start_* 有)。

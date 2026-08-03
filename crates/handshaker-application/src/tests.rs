@@ -9,7 +9,9 @@ use handshaker_core::{DeviceInfo, RemoteFile};
 use crate::dto::{DeviceDescriptor, DeviceId, RuntimeConfig, SessionId, TransportKind};
 use crate::error::{PublicErrorCode, from_core_error};
 use crate::runtime::normalize_remote_path;
-use crate::transfer::{BatchTransferItemDto, BatchTransferRequest, BatchTransferResultDto};
+use crate::transfer::{
+    BatchTransferItemDto, BatchTransferRequest, BatchTransferResultDto, TransferState,
+};
 use crate::{HandShakerRuntime, resolve_remote_path};
 
 fn test_config() -> RuntimeConfig {
@@ -772,4 +774,387 @@ fn batch_request_json_round_trips() {
     let json = serde_json::to_value(&dto).expect("serialize");
     assert_eq!(json["ok"][0]["source"], "/remote/c.bin");
     assert!(json["failures"].as_array().unwrap().is_empty());
+}
+
+// ---- M8.1 Phase C: event bridge (C1) and connection loss (C5) ----
+
+fn sample_device() -> DeviceDescriptor {
+    DeviceDescriptor {
+        id: DeviceId("adb:3f13d4b4".to_string()),
+        display_name: Some("test phone".to_string()),
+        model: Some("OD103".to_string()),
+        transport: TransportKind::Adb,
+        transport_address: "3f13d4b4".to_string(),
+        available: true,
+        adb: None,
+        usb: None,
+    }
+}
+
+fn remote_file(path: &str) -> RemoteFile {
+    RemoteFile {
+        path: path.to_string(),
+        size: 0,
+        created_at: None,
+        modified_at: None,
+        is_directory: false,
+        checksum: None,
+        is_trash: None,
+        id: None,
+        ext_data: None,
+    }
+}
+
+#[test]
+fn bridge_client_event_maps_known_core_events() {
+    use crate::event::BackendEvent;
+    use handshaker_core::{
+        CancellationInfo, CancellationOrigin, FileChange, FileChangeStatus, FileEvent,
+        FileEventKind, MediaKind, UnknownEvent, UnknownEventReason,
+    };
+
+    let device = sample_device();
+    let device_info = std::sync::RwLock::new(crate::dto::DeviceInfoDto {
+        serial: "3f13d4b4".to_string(),
+        phone_id: None,
+        name: None,
+        model: None,
+        brand: None,
+        manufacturer: None,
+        smartisan_version: None,
+        apk_version: None,
+        apk_version_name: None,
+        root_path: "/storage/emulated/0".to_string(),
+    });
+    let bridge = |event| crate::runtime::bridge_client_event(event, &device, &device_info);
+
+    // Clipboard change -> DTO payload.
+    let event = bridge(handshaker_core::ClientEvent::ClipboardChanged(vec![
+        handshaker_core::ClipboardEntry {
+            text: "hello".to_string(),
+            timestamp_ms: 123,
+        },
+    ]));
+    match event {
+        BackendEvent::ClipboardChanged { entries } => {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].text, "hello");
+            assert_eq!(entries[0].timestamp_ms, 123);
+        }
+        other => panic!("expected ClipboardChanged, got {other:?}"),
+    }
+
+    // Media change -> MediaChangeDto with kind and items.
+    let event = bridge(handshaker_core::ClientEvent::MediaLibraryChanged(
+        handshaker_core::MediaLibraryChange {
+            kind: MediaKind::Photo,
+            added: vec![handshaker_core::MediaItem {
+                media_id: Some(7),
+                path: Some("/DCIM/a.jpg".to_string()),
+                size: Some(1024),
+                ..Default::default()
+            }],
+            deleted: vec![],
+            updated: vec![],
+            albums: vec![],
+        },
+    ));
+    match event {
+        BackendEvent::MediaChanged(change) => {
+            assert_eq!(change.media_kind, crate::dto::MediaKindDto::Photo);
+            assert_eq!(change.added.len(), 1);
+            assert_eq!(change.added[0].media_id, Some(7));
+            assert_eq!(change.added[0].path.as_deref(), Some("/DCIM/a.jpg"));
+        }
+        other => panic!("expected MediaChanged, got {other:?}"),
+    }
+
+    // Directory monitor -> summarized RemoteFileChanged with paths.
+    let event = bridge(handshaker_core::ClientEvent::DirectoryChanged(vec![
+        FileEvent {
+            file: Some(remote_file("/watch/a.txt")),
+            kind: FileEventKind::Create,
+        },
+    ]));
+    match event {
+        BackendEvent::RemoteFileChanged(change) => {
+            assert_eq!(
+                change.change_kind,
+                crate::dto::RemoteFileChangeKind::DirectoryChanged
+            );
+            assert_eq!(change.paths, vec!["/watch/a.txt".to_string()]);
+        }
+        other => panic!("expected RemoteFileChanged, got {other:?}"),
+    }
+
+    // Sync file change -> file_changed kind.
+    let event = bridge(handshaker_core::ClientEvent::FileChanged(vec![
+        FileChange {
+            file: Some(remote_file("/sync/b.txt")),
+            status: FileChangeStatus::Modified,
+        },
+    ]));
+    match event {
+        BackendEvent::RemoteFileChanged(change) => {
+            assert_eq!(
+                change.change_kind,
+                crate::dto::RemoteFileChangeKind::FileChanged
+            );
+            assert_eq!(change.paths, vec!["/sync/b.txt".to_string()]);
+        }
+        other => panic!("expected RemoteFileChanged, got {other:?}"),
+    }
+
+    // Photo sync response -> photo_sync_changed kind.
+    let event = bridge(handshaker_core::ClientEvent::PhotoSyncChanged(
+        handshaker_core::PhotoSyncChange {
+            is_first: Some(true),
+            files: vec![remote_file("/sync/c.jpg")],
+            is_success: Some(true),
+        },
+    ));
+    match event {
+        BackendEvent::RemoteFileChanged(change) => {
+            assert_eq!(
+                change.change_kind,
+                crate::dto::RemoteFileChangeKind::PhotoSyncChanged
+            );
+            assert_eq!(change.paths, vec!["/sync/c.jpg".to_string()]);
+        }
+        other => panic!("expected RemoteFileChanged, got {other:?}"),
+    }
+
+    // Sync monitor response -> sync_monitor_changed kind (no paths).
+    let event = bridge(handshaker_core::ClientEvent::SyncMonitorChanged(
+        handshaker_core::SyncMonitorChange {
+            is_success: Some(true),
+        },
+    ));
+    match event {
+        BackendEvent::RemoteFileChanged(change) => {
+            assert_eq!(
+                change.change_kind,
+                crate::dto::RemoteFileChangeKind::SyncMonitorChanged
+            );
+            assert!(change.paths.is_empty());
+        }
+        other => panic!("expected RemoteFileChanged, got {other:?}"),
+    }
+
+    // Phone cancellation outside a request -> safe warning, never a panic.
+    let event = bridge(handshaker_core::ClientEvent::RequestCancelled(
+        CancellationInfo {
+            sid: 9,
+            origin: CancellationOrigin::Remote {
+                error_code: Some(1),
+            },
+            connection_closed: false,
+        },
+    ));
+    match event {
+        BackendEvent::Warning(warning) => {
+            assert_eq!(warning.code, PublicErrorCode::RemoteCancelled)
+        }
+        other => panic!("expected Warning, got {other:?}"),
+    }
+
+    // Unknown event -> safe warning with protocol code.
+    let event = bridge(handshaker_core::ClientEvent::Unknown(UnknownEvent {
+        sid: 4,
+        request_type: None,
+        payload_len: 3,
+        reason: UnknownEventReason::MissingTypeAmbiguous,
+    }));
+    match event {
+        BackendEvent::Warning(warning) => {
+            assert_eq!(warning.code, PublicErrorCode::ProtocolError)
+        }
+        other => panic!("expected Warning, got {other:?}"),
+    }
+
+    // Device info change -> DeviceUpdated + cached DTO refreshed in place.
+    let event = bridge(handshaker_core::ClientEvent::DeviceInfoChanged(
+        DeviceInfo {
+            serial: "3f13d4b4".to_string(),
+            phone_id: Some("phone-uuid".to_string()),
+            name: Some("U2 Pro".to_string()),
+            model: Some("OD103".to_string()),
+            brand: Some("smartisan".to_string()),
+            manufacturer: Some("smartisan".to_string()),
+            smartisan_version: Some("6.7.4".to_string()),
+            apk_version: Some("1".to_string()),
+            apk_version_name: Some("1.2.0".to_string()),
+            root_path: "/storage/emulated/0".to_string(),
+            external_storage_path: Some("/storage/emulated/0".to_string()),
+            disk_size: Some(64_000_000_000),
+            used_disk_size: Some(30_000_000_000),
+            battery_percentage: Some(88),
+            phone_locked: Some(false),
+        },
+    ));
+    match event {
+        BackendEvent::DeviceUpdated(updated) => {
+            assert_eq!(updated.id, device.id);
+        }
+        other => panic!("expected DeviceUpdated, got {other:?}"),
+    }
+    assert_eq!(
+        device_info.read().unwrap().name.as_deref(),
+        Some("U2 Pro"),
+        "device-info change must refresh the session DTO"
+    );
+}
+
+#[test]
+fn connection_lost_code_judges_connection_failures() {
+    // Only the core Transport family (ConnectFailed) proves the connection
+    // is gone; ConnectionLost also covers core Timeout, which may leave a
+    // usable connection (slow phone) and must NOT kill the session.
+    let lost = [PublicErrorCode::ConnectFailed];
+    for code in lost {
+        assert!(
+            crate::runtime::connection_lost_code(code),
+            "{code:?} must count as connection loss"
+        );
+    }
+    let alive = [
+        PublicErrorCode::ConnectionLost,
+        PublicErrorCode::RemotePathNotFound,
+        PublicErrorCode::SessionNotFound,
+        PublicErrorCode::TransferCancelled,
+        PublicErrorCode::ProtocolError,
+        PublicErrorCode::TrustRejected,
+        PublicErrorCode::Internal,
+    ];
+    for code in alive {
+        assert!(
+            !crate::runtime::connection_lost_code(code),
+            "{code:?} must NOT count as connection loss"
+        );
+    }
+}
+
+#[tokio::test]
+async fn mark_connection_lost_is_noop_without_a_session() {
+    use crate::event::EventHub;
+    use crate::transfer::{TransferDirectionDto, TransferRegistry};
+
+    let hub = EventHub::new(8);
+    let registry = TransferRegistry::new(hub.clone(), 64, None);
+    let sessions = tokio::sync::Mutex::new(std::collections::HashMap::new());
+    let mut receiver = hub.subscribe();
+    crate::runtime::mark_connection_lost(&sessions, &registry, SessionId(1), &hub).await;
+    // No session -> no events at all (and no panic).
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+    // A transfer registered for that session is untouched (session absent).
+    let snapshot = registry.snapshot_for(
+        SessionId(1),
+        TransferDirectionDto::Download,
+        "/a".to_string(),
+        "/b".to_string(),
+    );
+    let entry = registry.register(snapshot);
+    let id = entry.snapshot.lock().unwrap().id;
+    crate::runtime::mark_connection_lost(&sessions, &registry, SessionId(1), &hub).await;
+    assert_eq!(
+        registry.get(id).unwrap().state,
+        TransferState::Queued,
+        "no session -> no cancellation"
+    );
+}
+
+#[test]
+fn backend_event_change_payloads_serialize_with_stable_kinds() {
+    use crate::event::BackendEvent;
+
+    let json = serde_json::to_value(BackendEvent::ConnectionLost {
+        session_id: SessionId(3),
+    })
+    .unwrap();
+    assert_eq!(json["kind"], "connection_lost");
+    assert_eq!(json["session_id"], 3);
+
+    // Device variants: struct payloads serialize under the same tag
+    // (DeviceRemoved must not be a newtype: non-map payloads cannot be
+    // internally tagged).
+    let json = serde_json::to_value(BackendEvent::DeviceRemoved {
+        device_id: DeviceId("adb:x".into()),
+    })
+    .unwrap();
+    assert_eq!(json["kind"], "device_removed");
+    assert_eq!(json["device_id"], "adb:x");
+
+    let json = serde_json::to_value(BackendEvent::ClipboardChanged {
+        entries: vec![crate::dto::ClipboardEntryDto {
+            text: "hi".to_string(),
+            timestamp_ms: 1,
+        }],
+    })
+    .unwrap();
+    assert_eq!(json["kind"], "clipboard_changed");
+    assert_eq!(json["entries"][0]["text"], "hi");
+    assert_eq!(json["entries"][0]["timestamp_ms"], 1);
+
+    let json = serde_json::to_value(BackendEvent::MediaChanged(crate::dto::MediaChangeDto {
+        media_kind: crate::dto::MediaKindDto::Audio,
+        added: vec![],
+        deleted: vec![],
+        updated: vec![],
+    }))
+    .unwrap();
+    assert_eq!(json["kind"], "media_changed");
+    assert_eq!(json["media_kind"], "audio");
+
+    let json = serde_json::to_value(BackendEvent::RemoteFileChanged(
+        crate::dto::RemoteFileChangeDto {
+            change_kind: crate::dto::RemoteFileChangeKind::FileChanged,
+            paths: vec!["/x".to_string()],
+        },
+    ))
+    .unwrap();
+    assert_eq!(json["kind"], "remote_file_changed");
+    assert_eq!(json["change_kind"], "file_changed");
+    assert_eq!(json["paths"][0], "/x");
+
+    // Every variant must round-trip through its stable JSON shape.
+    for value in [
+        serde_json::to_value(BackendEvent::RuntimeStopping).unwrap(),
+        serde_json::to_value(BackendEvent::ConnectionLost {
+            session_id: SessionId(3),
+        })
+        .unwrap(),
+        serde_json::to_value(BackendEvent::DeviceRemoved {
+            device_id: DeviceId("adb:x".into()),
+        })
+        .unwrap(),
+        serde_json::to_value(BackendEvent::ClipboardChanged { entries: vec![] }).unwrap(),
+        serde_json::to_value(BackendEvent::MediaChanged(crate::dto::MediaChangeDto {
+            media_kind: crate::dto::MediaKindDto::Audio,
+            added: vec![],
+            deleted: vec![],
+            updated: vec![],
+        }))
+        .unwrap(),
+        serde_json::to_value(BackendEvent::RemoteFileChanged(
+            crate::dto::RemoteFileChangeDto {
+                change_kind: crate::dto::RemoteFileChangeKind::DirectoryChanged,
+                paths: vec![],
+            },
+        ))
+        .unwrap(),
+    ] {
+        let decoded: BackendEvent = serde_json::from_value(value).expect("decode event");
+        assert!(matches!(
+            decoded,
+            BackendEvent::RuntimeStopping
+                | BackendEvent::ConnectionLost { .. }
+                | BackendEvent::DeviceRemoved { .. }
+                | BackendEvent::ClipboardChanged { .. }
+                | BackendEvent::MediaChanged(_)
+                | BackendEvent::RemoteFileChanged(_)
+        ));
+    }
 }

@@ -1605,14 +1605,14 @@ x86_64-apple-darwin
 - XCFramework；
 - Swift Package tests。
 
-#### Linux
+#### Linux（当前阶段暂时不做，仅 macOS）
 
 - workspace tests；
 - FFI build；
 - C smoke；
 - exported symbols check。
 
-#### Windows
+#### Windows（当前阶段暂时不做，仅 macOS）
 
 - workspace build/tests；
 - DLL build；
@@ -1754,8 +1754,6 @@ Swift wrapper 真机测试：
 ## CI
 
 - [ ] macOS C/Swift 成功路径测试；
-- [ ] Linux build/test；
-- [ ] Windows FFI build；
 - [ ] release artifacts；
 - [ ] ABI/header signature check；
 - [ ] 无设备和 fake device 两类测试。
