@@ -1135,7 +1135,7 @@ Swift wrapper 真机测试：
 - ADB；
 - Wi-Fi 首次信任；
 - Wi-Fi 重连；
-- USB AOA；
+- USB AOA（断开连接后重连需要真人帮助）；
 - list files；
 - mkdir/move/delete；
 - upload/download MD5；
