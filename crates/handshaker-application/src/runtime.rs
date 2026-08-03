@@ -526,10 +526,7 @@ impl HandShakerRuntime {
     /// session without opening a second connection. Leaks a core type on
     /// purpose and is removed once the CLI migration is complete (before the
     /// v1 freeze is lifted).
-    pub async fn session_client(
-        &self,
-        session_id: SessionId,
-    ) -> AppResult<Arc<HandShakerClient>> {
+    pub async fn session_client(&self, session_id: SessionId) -> AppResult<Arc<HandShakerClient>> {
         let guard = self.inner.sessions.lock().await;
         guard
             .get(&session_id)

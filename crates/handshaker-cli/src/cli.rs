@@ -21,8 +21,9 @@ use handshaker_core::{
 };
 
 use handshaker_application::{
-    ConnectRequest, DeviceDescriptor, DeviceId, HandShakerRuntime, ListDevicesRequest,
-    PublicError, RuntimeConfig, SessionId, TransportKind,
+    ConnectRequest, CreateDirectoryRequest, DeviceDescriptor, DeviceId, FileEntryDto,
+    HandShakerRuntime, ListDevicesRequest, ListFilesRequest, MovePathRequest, PublicError,
+    RuntimeConfig, SessionId, StatFileRequest, TransportKind,
 };
 
 use crate::output::{Outcome, render, render_batch_progress};
@@ -40,6 +41,39 @@ struct DryRunReport {
     dirs: usize,
     bytes: u64,
     dry_run: bool,
+}
+
+/// CLI-side rendering shape for a remote file entry, mirroring the legacy
+/// core `RemoteFile` JSON contract so migrating commands stay byte-compatible
+/// (the application DTO uses `created_at_ms`/`modified_at_ms`/`media_id`).
+#[derive(Debug, Serialize)]
+struct CliFileEntry {
+    path: String,
+    size: u64,
+    created_at: Option<u64>,
+    modified_at: Option<u64>,
+    is_directory: bool,
+    checksum: Option<String>,
+    is_trash: Option<bool>,
+    id: Option<u64>,
+    ext_data: Option<String>,
+}
+
+/// Map an application file entry onto the CLI rendering shape. `ext_data` is
+/// media-channel-only in core and never populated by directory listings, so
+/// it is always `None` here.
+fn cli_file_entry(file: &FileEntryDto) -> CliFileEntry {
+    CliFileEntry {
+        path: file.path.clone(),
+        size: file.size,
+        created_at: file.created_at_ms,
+        modified_at: file.modified_at_ms,
+        is_directory: file.is_directory,
+        checksum: file.checksum.clone(),
+        is_trash: file.is_trash,
+        id: file.media_id,
+        ext_data: None,
+    }
 }
 
 /// Detect a missing `--` in `fs pull REMOTE LOCAL`: the second positional was
@@ -840,9 +874,12 @@ async fn select_device_descriptor(
         .map_err(app_error)?;
     let online: Vec<_> = devices.into_iter().filter(|d| d.available).collect();
     match &cli.serial {
-        Some(serial) => online.into_iter().find(|d| &d.id.0 == serial).ok_or_else(|| {
-            Error::DeviceSelection(i18n::format("adb.device_unavailable", &[serial]))
-        }),
+        Some(serial) => online
+            .into_iter()
+            .find(|d| &d.id.0 == serial)
+            .ok_or_else(|| {
+                Error::DeviceSelection(i18n::format("adb.device_unavailable", &[serial]))
+            }),
         None => match online.len() {
             0 => Err(Error::DeviceSelection(
                 i18n::text("adb.no_online_device").to_string(),
@@ -874,10 +911,7 @@ async fn close_session(app: AppSession) -> Result<()> {
         client,
     } = app;
     drop(client);
-    runtime
-        .disconnect(session_id)
-        .await
-        .map_err(app_error)
+    runtime.disconnect(session_id).await.map_err(app_error)
 }
 
 async fn connect(cli: &Cli) -> Result<AppSession> {
@@ -1188,16 +1222,34 @@ async fn execute_connected(
         }
         Command::Fs(FsCommand::Ls { path, depth }) => {
             let path = resolve_remote(&context.remote_cwd, path.as_deref().unwrap_or("."));
-            let files = client.list_dir(&path, *depth).await?;
+            let entries = session
+                .runtime
+                .list_files(ListFilesRequest {
+                    session_id: session.session_id,
+                    path,
+                    depth: *depth,
+                })
+                .await
+                .map_err(app_error)?;
+            let files: Vec<_> = entries.iter().map(cli_file_entry).collect();
             Outcome::new("fs.ls", &files, human_files(&files))?
         }
         Command::Fs(FsCommand::Stat { path }) => {
             let path = resolve_remote(&context.remote_cwd, path);
-            let file = client.stat(&path).await?.ok_or_else(|| Error::RemoteIo {
-                code: None,
-                message: localizer.format(MessageKey::RemoteMissing, &[&path]),
-            })?;
-            Outcome::new("fs.stat", &file, human_file(&file))?
+            let file = session
+                .runtime
+                .stat_file(StatFileRequest {
+                    session_id: session.session_id,
+                    path: path.clone(),
+                })
+                .await
+                .map_err(app_error)?
+                .ok_or_else(|| Error::RemoteIo {
+                    code: None,
+                    message: localizer.format(MessageKey::RemoteMissing, &[&path]),
+                })?;
+            let entry = cli_file_entry(&file);
+            Outcome::new("fs.stat", &entry, human_file(&entry))?
         }
         Command::Fs(FsCommand::Count {
             path,
@@ -1214,7 +1266,15 @@ async fn execute_connected(
         }
         Command::Fs(FsCommand::Exists { path }) => {
             let path = resolve_remote(&context.remote_cwd, path);
-            let exists = client.file_exists(&path).await?;
+            let exists = session
+                .runtime
+                .stat_file(StatFileRequest {
+                    session_id: session.session_id,
+                    path: path.clone(),
+                })
+                .await
+                .map_err(app_error)?
+                .is_some();
             Outcome::new(
                 "fs.exists",
                 serde_json::json!({ "path": path, "exists": exists }),
@@ -1229,17 +1289,47 @@ async fn execute_connected(
         }
         Command::Fs(FsCommand::Mkdir { path }) => {
             let path = resolve_remote(&context.remote_cwd, path);
-            let file = client.create_dir(&path).await?;
+            session
+                .runtime
+                .create_directory(CreateDirectoryRequest {
+                    session_id: session.session_id,
+                    path: path.clone(),
+                })
+                .await
+                .map_err(app_error)?;
+            // The phone returns the created entry on success; stat it back so
+            // the JSON contract (a RemoteFile-shaped entry) is preserved.
+            let file = session
+                .runtime
+                .stat_file(StatFileRequest {
+                    session_id: session.session_id,
+                    path: path.clone(),
+                })
+                .await
+                .map_err(app_error)?
+                .ok_or_else(|| Error::RemoteIo {
+                    code: None,
+                    message: localizer.format(MessageKey::RemoteMissing, &[&path]),
+                })?;
+            let entry = cli_file_entry(&file);
             Outcome::new(
                 "fs.mkdir",
-                &file,
-                localizer.format(MessageKey::DirectoryCreated, &[&file.path]),
+                &entry,
+                localizer.format(MessageKey::DirectoryCreated, &[&path]),
             )?
         }
         Command::Fs(FsCommand::Mv { source, target }) => {
             let source = resolve_remote(&context.remote_cwd, source);
             let target = resolve_remote(&context.remote_cwd, target);
-            client.rename(&source, &target).await?;
+            session
+                .runtime
+                .move_path(MovePathRequest {
+                    session_id: session.session_id,
+                    source: source.clone(),
+                    target: target.clone(),
+                })
+                .await
+                .map_err(app_error)?;
             Outcome::new(
                 "fs.mv",
                 serde_json::json!({ "source": source, "target": target }),
@@ -2835,14 +2925,14 @@ fn human_device_info(info: &handshaker_core::DeviceInfo) -> String {
     )
 }
 
-fn human_files(files: &[RemoteFile]) -> String {
+fn human_files(files: &[CliFileEntry]) -> String {
     let localizer = ZhCn;
     let mut lines = vec![localizer.text(MessageKey::FileListHeader).to_string()];
     lines.extend(files.iter().map(human_file));
     lines.join("\n")
 }
 
-fn human_file(file: &RemoteFile) -> String {
+fn human_file(file: &CliFileEntry) -> String {
     let localizer = ZhCn;
     format!(
         "{}\t{}\t{}\t{}",
@@ -2891,6 +2981,45 @@ fn parse_duration(value: &str) -> std::result::Result<Duration, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_file_entry_mirrors_remote_file_json_contract() {
+        let entry = FileEntryDto {
+            path: "/storage/emulated/0/a.txt".to_string(),
+            size: 7,
+            created_at_ms: Some(1000),
+            modified_at_ms: Some(2000),
+            is_directory: false,
+            checksum: Some("abc".to_string()),
+            is_trash: Some(false),
+            media_id: Some(42),
+        };
+        let cli = cli_file_entry(&entry);
+        // The CLI JSON keys must match the legacy core RemoteFile contract
+        // (path/size/created_at/modified_at/is_directory/checksum/is_trash/
+        // id/ext_data) so migrating commands stay byte-compatible.
+        let value = serde_json::to_value(&cli).expect("serialize");
+        let object = value.as_object().expect("object");
+        let expected: std::collections::BTreeSet<&str> = [
+            "path",
+            "size",
+            "created_at",
+            "modified_at",
+            "is_directory",
+            "checksum",
+            "is_trash",
+            "id",
+            "ext_data",
+        ]
+        .into_iter()
+        .collect();
+        let actual: std::collections::BTreeSet<&str> = object.keys().map(String::as_str).collect();
+        assert_eq!(actual, expected);
+        assert_eq!(cli.id, Some(42));
+        assert_eq!(cli.created_at, Some(1000));
+        assert_eq!(cli.modified_at, Some(2000));
+        assert!(cli.ext_data.is_none());
+    }
 
     #[test]
     fn collect_local_tree_counts_files_dirs_and_bytes() {
