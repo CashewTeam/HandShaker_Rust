@@ -69,7 +69,7 @@ func main() throws {
     let dresult = hs_runtime_diagnostics(runtime.ptrForTest)
     guard dresult.status == 0 else { throw NSError(domain: "ffi", code: 30) }
     guard let djson = stringAndFree(dresult.value),
-          djson.contains("\"abi\":\"1.4.0\""),
+          djson.contains("\"abi\":\"1.5.0\""),
           djson.contains("\"capabilities\"") else { throw NSError(domain: "ffi", code: 31) }
     let trustResult = hs_trust_list(runtime.ptrForTest)
     guard trustResult.status == 0 else { throw NSError(domain: "ffi", code: 32) }
