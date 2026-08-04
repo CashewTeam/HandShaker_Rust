@@ -299,8 +299,17 @@ pub fn local_destination(config: &SyncConfig, phone_path: &str) -> Result<PathBu
     Ok(Path::new(&config.local_root).join(relative))
 }
 
-/// Download one file to `<destination>.hs-part`, hash it, then atomically
-/// rename over the destination. Returns (local path, sha256 hex).
+/// Download one file to a unique temp path in the destination directory,
+/// hash it, then atomically rename over the destination. Returns
+/// (local path, sha256 hex).
+///
+/// P1-3: the temp name is `<destination>.<random>.hs-part` — the old
+/// `with_extension("hs-part")` collapsed `a.jpg` and `a.png` onto the
+/// same `a.hs-part`, so two profiles/runtimes (or a re-entrant sync)
+/// could clobber each other's partial download. A guard removes the temp
+/// file on every error path (download failure, hash failure, rename
+/// failure); the SHA-256 read runs on a blocking pool so a large photo
+/// does not stall the Tokio workers (heartbeat/events stay responsive).
 async fn download_one(
     client: &HandShakerClient,
     phone_path: &str,
@@ -314,20 +323,36 @@ async fn download_one(
             ))
         })?;
     }
-    let part = destination.with_extension("hs-part");
-    client
-        .download_with_options(
-            phone_path,
-            &part,
-            crate::domain::TransferOptions {
-                overwrite: true,
-                progress: None,
-                offset: 0,
-            },
-            crate::cancellation::RequestOptions::default(),
-        )
-        .await?;
-    let hash = sha256_file(&part)?;
+    // Unique temp path in the SAME directory as the destination so the
+    // final rename stays atomic (same filesystem).
+    let mut temp_name = destination.as_os_str().to_owned();
+    temp_name.push(format!(".hs-part.{}", rand::random::<u64>()));
+    let part = PathBuf::from(temp_name);
+    let outcome = async {
+        client
+            .download_with_options(
+                phone_path,
+                &part,
+                crate::domain::TransferOptions {
+                    overwrite: true,
+                    progress: None,
+                    offset: 0,
+                },
+                crate::cancellation::RequestOptions::default(),
+            )
+            .await?;
+        let hash = hash_file_blocking(&part).await?;
+        Ok::<_, Error>((hash,))
+    }
+    .await;
+    let hash = match outcome {
+        Ok((hash,)) => hash,
+        Err(error) => {
+            // Guard: never leave a partial download behind.
+            let _ = fs::remove_file(&part);
+            return Err(error);
+        }
+    };
     fs::rename(&part, &destination).map_err(|error| {
         let _ = fs::remove_file(&part);
         Error::LocalIo(i18n::format(
@@ -336,6 +361,21 @@ async fn download_one(
         ))
     })?;
     Ok((destination.display().to_string(), hash))
+}
+
+/// SHA-256 of a file on the blocking pool (P1-3: large local files must
+/// not stall the async workers that also serve heartbeats and events).
+async fn hash_file_blocking(path: &Path) -> Result<String> {
+    let path = path.to_path_buf();
+    let display = path.display().to_string();
+    tokio::task::spawn_blocking(move || sha256_file(&path))
+        .await
+        .map_err(|_| {
+            Error::LocalIo(i18n::format(
+                "sync.local_read_failed",
+                &[&display, "hash task panicked"],
+            ))
+        })?
 }
 
 /// SHA-256 hex digest of a file.
@@ -738,6 +778,51 @@ mod tests {
                 .checksum
                 .as_deref(),
             Some("c-a")
+        );
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn download_one_uses_unique_temp_names_and_leaves_no_partials() {
+        // P1-3: `a.jpg` and `a.png` both map to `a.hs-part` under the old
+        // naming; both must now download independently (unique random temp
+        // files) and no `.hs-part` file may linger after success.
+        let fake = crate::test_support::FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let jpg = temp.path().join("a.jpg");
+        let png = temp.path().join("a.png");
+        let (jpg_local, jpg_sha) = download_one(
+            &client,
+            "/storage/emulated/0/DCIM/Camera/a.jpg",
+            jpg.clone(),
+        )
+        .await
+        .expect("download jpg");
+        let (png_local, png_sha) = download_one(
+            &client,
+            "/storage/emulated/0/DCIM/Camera/a.png",
+            png.clone(),
+        )
+        .await
+        .expect("download png");
+        assert_eq!(jpg_local, jpg.display().to_string());
+        assert_eq!(png_local, png.display().to_string());
+        assert_eq!(fs::read(&jpg).expect("read"), b"download-data");
+        assert_eq!(fs::read(&png).expect("read"), b"download-data");
+        assert!(!jpg_sha.is_empty());
+        assert!(!png_sha.is_empty());
+        // No partial file may remain in the destination directory.
+        let leftovers: Vec<_> = std::fs::read_dir(temp.path())
+            .expect("dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".hs-part."))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files must be cleaned up: {leftovers:?}"
         );
         client.close().await.expect("close");
         fake.finish().await;
