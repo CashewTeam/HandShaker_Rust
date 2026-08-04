@@ -51,8 +51,11 @@ pub fn plan_diff(phone_files: &[RemoteFile], snapshot: &SyncSnapshot) -> SyncDif
         match snapshot.files.get(&file.path) {
             None => diff.added.push(file.path.clone()),
             Some(record) => {
-                let checksum_changed = record.checksum.is_some()
-                    && file.checksum.as_deref() != record.checksum.as_deref();
+                // P1-1: any observable checksum state change is a content
+                // change — including None -> Some and Some -> None (only
+                // "both absent" means unchanged). The old guard
+                // `record.checksum.is_some() &&` skipped None->Some.
+                let checksum_changed = record.checksum.as_deref() != file.checksum.as_deref();
                 let metadata_changed = record.ext_data.as_deref() != file.ext_data.as_deref()
                     || record.modified_at != file.modified_at;
                 if checksum_changed {
@@ -89,11 +92,22 @@ pub fn check_conflicts(diff: &SyncDiff, snapshot: &SyncSnapshot) -> Vec<String> 
         if !local.exists() {
             continue;
         }
-        if let Ok(actual) = sha256_file(&local)
-            && actual != expected
-            && seen.insert(path.clone(), ()).is_none()
-        {
-            conflicts.push(path.clone());
+        // Fail closed (P1-1): an existing local file that cannot be read
+        // (permissions, transient I/O) is a conflict — treating it as
+        // "no conflict" would let the plan overwrite or delete a file whose
+        // content we could not verify against the ledger's SHA-256.
+        match sha256_file(&local) {
+            Ok(actual) if actual != expected => {
+                if seen.insert(path.clone(), ()).is_none() {
+                    conflicts.push(path.clone());
+                }
+            }
+            Ok(_) => {} // matches the ledger: safe to touch
+            Err(_) => {
+                if seen.insert(path.clone(), ()).is_none() {
+                    conflicts.push(path.clone());
+                }
+            }
         }
     }
     conflicts
@@ -551,6 +565,78 @@ mod tests {
         assert!(rerun.info_modified.is_empty());
         client.close().await.expect("close");
         fake.finish().await;
+    }
+
+    #[test]
+    fn plan_diff_checksum_none_to_some_is_a_content_change() {
+        // P1-1: the old guard `record.checksum.is_some() &&` treated a
+        // record with no checksum as never-content-modified, so a phone
+        // that started reporting checksums (None -> Some) would silently
+        // skip the re-download. Only "both absent" means unchanged.
+        let snapshot = SyncSnapshot {
+            files: BTreeMap::from([(
+                "/storage/emulated/0/DCIM/Camera/a.jpg".to_string(),
+                SyncFileRecord {
+                    size: 10,
+                    checksum: None, // legacy record without a checksum
+                    ext_data: None,
+                    modified_at: Some(1),
+                    local_path: "/tmp/a.jpg".to_string(),
+                    local_sha256: Some("x".to_string()),
+                },
+            )]),
+        };
+        let phone = vec![phone_file_help(
+            "/storage/emulated/0/DCIM/Camera/a.jpg",
+            "now-hashed",
+            None,
+        )];
+        let diff = plan_diff(&phone, &snapshot);
+        assert_eq!(
+            diff.added,
+            vec!["/storage/emulated/0/DCIM/Camera/a.jpg".to_string()],
+            "None -> Some checksum must count as a content change"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_conflicts_fails_closed_on_unreadable_local_file() {
+        // P1-1: an existing local file that cannot be read must be treated
+        // as a conflict (its content cannot be verified against the
+        // ledger), never as "no conflict" — the plan would otherwise
+        // overwrite or delete an unverifiable file.
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let local = temp.path().join("locked.jpg");
+        std::fs::write(&local, b"user content").expect("write");
+        std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod 000");
+
+        let snapshot = SyncSnapshot {
+            files: BTreeMap::from([(
+                "/storage/emulated/0/DCIM/Camera/locked.jpg".to_string(),
+                SyncFileRecord {
+                    size: 10,
+                    checksum: Some("c".to_string()),
+                    ext_data: None,
+                    modified_at: Some(1),
+                    local_path: local.to_string_lossy().into_owned(),
+                    local_sha256: Some("expected-sha".to_string()),
+                },
+            )]),
+        };
+        let diff = SyncDiff {
+            deleted: vec!["/storage/emulated/0/DCIM/Camera/locked.jpg".to_string()],
+            ..SyncDiff::default()
+        };
+        let conflicts = check_conflicts(&diff, &snapshot);
+        assert_eq!(
+            conflicts,
+            vec!["/storage/emulated/0/DCIM/Camera/locked.jpg".to_string()],
+            "unreadable local file must fail closed as a conflict"
+        );
     }
 
     #[tokio::test]
