@@ -145,6 +145,40 @@ fn session_state_from_u8(value: u8) -> SessionState {
     }
 }
 
+/// Media snapshot cache key: one session, one library kind (round-2 P1-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct MediaSnapshotKey {
+    pub(crate) session_id: u64,
+    pub(crate) kind: SnapshotMediaKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SnapshotMediaKind {
+    Photo,
+    Video,
+    Audio,
+}
+
+/// Cached full library snapshot (round-2 P1-2). The map value pairs the
+/// snapshot with its fetch time for the TTL check.
+#[derive(Clone)]
+pub(crate) enum MediaSnapshotEntry {
+    Photo(PhotoLibraryDto),
+    Video(VideoLibraryDto),
+    Audio(AudioLibraryDto),
+}
+type MediaSnapshotValue = (std::time::Instant, MediaSnapshotEntry);
+
+/// Drop every cached media snapshot of a session (round-2 P1-2).
+async fn invalidate_media_snapshots_inner(inner: &RuntimeInner, session_id: SessionId) {
+    let mut guard = inner.media_snapshots.lock().await;
+    guard.retain(|key, _| key.session_id != session_id.0);
+}
+
+/// Snapshot freshness window: after this the next page re-fetches the
+/// full library once (bounded staleness, single network hit per window).
+const MEDIA_SNAPSHOT_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Minimal v3 ledger envelope for `list_sync_ledgers` (round-2 P0-1):
 /// only the identity and the tracked file count/bytes are needed for
 /// listing, so the full record map is decoded but not kept.
@@ -166,6 +200,10 @@ pub(crate) struct RuntimeInner {
     /// by `start_sync`/`register_sync_job`, queried by `get_sync_status`,
     /// and removed by `stop_sync` / shutdown.
     pub(crate) sync_jobs: Mutex<HashMap<String, Arc<SyncJob>>>,
+    /// Media library snapshot cache (round-2 P1-2): paging slices a
+    /// cached full snapshot instead of re-fetching the whole library per
+    /// page. Invalidated by MediaChanged events; TTL-bounded.
+    pub(crate) media_snapshots: Mutex<HashMap<MediaSnapshotKey, MediaSnapshotValue>>,
     /// Per-ledger write mutexes keyed by `ledger_scope_key` (round-2
     /// P0-1): two profiles that share one ledger (same device + same
     /// normalized roots) serialize their runs/commits; distinct scopes
@@ -225,6 +263,7 @@ impl HandShakerRuntime {
                 shutting_down: AtomicBool::new(false),
                 sync_jobs: Mutex::new(HashMap::new()),
                 sync_ledger_locks: Mutex::new(HashMap::new()),
+                media_snapshots: Mutex::new(HashMap::new()),
                 launch_gate: tokio::sync::RwLock::new(()),
             }),
         })
@@ -1353,6 +1392,102 @@ impl HandShakerRuntime {
 
     /// Snapshot of the phone photo library (P1-9: metadata-only list
     /// response — thumbnail bytes are never embedded).
+    /// Cached full photo library: serves the cached snapshot while fresh,
+    /// otherwise fetches once (network outside the lock), stores and
+    /// returns it (round-2 P1-2).
+    async fn cached_photo_library(&self, session_id: SessionId) -> AppResult<PhotoLibraryDto> {
+        let key = MediaSnapshotKey {
+            session_id: session_id.0,
+            kind: SnapshotMediaKind::Photo,
+        };
+        {
+            let guard = self.inner.media_snapshots.lock().await;
+            if let Some((fetched_at, MediaSnapshotEntry::Photo(snapshot))) = guard.get(&key)
+                && fetched_at.elapsed() < MEDIA_SNAPSHOT_TTL
+            {
+                return Ok(snapshot.clone());
+            }
+        }
+        let library = self.fetch_photo_library(session_id).await?;
+        self.inner.media_snapshots.lock().await.insert(
+            key,
+            (
+                std::time::Instant::now(),
+                MediaSnapshotEntry::Photo(library.clone()),
+            ),
+        );
+        Ok(library)
+    }
+
+    async fn fetch_photo_library(&self, session_id: SessionId) -> AppResult<PhotoLibraryDto> {
+        let mut library = self
+            .request(session_id, "get_photo_library", |client| async move {
+                client.get_photo_library().await.map(Into::into)
+            })
+            .await?;
+        crate::media::strip_photo_thumbnails(&mut library);
+        Ok(library)
+    }
+
+    /// Cached full video library (round-2 P1-2), same TTL/invalidation as
+    /// `cached_photo_library`.
+    async fn cached_video_library(&self, session_id: SessionId) -> AppResult<VideoLibraryDto> {
+        let key = MediaSnapshotKey {
+            session_id: session_id.0,
+            kind: SnapshotMediaKind::Video,
+        };
+        {
+            let guard = self.inner.media_snapshots.lock().await;
+            if let Some((fetched_at, MediaSnapshotEntry::Video(snapshot))) = guard.get(&key)
+                && fetched_at.elapsed() < MEDIA_SNAPSHOT_TTL
+            {
+                return Ok(snapshot.clone());
+            }
+        }
+        let library: VideoLibraryDto = self
+            .request(session_id, "get_video_library", |client| async move {
+                client.get_video_library().await.map(Into::into)
+            })
+            .await?;
+        self.inner.media_snapshots.lock().await.insert(
+            key,
+            (
+                std::time::Instant::now(),
+                MediaSnapshotEntry::Video(library.clone()),
+            ),
+        );
+        Ok(library)
+    }
+
+    /// Cached full audio library (round-2 P1-2).
+    async fn cached_audio_library(&self, session_id: SessionId) -> AppResult<AudioLibraryDto> {
+        let key = MediaSnapshotKey {
+            session_id: session_id.0,
+            kind: SnapshotMediaKind::Audio,
+        };
+        {
+            let guard = self.inner.media_snapshots.lock().await;
+            if let Some((fetched_at, MediaSnapshotEntry::Audio(snapshot))) = guard.get(&key)
+                && fetched_at.elapsed() < MEDIA_SNAPSHOT_TTL
+            {
+                return Ok(snapshot.clone());
+            }
+        }
+        let library: AudioLibraryDto = self
+            .request(session_id, "get_audio_library", |client| async move {
+                client.get_audio_library().await.map(Into::into)
+            })
+            .await?;
+        self.inner.media_snapshots.lock().await.insert(
+            key,
+            (
+                std::time::Instant::now(),
+                MediaSnapshotEntry::Audio(library.clone()),
+            ),
+        );
+        Ok(library)
+    }
+
     pub async fn get_photo_library(&self, session_id: SessionId) -> AppResult<PhotoLibraryDto> {
         let mut library = self
             .request(session_id, "get_photo_library", |client| async move {
@@ -1378,7 +1513,7 @@ impl HandShakerRuntime {
         limit: Option<usize>,
     ) -> AppResult<PhotoLibraryDto> {
         let limit = self.validate_page_limit(limit)?;
-        let full = self.get_photo_library(session_id).await?;
+        let full = self.cached_photo_library(session_id).await?;
         let (images, next_cursor) =
             crate::media::slice_page(full.images, cursor, limit, |image| image.media_id);
         Ok(PhotoLibraryDto {
@@ -1409,7 +1544,7 @@ impl HandShakerRuntime {
         limit: Option<usize>,
     ) -> AppResult<VideoLibraryDto> {
         let limit = self.validate_page_limit(limit)?;
-        let full = self.get_video_library(session_id).await?;
+        let full = self.cached_video_library(session_id).await?;
         let (videos, next_cursor) =
             crate::media::slice_page(full.videos, cursor, limit, |video| video.media_id);
         Ok(VideoLibraryDto {
@@ -1439,7 +1574,7 @@ impl HandShakerRuntime {
         limit: Option<usize>,
     ) -> AppResult<AudioLibraryDto> {
         let limit = self.validate_page_limit(limit)?;
-        let full = self.get_audio_library(session_id).await?;
+        let full = self.cached_audio_library(session_id).await?;
         let (tracks, next_cursor) =
             crate::media::slice_page(full.tracks, cursor, limit, |track| track.media_id);
         Ok(AudioLibraryDto {
@@ -3066,12 +3201,17 @@ async fn run_event_bridge(
 ) {
     loop {
         match subscription.recv().await {
-            Ok(event) => event_hub.publish(bridge_client_event(
-                event,
-                session_id,
-                &device,
-                &device_info,
-            )),
+            Ok(event) => {
+                // The bridge only runs while the runtime holds the session
+                // (the bridge task is cancelled during shutdown), but be
+                // defensive: a dropped runtime skips the event.
+                let Some(inner) = runtime.upgrade() else {
+                    continue;
+                };
+                event_hub.publish(
+                    bridge_client_event(event, session_id, &inner, &device, &device_info).await,
+                );
+            }
             Err(EventStreamError::Lagged { missed }) => {
                 event_hub.publish(BackendEvent::Warning(PublicError::new(
                     PublicErrorCode::InvalidState,
@@ -3118,9 +3258,10 @@ fn file_change_status_token(status: FileChangeStatus) -> String {
 /// Device-info changes also refresh the session's cached DTO in place so
 /// `SessionSnapshot.device_info` stays current. Never leaks protobuf types
 /// or wire payloads across the application boundary.
-pub(crate) fn bridge_client_event(
+pub(crate) async fn bridge_client_event(
     event: ClientEvent,
     session_id: SessionId,
+    inner: &RuntimeInner,
     device: &DeviceDescriptor,
     device_info: &std::sync::RwLock<DeviceInfoDto>,
 ) -> BackendEvent {
@@ -3148,10 +3289,15 @@ pub(crate) fn bridge_client_event(
                 })
                 .collect(),
         },
-        ClientEvent::MediaLibraryChanged(change) => BackendEvent::MediaChanged {
-            session_id,
-            change: media_change_to_dto(change),
-        },
+        ClientEvent::MediaLibraryChanged(change) => {
+            // Round-2 P1-2: the library changed — any cached snapshot for
+            // this session is stale and must not serve the next page.
+            invalidate_media_snapshots_inner(inner, session_id).await;
+            BackendEvent::MediaChanged {
+                session_id,
+                change: media_change_to_dto(change),
+            }
+        }
         ClientEvent::DirectoryChanged(events) => BackendEvent::RemoteFileChanged {
             session_id,
             change: RemoteFileChangeDto {

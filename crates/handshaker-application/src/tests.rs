@@ -1975,14 +1975,17 @@ fn remote_file(path: &str) -> RemoteFile {
     }
 }
 
-#[test]
-fn bridge_client_event_maps_known_core_events() {
+#[tokio::test]
+async fn bridge_client_event_maps_known_core_events() {
     use crate::event::BackendEvent;
     use handshaker_core::{
         CancellationInfo, CancellationOrigin, FileChange, FileChangeStatus, FileEvent,
         FileEventKind, MediaKind, UnknownEvent, UnknownEventReason,
     };
 
+    let runtime = crate::HandShakerRuntime::create(crate::dto::RuntimeConfig::default())
+        .await
+        .expect("runtime");
     let device = sample_device();
     let device_info = std::sync::RwLock::new(crate::dto::DeviceInfoDto {
         serial: "3f13d4b4".to_string(),
@@ -2002,16 +2005,32 @@ fn bridge_client_event_maps_known_core_events() {
         phone_locked: None,
     });
     let session_id = SessionId(7);
-    let bridge =
-        |event| crate::runtime::bridge_client_event(event, session_id, &device, &device_info);
+    // Round-2 P1-2: the bridge takes the runtime inner (media snapshot
+    // invalidation). A helper fn avoids the FnOnce/async-move trap of a
+    // closure.
+    async fn bridge_event(
+        runtime: &crate::HandShakerRuntime,
+        session_id: SessionId,
+        device: &crate::dto::DeviceDescriptor,
+        device_info: &std::sync::RwLock<crate::dto::DeviceInfoDto>,
+        event: handshaker_core::ClientEvent,
+    ) -> crate::event::BackendEvent {
+        crate::runtime::bridge_client_event(event, session_id, &runtime.inner, device, device_info)
+            .await
+    }
 
     // Clipboard change -> DTO payload.
-    let event = bridge(handshaker_core::ClientEvent::ClipboardChanged(vec![
-        handshaker_core::ClipboardEntry {
+    let event = bridge_event(
+        &runtime,
+        session_id,
+        &device,
+        &device_info,
+        handshaker_core::ClientEvent::ClipboardChanged(vec![handshaker_core::ClipboardEntry {
             text: "hello".to_string(),
             timestamp_ms: 123,
-        },
-    ]));
+        }]),
+    )
+    .await;
     match event {
         BackendEvent::ClipboardChanged {
             session_id: source,
@@ -2026,8 +2045,12 @@ fn bridge_client_event_maps_known_core_events() {
     }
 
     // Media change -> MediaChangeDto with kind and items.
-    let event = bridge(handshaker_core::ClientEvent::MediaLibraryChanged(
-        handshaker_core::MediaLibraryChange {
+    let event = bridge_event(
+        &runtime,
+        session_id,
+        &device,
+        &device_info,
+        handshaker_core::ClientEvent::MediaLibraryChanged(handshaker_core::MediaLibraryChange {
             kind: MediaKind::Photo,
             added: vec![handshaker_core::MediaItem {
                 media_id: Some(7),
@@ -2038,8 +2061,9 @@ fn bridge_client_event_maps_known_core_events() {
             deleted: vec![],
             updated: vec![],
             albums: vec![],
-        },
-    ));
+        }),
+    )
+    .await;
     match event {
         BackendEvent::MediaChanged {
             session_id: source,
@@ -2055,12 +2079,17 @@ fn bridge_client_event_maps_known_core_events() {
     }
 
     // Directory monitor -> summarized RemoteFileChanged with paths.
-    let event = bridge(handshaker_core::ClientEvent::DirectoryChanged(vec![
-        FileEvent {
+    let event = bridge_event(
+        &runtime,
+        session_id,
+        &device,
+        &device_info,
+        handshaker_core::ClientEvent::DirectoryChanged(vec![FileEvent {
             file: Some(remote_file("/watch/a.txt")),
             kind: FileEventKind::Create,
-        },
-    ]));
+        }]),
+    )
+    .await;
     match event {
         BackendEvent::RemoteFileChanged {
             session_id: source,
@@ -2077,12 +2106,17 @@ fn bridge_client_event_maps_known_core_events() {
     }
 
     // Sync file change -> file_changed kind.
-    let event = bridge(handshaker_core::ClientEvent::FileChanged(vec![
-        FileChange {
+    let event = bridge_event(
+        &runtime,
+        session_id,
+        &device,
+        &device_info,
+        handshaker_core::ClientEvent::FileChanged(vec![FileChange {
             file: Some(remote_file("/sync/b.txt")),
             status: FileChangeStatus::Modified,
-        },
-    ]));
+        }]),
+    )
+    .await;
     match event {
         BackendEvent::RemoteFileChanged {
             session_id: source,
@@ -2099,13 +2133,18 @@ fn bridge_client_event_maps_known_core_events() {
     }
 
     // Photo sync response -> photo_sync_changed kind.
-    let event = bridge(handshaker_core::ClientEvent::PhotoSyncChanged(
-        handshaker_core::PhotoSyncChange {
+    let event = bridge_event(
+        &runtime,
+        session_id,
+        &device,
+        &device_info,
+        handshaker_core::ClientEvent::PhotoSyncChanged(handshaker_core::PhotoSyncChange {
             is_first: Some(true),
             files: vec![remote_file("/sync/c.jpg")],
             is_success: Some(true),
-        },
-    ));
+        }),
+    )
+    .await;
     match event {
         BackendEvent::RemoteFileChanged {
             session_id: source,
@@ -2122,11 +2161,16 @@ fn bridge_client_event_maps_known_core_events() {
     }
 
     // Sync monitor response -> sync_monitor_changed kind (no paths).
-    let event = bridge(handshaker_core::ClientEvent::SyncMonitorChanged(
-        handshaker_core::SyncMonitorChange {
+    let event = bridge_event(
+        &runtime,
+        session_id,
+        &device,
+        &device_info,
+        handshaker_core::ClientEvent::SyncMonitorChanged(handshaker_core::SyncMonitorChange {
             is_success: Some(true),
-        },
-    ));
+        }),
+    )
+    .await;
     match event {
         BackendEvent::RemoteFileChanged {
             session_id: source,
@@ -2143,15 +2187,20 @@ fn bridge_client_event_maps_known_core_events() {
     }
 
     // Phone cancellation outside a request -> safe warning, never a panic.
-    let event = bridge(handshaker_core::ClientEvent::RequestCancelled(
-        CancellationInfo {
+    let event = bridge_event(
+        &runtime,
+        session_id,
+        &device,
+        &device_info,
+        handshaker_core::ClientEvent::RequestCancelled(CancellationInfo {
             sid: 9,
             origin: CancellationOrigin::Remote {
                 error_code: Some(1),
             },
             connection_closed: false,
-        },
-    ));
+        }),
+    )
+    .await;
     match event {
         BackendEvent::Warning(warning) => {
             assert_eq!(warning.code, PublicErrorCode::RemoteCancelled)
@@ -2160,12 +2209,19 @@ fn bridge_client_event_maps_known_core_events() {
     }
 
     // Unknown event -> safe warning with protocol code.
-    let event = bridge(handshaker_core::ClientEvent::Unknown(UnknownEvent {
-        sid: 4,
-        request_type: None,
-        payload_len: 3,
-        reason: UnknownEventReason::MissingTypeAmbiguous,
-    }));
+    let event = bridge_event(
+        &runtime,
+        session_id,
+        &device,
+        &device_info,
+        handshaker_core::ClientEvent::Unknown(UnknownEvent {
+            sid: 4,
+            request_type: None,
+            payload_len: 3,
+            reason: UnknownEventReason::MissingTypeAmbiguous,
+        }),
+    )
+    .await;
     match event {
         BackendEvent::Warning(warning) => {
             assert_eq!(warning.code, PublicErrorCode::ProtocolError)
@@ -2174,8 +2230,12 @@ fn bridge_client_event_maps_known_core_events() {
     }
 
     // Device info change -> DeviceUpdated + cached DTO refreshed in place.
-    let event = bridge(handshaker_core::ClientEvent::DeviceInfoChanged(
-        DeviceInfo {
+    let event = bridge_event(
+        &runtime,
+        session_id,
+        &device,
+        &device_info,
+        handshaker_core::ClientEvent::DeviceInfoChanged(DeviceInfo {
             serial: "3f13d4b4".to_string(),
             phone_id: Some("phone-uuid".to_string()),
             name: Some("U2 Pro".to_string()),
@@ -2191,8 +2251,9 @@ fn bridge_client_event_maps_known_core_events() {
             used_disk_size: Some(30_000_000_000),
             battery_percentage: Some(88),
             phone_locked: Some(false),
-        },
-    ));
+        }),
+    )
+    .await;
     match event {
         BackendEvent::DeviceUpdated {
             session_id: source,

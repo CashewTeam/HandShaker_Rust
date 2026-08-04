@@ -374,6 +374,7 @@
     "usb.connect_task_failed": "USB 连接任务异常终止：{0}",
     "sync.legacy_scope_unproven": "检测到不含同步范围(Profile scope)的旧版同步台账（v2: {0} / v1: {1}）：无法证明其属于当前同步目录，为避免跨 Profile 误删文件，请备份后删除旧文件并重新同步",
     "sync.status_none": "该设备尚未同步任何照片（没有匹配的同步台账）",
-    "sync.delete_failed": "删除同步文件失败：{0}（{1}）"
+    "sync.delete_failed": "删除同步文件失败：{0}（{1}）",
+    "session.unmatched_dropped": "忽略无法识别的 sid 数据（超出上限）"
   }
 }

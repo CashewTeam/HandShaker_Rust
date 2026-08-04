@@ -21,14 +21,26 @@ use crate::protocol::handshake::HandshakeStrategy;
 use crate::protocol::proto::{SspHeartBeatRequest, SspRequestType};
 use crate::protocol::wifi_handshake::WifiHandshakeInfo;
 
-type ChunkReceiver = mpsc::UnboundedReceiver<Result<Incoming>>;
+type ChunkReceiver = mpsc::Receiver<Result<Incoming>>;
 
 const PHASE_NORMAL: u8 = 0;
 const PHASE_DOWNLOAD_RAW: u8 = 1;
 
+/// Per-request response channel capacity (round-2 P1-1): bounded so a
+/// slow consumer backpressures the reader instead of growing memory.
+pub(crate) const REQUEST_CHANNEL_CAPACITY: usize = 64;
+/// Max distinct unmatched sids the reader buffers (round-2 P1-1).
+pub(crate) const MAX_UNMATCHED_SIDS: usize = 64;
+/// Max total bytes buffered for unmatched sids (round-2 P1-1).
+pub(crate) const MAX_UNMATCHED_BYTES: u64 = 16 * 1024 * 1024;
+/// Unmatched sid entries idle for longer than this are dropped (TTL).
+const UNMATCHED_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[derive(Clone)]
 struct PendingRequest {
-    sender: mpsc::UnboundedSender<Result<Incoming>>,
+    /// Bounded per-request channel: the reader awaits the send, so a slow
+    /// consumer applies backpressure instead of unbounded accumulation.
+    sender: mpsc::Sender<Result<Incoming>>,
 }
 
 enum Incoming {
@@ -428,7 +440,7 @@ impl SessionInner {
             ));
         }
         let sid = self.allocate_sid().await?;
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::channel(REQUEST_CHANNEL_CAPACITY);
         self.pending
             .lock()
             .await
@@ -588,11 +600,47 @@ where
             }
             let pending = inner.pending.lock().await.get(&sid).cloned();
             if let Some(pending) = pending {
-                if pending.sender.send(Ok(Incoming::Data(chunk))).is_err() {
+                // Bounded + backpressure (P1-1): the reader awaits the send;
+                // a dropped receiver (timeout/cancel) removes the entry.
+                if pending
+                    .sender
+                    .send(Ok(Incoming::Data(chunk)))
+                    .await
+                    .is_err()
+                {
                     inner.pending.lock().await.remove(&sid);
                 }
             } else {
-                let accumulator = unmatched.entry(sid).or_default();
+                // Round-2 P1-1: bounded unmatched buffering — at most
+                // MAX_UNMATCHED_SIDS distinct sids and MAX_UNMATCHED_BYTES
+                // total; idle entries are reaped after UNMATCHED_TTL. A
+                // device flooding unknown sids therefore cannot grow the
+                // reader's memory without bound.
+                if !unmatched.contains_key(&sid) {
+                    // Reap idle entries first (TTL), then enforce the caps.
+                    let now = std::time::Instant::now();
+                    unmatched
+                        .retain(|_, entry| now.duration_since(entry.last_seen) < UNMATCHED_TTL);
+                    let total_bytes: u64 = unmatched
+                        .values()
+                        .map(|entry| entry.bytes.len() as u64)
+                        .sum();
+                    if unmatched.len() >= MAX_UNMATCHED_SIDS
+                        || total_bytes + chunk.len() as u64 > MAX_UNMATCHED_BYTES
+                    {
+                        tracing::debug!(
+                            sid = format_args!("{sid:#010x}"),
+                            message = i18n::text("session.unmatched_dropped")
+                        );
+                        continue; // drop this chunk, keep the connection
+                    }
+                }
+                let accumulator = unmatched.entry(sid).or_insert_with(|| NormalAccumulator {
+                    bytes: Vec::new(),
+                    total: None,
+                    last_seen: std::time::Instant::now(),
+                });
+                accumulator.last_seen = std::time::Instant::now();
                 match accumulator.push(&chunk) {
                     Ok(Some(body)) => {
                         unmatched.remove(&sid);
@@ -610,7 +658,10 @@ where
                             };
                             let target = inner.pending.lock().await.remove(&target_sid);
                             if let Some(target) = target {
-                                let _ = target.sender.send(Ok(Incoming::RemoteCancelled(info)));
+                                let _ = target
+                                    .sender
+                                    .send(Ok(Incoming::RemoteCancelled(info)))
+                                    .await;
                             } else {
                                 inner.publish_event(ClientEvent::RequestCancelled(info));
                             }
@@ -663,10 +714,10 @@ fn spawn_heartbeat(inner: Arc<SessionInner>, heartbeat_interval: Duration) -> Jo
     })
 }
 
-#[derive(Default)]
 struct NormalAccumulator {
     bytes: Vec<u8>,
     total: Option<usize>,
+    last_seen: std::time::Instant,
 }
 
 impl NormalAccumulator {
@@ -954,16 +1005,17 @@ mod tests {
 
     #[tokio::test]
     async fn normal_response_prefix_can_span_chunks() {
-        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (sender, mut receiver) = mpsc::channel(REQUEST_CHANNEL_CAPACITY);
         let body = b"hello";
         sender
             .send(Ok(Incoming::Data(
                 (body.len() as u64).to_be_bytes()[..3].to_vec(),
             )))
+            .await
             .unwrap();
         let mut second = (body.len() as u64).to_be_bytes()[3..].to_vec();
         second.extend_from_slice(body);
-        sender.send(Ok(Incoming::Data(second))).unwrap();
+        sender.send(Ok(Incoming::Data(second))).await.unwrap();
         let inner = test_inner(Duration::from_secs(1));
         assert_eq!(
             receive_normal(&mut receiver, Duration::from_secs(1), None, 1, &inner)
@@ -975,10 +1027,10 @@ mod tests {
 
     #[tokio::test]
     async fn normal_response_rejects_overshoot() {
-        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (sender, mut receiver) = mpsc::channel(REQUEST_CHANNEL_CAPACITY);
         let mut bytes = 1_u64.to_be_bytes().to_vec();
         bytes.extend_from_slice(b"xx");
-        sender.send(Ok(Incoming::Data(bytes))).unwrap();
+        sender.send(Ok(Incoming::Data(bytes))).await.unwrap();
         let inner = test_inner(Duration::from_secs(1));
         assert!(
             receive_normal(&mut receiver, Duration::from_secs(1), None, 1, &inner)
@@ -989,12 +1041,13 @@ mod tests {
 
     #[tokio::test]
     async fn normal_response_rejects_oversized_declared_total() {
-        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (sender, mut receiver) = mpsc::channel(REQUEST_CHANNEL_CAPACITY);
         // A hostile device declaring a total beyond NORMAL_RESPONSE_LIMIT must
         // be rejected as soon as the 8-byte prefix assembles.
         let total = (NORMAL_RESPONSE_LIMIT as u64) + 1;
         sender
             .send(Ok(Incoming::Data(total.to_be_bytes().to_vec())))
+            .await
             .unwrap();
         let inner = test_inner(Duration::from_secs(1));
         let error = receive_normal(&mut receiver, Duration::from_secs(1), None, 1, &inner)
@@ -1017,7 +1070,7 @@ mod tests {
             serial: "test".to_string(),
             events: StdMutex::new(Some(event_channel())),
         });
-        let (sender, mut receiver) = mpsc::unbounded_channel::<Result<Incoming>>();
+        let (sender, mut receiver) = mpsc::channel::<Result<Incoming>>(REQUEST_CHANNEL_CAPACITY);
         let token = crate::cancellation::CancellationToken::new();
         let receive_inner = Arc::clone(&inner);
         let receive_token = token.clone();
@@ -1052,7 +1105,7 @@ mod tests {
 
     #[tokio::test]
     async fn remote_cancel_response_is_not_decoded_as_success() {
-        let (sender, mut receiver) = mpsc::unbounded_channel::<Result<Incoming>>();
+        let (sender, mut receiver) = mpsc::channel::<Result<Incoming>>(REQUEST_CHANNEL_CAPACITY);
         let body = crate::protocol::proto::SspCancelRequest {
             r#type: Some(SspRequestType::CancelRequest as i32),
             session_id: Some(0x8000_0002),
@@ -1061,7 +1114,7 @@ mod tests {
         .encode_to_vec();
         let mut framed = (body.len() as u64).to_be_bytes().to_vec();
         framed.extend_from_slice(&body);
-        sender.send(Ok(Incoming::Data(framed))).unwrap();
+        sender.send(Ok(Incoming::Data(framed))).await.unwrap();
         let inner = test_inner(Duration::from_secs(1));
         let error = receive_normal(
             &mut receiver,
@@ -1340,5 +1393,35 @@ mod tests {
         assert_eq!(response.client_timestamp, Some(7));
         session.close().await.expect("close");
         server.await.expect("server");
+    }
+    #[tokio::test]
+    async fn reader_bounds_unmatched_sids_without_failing_the_connection() {
+        // Round-2 P1-1: a device flooding unknown sids must be dropped
+        // per-chunk (bounded buffering), not grow memory or kill the
+        // session. Feed MAX_UNMATCHED_SIDS + extra distinct sids, then
+        // EOF: the reader must end cleanly via fail_connection.
+        use tokio::io::AsyncWriteExt;
+        let (mut client, server) = tokio::io::duplex(256 * 1024);
+        let (reader_half, _writer_half) = tokio::io::split(server);
+        let inner = test_inner(Duration::from_secs(5));
+        let reader = spawn_reader(reader_half, inner.clone());
+        for sid in 0..(MAX_UNMATCHED_SIDS as u32 + 10) {
+            let mut frame = Vec::with_capacity(9);
+            frame.extend_from_slice(&sid.to_be_bytes());
+            frame.extend_from_slice(&3u16.to_be_bytes());
+            frame.extend_from_slice(b"abc");
+            client.write_all(&frame).await.expect("write");
+        }
+        drop(client);
+        // Give the reader time to process; then EOF triggers the close.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), reader)
+            .await
+            .expect("reader must terminate after EOF")
+            .expect("reader join");
+        assert!(
+            inner.closed.load(std::sync::atomic::Ordering::SeqCst),
+            "EOF must close the session (reader bounded + terminated)"
+        );
     }
 }

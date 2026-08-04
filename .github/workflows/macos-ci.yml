@@ -66,6 +66,23 @@ jobs:
         working-directory: platform/macos
         run: swift test
 
+      # Round-2 P2-5: clean-consumer check — the shipped XCFramework must
+      # be self-contained (LIBUSB_STATIC build): no undefined _libusb_*
+      # references, no /opt/homebrew path baked in. Without this, a
+      # machine without Homebrew libusb would fail to link.
+      - name: Verify artifact is Homebrew-independent (P2-5)
+        run: |
+          set -eu
+          DYLIB="$(find platform/macos/Artifacts/HandShakerFFI.xcframework -name '*.dylib' | head -1)"
+          test -n "$DYLIB"
+          if otool -L "$DYLIB" | grep -q 'libusb'; then
+            echo "FAIL: staged dylib links libusb (not self-contained)"; exit 1
+          fi
+          if otool -L "$DYLIB" | grep -q '/opt/homebrew'; then
+            echo "FAIL: staged dylib has a Homebrew path baked in"; exit 1
+          fi
+          echo "OK: artifact is self-contained (no libusb, no Homebrew paths)"
+
       # Real-device acceptance is opt-in (vars.HS_ACCEPTANCE == '1'); the
       # script self-skips without a phone, but when enabled a failure must
       # fail the job — never swallow it with `|| true` (P2-2).
