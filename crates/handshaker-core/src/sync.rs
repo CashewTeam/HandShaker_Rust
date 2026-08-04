@@ -99,6 +99,36 @@ pub fn check_conflicts(diff: &SyncDiff, snapshot: &SyncSnapshot) -> Vec<String> 
     conflicts
 }
 
+/// Remove a synced local file and report the outcome. Returns `true` when
+/// the ledger row may be dropped: the file was already gone (expected final
+/// state) or was deleted successfully. Returns `false` when removal failed
+/// (permission, in-use, read-only volume, transient I/O) — the caller must
+/// then keep the ledger row so a later sync can retry and so the recorded
+/// SHA-256 still protects user modifications.
+///
+/// Both the full-sync delete path and the incremental FILE_CHANGE(Deleted)
+/// path must use this single helper — two delete semantics are not allowed.
+fn remove_local_synced_file(
+    remote_path: &str,
+    local_path: &Path,
+    result: &mut SyncRunResult,
+) -> bool {
+    if !local_path.exists() {
+        // Already in the desired final state; safe to drop the row.
+        return true;
+    }
+    match fs::remove_file(local_path) {
+        Ok(()) => {
+            result.deleted.push(remote_path.to_string());
+            true
+        }
+        Err(_) => {
+            result.failures.push(remote_path.to_string());
+            false
+        }
+    }
+}
+
 /// Execute a plan: download added/modified files, delete removed ones, and
 /// return the updated snapshot. Failures are aggregated, never aborting the
 /// run. On success the caller commits the returned snapshot atomically.
@@ -154,13 +184,9 @@ pub async fn execute_plan(
             continue;
         };
         let local = PathBuf::from(&record.local_path);
-        if local.exists() {
-            match fs::remove_file(&local) {
-                Ok(()) => result.deleted.push(path.clone()),
-                Err(_) => result.failures.push(path.clone()),
-            }
+        if remove_local_synced_file(path, &local, &mut result) {
+            updated.files.remove(path);
         }
-        updated.files.remove(path);
     }
 
     for path in &diff.info_modified {
@@ -221,10 +247,12 @@ pub async fn apply_file_change(
         FileChangeStatus::Deleted => {
             if let Some(record) = snapshot.files.get(&path) {
                 let local = PathBuf::from(&record.local_path);
-                if local.exists() && fs::remove_file(&local).is_ok() {
-                    result.deleted.push(path.clone());
+                // Same helper and same semantics as the full-sync delete
+                // path: a failed removal keeps the ledger row (retryable)
+                // and is reported as a failure, never silently dropped.
+                if remove_local_synced_file(&path, &local, &mut result) {
+                    snapshot.files.remove(&path);
                 }
-                snapshot.files.remove(&path);
             }
         }
         FileChangeStatus::InfoModified | FileChangeStatus::None | FileChangeStatus::Unknown => {
@@ -699,6 +727,165 @@ mod tests {
         );
         assert!(!local.exists());
         assert!(snapshot.files.is_empty());
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    fn ledger_snapshot_with(path: &str, local_path: &Path) -> SyncSnapshot {
+        let mut snapshot = SyncSnapshot::default();
+        snapshot.files.insert(
+            path.to_string(),
+            SyncFileRecord {
+                size: 4,
+                checksum: Some("c-keep".to_string()),
+                ext_data: None,
+                modified_at: Some(0),
+                local_path: local_path.to_string_lossy().into_owned(),
+                local_sha256: Some("deadbeef".to_string()),
+            },
+        );
+        snapshot
+    }
+
+    #[tokio::test]
+    async fn execute_plan_delete_success_removes_file_and_ledger_row() {
+        let fake = crate::test_support::FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = config(temp.path());
+        let path = "/storage/emulated/0/DCIM/Camera/del.jpg";
+        let local = temp.path().join("del.jpg");
+        fs::write(&local, b"x").expect("write");
+        let snapshot = ledger_snapshot_with(path, &local);
+        let diff = SyncDiff {
+            deleted: vec![path.to_string()],
+            ..SyncDiff::default()
+        };
+        let (result, updated) = execute_plan(&client, &config, &[], &diff, &snapshot, &[])
+            .await
+            .expect("run");
+        assert_eq!(result.deleted, vec![path.to_string()]);
+        assert!(result.failures.is_empty());
+        assert!(!local.exists());
+        assert!(!updated.files.contains_key(path));
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn execute_plan_delete_missing_file_drops_row_without_failure() {
+        let fake = crate::test_support::FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = config(temp.path());
+        let path = "/storage/emulated/0/DCIM/Camera/gone.jpg";
+        let local = temp.path().join("gone.jpg"); // never created
+        let snapshot = ledger_snapshot_with(path, &local);
+        let diff = SyncDiff {
+            deleted: vec![path.to_string()],
+            ..SyncDiff::default()
+        };
+        let (result, updated) = execute_plan(&client, &config, &[], &diff, &snapshot, &[])
+            .await
+            .expect("run");
+        assert!(result.deleted.is_empty());
+        assert!(result.failures.is_empty());
+        assert!(!updated.files.contains_key(path));
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn execute_plan_delete_failure_keeps_file_and_ledger_row() {
+        let fake = crate::test_support::FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = config(temp.path());
+        let path = "/storage/emulated/0/DCIM/Camera/locked.jpg";
+        // A directory is not removable with fs::remove_file: the removal
+        // fails while the entry still exists — same observable outcome as
+        // PermissionDenied (file stays, ledger row must stay, failure listed).
+        let local = temp.path().join("locked.jpg");
+        fs::create_dir(&local).expect("mkdir");
+        let snapshot = ledger_snapshot_with(path, &local);
+        let diff = SyncDiff {
+            deleted: vec![path.to_string()],
+            ..SyncDiff::default()
+        };
+        let (result, updated) = execute_plan(&client, &config, &[], &diff, &snapshot, &[])
+            .await
+            .expect("run");
+        assert!(result.deleted.is_empty());
+        assert_eq!(result.failures, vec![path.to_string()]);
+        assert!(local.exists());
+        assert!(updated.files.contains_key(path), "ledger row must survive");
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_plan_delete_permission_denied_keeps_file_and_ledger_row() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fake = crate::test_support::FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = config(temp.path());
+        let path = "/storage/emulated/0/DCIM/Camera/ro.jpg";
+        let readonly = temp.path().join("ro-dir");
+        fs::create_dir(&readonly).expect("mkdir");
+        let local = readonly.join("ro.jpg");
+        fs::write(&local, b"x").expect("write");
+        fs::set_permissions(&readonly, fs::Permissions::from_mode(0o555)).expect("chmod");
+        let snapshot = ledger_snapshot_with(path, &local);
+        let diff = SyncDiff {
+            deleted: vec![path.to_string()],
+            ..SyncDiff::default()
+        };
+        let (result, updated) = execute_plan(&client, &config, &[], &diff, &snapshot, &[])
+            .await
+            .expect("run");
+        assert!(result.deleted.is_empty());
+        assert_eq!(result.failures, vec![path.to_string()]);
+        assert!(updated.files.contains_key(path), "ledger row must survive");
+        client.close().await.expect("close");
+        fake.finish().await;
+    }
+
+    #[tokio::test]
+    async fn apply_file_change_deleted_failure_keeps_row_and_is_retryable() {
+        let fake = crate::test_support::FakeWifiSsp::start().await;
+        let client = fake.connect().await;
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = config(temp.path());
+        let path = "/storage/emulated/0/DCIM/Camera/live-del.jpg";
+        // First round: removal fails (path is a directory), row must stay.
+        let local = temp.path().join("live-del.jpg");
+        fs::create_dir(&local).expect("mkdir");
+        let mut snapshot = ledger_snapshot_with(path, &local);
+        let deleted = FileChange {
+            file: Some(phone_file_help(path, "c-live-del", None)),
+            status: crate::events::FileChangeStatus::Deleted,
+        };
+        let result = apply_file_change(&client, &config, &deleted, &mut snapshot)
+            .await
+            .expect("apply deleted");
+        assert!(result.deleted.is_empty());
+        assert_eq!(result.failures, vec![path.to_string()]);
+        assert!(snapshot.files.contains_key(path));
+
+        // Second round (e.g. next sync after a restart): the blocking entry
+        // is gone, the row is retried and reaches the expected final state.
+        // The file no longer exists, so no delete operation is recorded —
+        // the ledger row is dropped and the run reports no failure.
+        fs::remove_dir(&local).expect("rmdir");
+        let result = apply_file_change(&client, &config, &deleted, &mut snapshot)
+            .await
+            .expect("apply deleted retry");
+        assert!(result.deleted.is_empty());
+        assert!(result.failures.is_empty());
+        assert!(!snapshot.files.contains_key(path));
         client.close().await.expect("close");
         fake.finish().await;
     }
