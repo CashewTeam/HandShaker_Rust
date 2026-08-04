@@ -3345,9 +3345,10 @@ async fn take_published_task_waits_for_start_publication() {
     let (start_tx, start_rx) = oneshot::channel::<()>();
     let task = tokio::spawn(async move {
         if start_rx.await.is_err() {
-            return;
+            // Never released: never runs business logic.
+        } else {
+            // Business body placeholder: would run sync/watch/transfer work.
         }
-        // Business body placeholder: would run sync/watch/transfer work.
     });
 
     // Stopper side: races the starter. It must block, not return None.
