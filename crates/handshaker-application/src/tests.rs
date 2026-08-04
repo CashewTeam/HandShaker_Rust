@@ -3497,13 +3497,28 @@ fn slice_page_idless_items_sort_first_and_do_not_fake_end_of_library() {
         Item { id: Some(20), tag: "twenty" },
     ];
     let (page, next) = crate::media::slice_page(items, None, 2, |item| item.id);
+    // Page 1 is all id-less; the first id-bearing item of the remainder is
+    // pulled into this page so the cursor keys an item that was actually
+    // returned (otherwise id=10 would be skipped forever).
     assert_eq!(page.len(), 2);
-    assert!(page[0].id.is_none());
-    assert!(page[1].id.is_none());
-    // The page itself has no id to key on, so the cursor falls back to the
-    // first id-bearing item of the remainder — pagination continues and no
-    // data is lost.
-    assert_eq!(next, Some(10), "id-less page must not fake end of library");
+    assert_eq!(page[0].id, None);
+    assert_eq!(page[1].id, Some(10));
+    assert_eq!(next, Some(10));
+    // Page 2 continues after 10 — no item is lost or repeated.
+    let (page2, next2) = crate::media::slice_page(
+        vec![
+            Item { id: None, tag: "no-id-1" },
+            Item { id: None, tag: "no-id-2" },
+            Item { id: Some(10), tag: "ten" },
+            Item { id: Some(20), tag: "twenty" },
+        ],
+        next,
+        500,
+        |item| item.id,
+    );
+    assert_eq!(page2.len(), 1);
+    assert_eq!(page2[0].tag, "twenty");
+    assert_eq!(next2, None, "pagination terminates after the id-bearing tail");
     // With ids present on the page, next_cursor is the last id even if the
     // tail of the full list is id-less.
     let items2 = vec![

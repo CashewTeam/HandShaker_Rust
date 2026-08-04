@@ -178,14 +178,31 @@ pub fn slice_page<T: Clone>(
         None => 0,
     };
     let end = (start + limit).min(items.len());
-    let page = items[start..end].to_vec();
+    let mut page = items[start..end].to_vec();
     let next = if end < items.len() {
-        // Last-visible id, walking back over trailing id-less items so a
-        // None tail cannot fake "end of library".
-        page.iter()
-            .rev()
-            .find_map(&media_id)
-            .or_else(|| items[end..].iter().find_map(&media_id))
+        match page.iter().rev().find_map(&media_id) {
+            // Last-visible id — walking back over trailing id-less items
+            // so a None tail cannot fake "end of library".
+            Some(id) => Some(id),
+            // The page is entirely id-less (id-less items sort first).
+            // Pull the first id-bearing item of the remainder into this
+            // page (replacing its last slot) and key the next page on it:
+            // the cursor must always point at an item that was actually
+            // returned, otherwise that item would be skipped forever.
+            None => match items[end..].iter().position(|item| media_id(item).is_some()) {
+                Some(offset) => {
+                    let idx = end + offset;
+                    let first_id = media_id(&items[idx]).expect("position checked is_some");
+                    if let Some(last) = page.last_mut() {
+                        *last = items[idx].clone();
+                    } else {
+                        page.push(items[idx].clone());
+                    }
+                    Some(first_id)
+                }
+                None => None,
+            },
+        }
     } else {
         None
     };
