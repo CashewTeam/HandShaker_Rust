@@ -110,11 +110,18 @@ pub struct AudioAlbumDto {
 }
 
 /// Photo library snapshot (mirrors core `PhotoLibrary`).
+///
+/// P1-9: library *list* responses are metadata-only (`thumbnail` is
+/// always `None` — thumbnails come from `get_thumbnails`/the cache-path
+/// endpoint); `next_cursor` is set by the paged variants (non-null while
+/// more pages exist).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct PhotoLibraryDto {
     pub images: Vec<ImageFileDto>,
     pub albums: Vec<ImageAlbumDto>,
     pub camera_album_id: Option<u64>,
+    #[serde(default)]
+    pub next_cursor: Option<u64>,
 }
 
 /// Video library snapshot (mirrors core `VideoLibrary`).
@@ -122,6 +129,8 @@ pub struct PhotoLibraryDto {
 pub struct VideoLibraryDto {
     pub videos: Vec<VideoFileDto>,
     pub albums: Vec<VideoAlbumDto>,
+    #[serde(default)]
+    pub next_cursor: Option<u64>,
 }
 
 /// Audio library snapshot (mirrors core `AudioLibrary`).
@@ -129,9 +138,69 @@ pub struct VideoLibraryDto {
 pub struct AudioLibraryDto {
     pub tracks: Vec<AudioFileDto>,
     pub albums: Vec<AudioAlbumDto>,
+    #[serde(default)]
+    pub next_cursor: Option<u64>,
+}
+
+/// P1-9: default page size and hard cap for paged media-library list
+/// responses. Requests above the cap are rejected, not silently clamped.
+pub const MEDIA_PAGE_DEFAULT_LIMIT: usize = 500;
+pub const MEDIA_PAGE_MAX_LIMIT: usize = 1000;
+
+/// Slice a fully-sorted media list into one page. Items are ordered by
+/// media_id (missing ids sort first) so the cursor is stable across
+/// refreshes; `cursor` is the last-visible media_id of the previous page.
+/// Returns (page, next_cursor) — `next_cursor` is `None` on the last page.
+pub fn slice_page<T: Clone>(
+    mut items: Vec<T>,
+    cursor: Option<u64>,
+    limit: usize,
+    media_id: impl Fn(&T) -> Option<u64>,
+) -> (Vec<T>, Option<u64>) {
+    items.sort_by_key(|item| media_id(item).unwrap_or(0));
+    let start = match cursor {
+        Some(cursor) => items
+            .iter()
+            .position(|item| media_id(item).unwrap_or(0) > cursor)
+            .unwrap_or(items.len()),
+        None => 0,
+    };
+    let end = (start + limit).min(items.len());
+    let page = items[start..end].to_vec();
+    let next = if end < items.len() {
+        media_id(&items[end - 1])
+    } else {
+        None
+    };
+    (page, next)
+}
+
+/// P1-9: media-library list responses are metadata-only — thumbnail byte
+/// arrays belong to the dedicated `get_thumbnails` interface only.
+pub fn strip_photo_thumbnails(library: &mut PhotoLibraryDto) {
+    for image in &mut library.images {
+        image.thumbnail = None;
+        image.thumbnail_error = false;
+    }
+}
+
+pub fn strip_video_thumbnails(library: &mut VideoLibraryDto) {
+    for video in &mut library.videos {
+        video.thumbnail = None;
+        video.thumbnail_error = false;
+    }
+}
+
+pub fn strip_audio_thumbnails(library: &mut AudioLibraryDto) {
+    for album in &mut library.albums {
+        album.thumbnail = None;
+        album.thumbnail_error = false;
+    }
 }
 
 /// Thumbnail responses keyed by media category (mirrors core `Thumbnails`).
+/// This is the only interface that carries thumbnail byte arrays; library
+/// list responses are metadata-only (P1-9).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ThumbnailsDto {
     pub images: Vec<ImageFileDto>,
@@ -270,6 +339,7 @@ impl From<PhotoLibrary> for PhotoLibraryDto {
             images: library.images.into_iter().map(Into::into).collect(),
             albums: library.albums.into_iter().map(Into::into).collect(),
             camera_album_id: library.camera_album_id,
+            next_cursor: None,
         }
     }
 }
@@ -279,6 +349,7 @@ impl From<VideoLibrary> for VideoLibraryDto {
         Self {
             videos: library.videos.into_iter().map(Into::into).collect(),
             albums: library.albums.into_iter().map(Into::into).collect(),
+            next_cursor: None,
         }
     }
 }
@@ -288,6 +359,7 @@ impl From<AudioLibrary> for AudioLibraryDto {
         Self {
             tracks: library.tracks.into_iter().map(Into::into).collect(),
             albums: library.albums.into_iter().map(Into::into).collect(),
+            next_cursor: None,
         }
     }
 }

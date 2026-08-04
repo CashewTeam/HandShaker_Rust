@@ -33,14 +33,72 @@ use crate::result::{HsCallResult, catch, err, input_str, ok};
 use crate::runtime_ref;
 
 // ---------------------------------------------------------------------------
-// Library snapshots (no request parameters in the application API yet)
+// Library snapshots (P1-9: paged, metadata-only; thumbnails via cache path)
 // ---------------------------------------------------------------------------
 
-/// `hs_media_photo_library` request JSON: `{}`. The buffer is kept for ABI
-/// symmetry with the thumbnail/exif endpoints and reserved for future
-/// pagination (`limit`/`offset`); its content must be valid JSON but is
-/// currently ignored. Result JSON: `PhotoLibraryDto`
-/// (`{"images":[...],"albums":[...],"camera_album_id":N}`).
+/// P1-9: request parsing for the three library endpoints. `{}` (legacy)
+/// means full snapshot; `{"limit":N,"cursor":M}` requests one page.
+#[derive(Debug, Clone, Copy)]
+enum MediaPageRequest {
+    Full,
+    Page {
+        cursor: Option<u64>,
+        limit: Option<usize>,
+    },
+}
+
+#[derive(Deserialize)]
+struct MediaPageRequestRaw {
+    limit: Option<usize>,
+    cursor: Option<u64>,
+}
+
+/// Parse a library request body. `{}` or `null` → `Full`; any other valid
+/// JSON object → `Page` (empty object `{}` with no fields also means
+/// `Full`). `limit` may not exceed `MEDIA_PAGE_MAX_LIMIT` (the
+/// application layer enforces this too, but fail fast here with the same
+/// message shape).
+fn parse_page_request(json: &str, operation: &str) -> Result<MediaPageRequest, PublicError> {
+    let raw: MediaPageRequestRaw = serde_json::from_str(json).map_err(|error| {
+        PublicError::new(
+            PublicErrorCode::InvalidArgument,
+            "invalid media library request",
+        )
+        .with_detail(error.to_string())
+        .operation(operation)
+    })?;
+    match (raw.limit, raw.cursor) {
+        (None, None) => Ok(MediaPageRequest::Full),
+        (Some(limit), cursor) => {
+            if limit == 0 || limit > handshaker_application::MEDIA_PAGE_MAX_LIMIT {
+                return Err(PublicError::new(
+                    PublicErrorCode::InvalidArgument,
+                    format!(
+                        "limit must be 1..={}",
+                        handshaker_application::MEDIA_PAGE_MAX_LIMIT
+                    ),
+                )
+                .operation(operation));
+            }
+            Ok(MediaPageRequest::Page {
+                cursor,
+                limit: Some(limit),
+            })
+        }
+        (None, Some(cursor)) => Ok(MediaPageRequest::Page {
+            cursor: Some(cursor),
+            limit: None,
+        }),
+    }
+}
+
+/// `hs_media_photo_library` request JSON (P1-9): `{}` returns the full
+/// metadata-only library (legacy behavior, `next_cursor` is null);
+/// `{"limit":N,"cursor":M}` returns one page — `limit` defaults to 500
+/// and is capped at 1000 (larger is rejected), `cursor` is the previous
+/// page's `next_cursor`. Result JSON: `PhotoLibraryDto` with
+/// `next_cursor` (null on the last page). Library responses never embed
+/// thumbnail bytes — use `hs_media_thumbnail` (cache path) instead.
 ///
 /// # Safety
 /// `runtime` must be a valid handle; `request_ptr`/`request_len` must
@@ -55,20 +113,38 @@ pub unsafe extern "C" fn hs_media_photo_library(
     catch("media_photo_library", || {
         let runtime = ffi_try!(runtime_ref(runtime, "media_photo_library"));
         let json = ffi_try!(input_str(request_ptr, request_len, "media_photo_library"));
-        ffi_try!(validate_placeholder_request(json, "media_photo_library"));
-        match runtime
-            ._tokio
-            .block_on(async { runtime.app.get_photo_library(SessionId(session_id)).await })
-        {
-            Ok(library) => ok(&library),
-            Err(error) => err(&error),
+        let page = match parse_page_request(json, "media_photo_library") {
+            Ok(page) => page,
+            Err(error) => return err(&error),
+        };
+        match page {
+            MediaPageRequest::Full => {
+                match runtime
+                    ._tokio
+                    .block_on(async { runtime.app.get_photo_library(SessionId(session_id)).await })
+                {
+                    Ok(library) => ok(&library),
+                    Err(error) => err(&error),
+                }
+            }
+            MediaPageRequest::Page { cursor, limit } => {
+                match runtime._tokio.block_on(async {
+                    runtime
+                        .app
+                        .get_photo_library_page(SessionId(session_id), cursor, limit)
+                        .await
+                }) {
+                    Ok(library) => ok(&library),
+                    Err(error) => err(&error),
+                }
+            }
         }
     })
 }
 
-/// `hs_media_video_library` request JSON: `{}` (placeholder, see
-/// `hs_media_photo_library`). Result JSON: `VideoLibraryDto`
-/// (`{"videos":[...],"albums":[...]}`).
+/// `hs_media_video_library` request JSON (P1-9): same as
+/// `hs_media_photo_library` (`{}` = full; `{"limit":N,"cursor":M}` =
+/// page). Result JSON: `VideoLibraryDto` with `next_cursor`.
 ///
 /// # Safety
 /// `runtime` must be a valid handle; `request_ptr`/`request_len` must
@@ -83,20 +159,38 @@ pub unsafe extern "C" fn hs_media_video_library(
     catch("media_video_library", || {
         let runtime = ffi_try!(runtime_ref(runtime, "media_video_library"));
         let json = ffi_try!(input_str(request_ptr, request_len, "media_video_library"));
-        ffi_try!(validate_placeholder_request(json, "media_video_library"));
-        match runtime
-            ._tokio
-            .block_on(async { runtime.app.get_video_library(SessionId(session_id)).await })
-        {
-            Ok(library) => ok(&library),
-            Err(error) => err(&error),
+        let page = match parse_page_request(json, "media_video_library") {
+            Ok(page) => page,
+            Err(error) => return err(&error),
+        };
+        match page {
+            MediaPageRequest::Full => {
+                match runtime
+                    ._tokio
+                    .block_on(async { runtime.app.get_video_library(SessionId(session_id)).await })
+                {
+                    Ok(library) => ok(&library),
+                    Err(error) => err(&error),
+                }
+            }
+            MediaPageRequest::Page { cursor, limit } => {
+                match runtime._tokio.block_on(async {
+                    runtime
+                        .app
+                        .get_video_library_page(SessionId(session_id), cursor, limit)
+                        .await
+                }) {
+                    Ok(library) => ok(&library),
+                    Err(error) => err(&error),
+                }
+            }
         }
     })
 }
 
-/// `hs_media_audio_library` request JSON: `{}` (placeholder, see
-/// `hs_media_photo_library`). Result JSON: `AudioLibraryDto`
-/// (`{"tracks":[...],"albums":[...]}`).
+/// `hs_media_audio_library` request JSON (P1-9): same as
+/// `hs_media_photo_library` (`{}` = full; `{"limit":N,"cursor":M}` =
+/// page). Result JSON: `AudioLibraryDto` with `next_cursor`.
 ///
 /// # Safety
 /// `runtime` must be a valid handle; `request_ptr`/`request_len` must
@@ -111,29 +205,33 @@ pub unsafe extern "C" fn hs_media_audio_library(
     catch("media_audio_library", || {
         let runtime = ffi_try!(runtime_ref(runtime, "media_audio_library"));
         let json = ffi_try!(input_str(request_ptr, request_len, "media_audio_library"));
-        ffi_try!(validate_placeholder_request(json, "media_audio_library"));
-        match runtime
-            ._tokio
-            .block_on(async { runtime.app.get_audio_library(SessionId(session_id)).await })
-        {
-            Ok(library) => ok(&library),
-            Err(error) => err(&error),
+        let page = match parse_page_request(json, "media_audio_library") {
+            Ok(page) => page,
+            Err(error) => return err(&error),
+        };
+        match page {
+            MediaPageRequest::Full => {
+                match runtime
+                    ._tokio
+                    .block_on(async { runtime.app.get_audio_library(SessionId(session_id)).await })
+                {
+                    Ok(library) => ok(&library),
+                    Err(error) => err(&error),
+                }
+            }
+            MediaPageRequest::Page { cursor, limit } => {
+                match runtime._tokio.block_on(async {
+                    runtime
+                        .app
+                        .get_audio_library_page(SessionId(session_id), cursor, limit)
+                        .await
+                }) {
+                    Ok(library) => ok(&library),
+                    Err(error) => err(&error),
+                }
+            }
         }
     })
-}
-
-/// Validate that a library-request buffer is well-formed JSON (the library
-/// endpoints currently take no parameters; the buffer is accepted for ABI
-/// symmetry and future pagination).
-fn validate_placeholder_request(json: &str, operation: &str) -> Result<(), HsCallResult> {
-    serde_json::from_str::<serde_json::Value>(json).map_err(|error| {
-        err(
-            &PublicError::new(PublicErrorCode::InvalidArgument, "invalid request JSON")
-                .with_detail(error.to_string())
-                .operation(operation),
-        )
-    })?;
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -710,6 +808,49 @@ mod tests {
         let result = unsafe { hs_media_photo_library(runtime, 999, b"{}".as_ptr(), 2) };
         assert_eq!(result.status, 1);
         assert_eq!(error_code_of(result), "session_not_found");
+        unsafe { hs_runtime_destroy(runtime) };
+    }
+
+    #[test]
+    fn page_request_rejects_limit_out_of_range() {
+        let runtime = runtime_ptr();
+        // limit 0
+        let result = unsafe { hs_media_photo_library(runtime, 1, br#"{"limit":0}"#.as_ptr(), 11) };
+        assert_eq!(result.status, 1);
+        assert_eq!(error_code_of(result), "invalid_argument");
+        // limit above the 1000 cap
+        let result =
+            unsafe { hs_media_photo_library(runtime, 1, br#"{"limit":1001}"#.as_ptr(), 14) };
+        assert_eq!(result.status, 1);
+        assert_eq!(error_code_of(result), "invalid_argument");
+        // limit exactly at the cap is a valid request shape (fails on the
+        // session lookup, not on validation)
+        let result =
+            unsafe { hs_media_photo_library(runtime, 1, br#"{"limit":1000}"#.as_ptr(), 14) };
+        assert_eq!(result.status, 1);
+        assert_eq!(error_code_of(result), "session_not_found");
+        unsafe { hs_runtime_destroy(runtime) };
+    }
+
+    #[test]
+    fn page_request_cursor_is_forwarded() {
+        let runtime = runtime_ptr();
+        // cursor-only and full-page shapes pass validation and reach the
+        // session lookup (session 999 does not exist).
+        let result =
+            unsafe { hs_media_photo_library(runtime, 999, br#"{"cursor":5}"#.as_ptr(), 12) };
+        assert_eq!(result.status, 1);
+        assert_eq!(error_code_of(result), "session_not_found");
+        let result = unsafe {
+            hs_media_photo_library(runtime, 999, br#"{"limit":50,"cursor":5}"#.as_ptr(), 23)
+        };
+        assert_eq!(result.status, 1);
+        assert_eq!(error_code_of(result), "session_not_found");
+        // cursor must be an integer media id, not an opaque string.
+        let result =
+            unsafe { hs_media_photo_library(runtime, 999, br#"{"cursor":"abc"}"#.as_ptr(), 16) };
+        assert_eq!(result.status, 1);
+        assert_eq!(error_code_of(result), "invalid_argument");
         unsafe { hs_runtime_destroy(runtime) };
     }
 

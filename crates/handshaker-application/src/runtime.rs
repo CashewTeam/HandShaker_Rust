@@ -1323,28 +1323,124 @@ impl HandShakerRuntime {
 
     // ---- media library (mirrors core media domain, DTOs in media.rs) ----
 
-    /// Snapshot of the phone photo library.
+    /// Snapshot of the phone photo library (P1-9: metadata-only list
+    /// response — thumbnail bytes are never embedded).
     pub async fn get_photo_library(&self, session_id: SessionId) -> AppResult<PhotoLibraryDto> {
-        self.request(session_id, "get_photo_library", |client| async move {
-            client.get_photo_library().await.map(Into::into)
-        })
-        .await
+        let mut library = self
+            .request(session_id, "get_photo_library", |client| async move {
+                client.get_photo_library().await.map(Into::into)
+            })
+            .await?;
+        crate::media::strip_photo_thumbnails(&mut library);
+        Ok(library)
     }
 
-    /// Snapshot of the phone video library.
+    /// P1-9: one page of the photo library, ordered by media_id. `limit`
+    /// defaults to `MEDIA_PAGE_DEFAULT_LIMIT` (500) and is capped at
+    /// `MEDIA_PAGE_MAX_LIMIT` (1000) — larger requests are rejected, not
+    /// clamped. `cursor` is the `next_cursor` of the previous page (or
+    /// `None` for the first). The response carries `next_cursor` while
+    /// more pages exist. The network snapshot is still the full core
+    /// library (the phone protocol has no paged read); paging happens in
+    /// this layer.
+    pub async fn get_photo_library_page(
+        &self,
+        session_id: SessionId,
+        cursor: Option<u64>,
+        limit: Option<usize>,
+    ) -> AppResult<PhotoLibraryDto> {
+        let limit = self.validate_page_limit(limit)?;
+        let full = self.get_photo_library(session_id).await?;
+        let (images, next_cursor) =
+            crate::media::slice_page(full.images, cursor, limit, |image| image.media_id);
+        Ok(PhotoLibraryDto {
+            images,
+            albums: full.albums,
+            camera_album_id: full.camera_album_id,
+            next_cursor,
+        })
+    }
+
+    /// Snapshot of the phone video library (P1-9: metadata-only list
+    /// response).
     pub async fn get_video_library(&self, session_id: SessionId) -> AppResult<VideoLibraryDto> {
-        self.request(session_id, "get_video_library", |client| async move {
-            client.get_video_library().await.map(Into::into)
-        })
-        .await
+        let mut library = self
+            .request(session_id, "get_video_library", |client| async move {
+                client.get_video_library().await.map(Into::into)
+            })
+            .await?;
+        crate::media::strip_video_thumbnails(&mut library);
+        Ok(library)
     }
 
-    /// Snapshot of the phone audio library.
-    pub async fn get_audio_library(&self, session_id: SessionId) -> AppResult<AudioLibraryDto> {
-        self.request(session_id, "get_audio_library", |client| async move {
-            client.get_audio_library().await.map(Into::into)
+    /// P1-9: one page of the video library (see `get_photo_library_page`).
+    pub async fn get_video_library_page(
+        &self,
+        session_id: SessionId,
+        cursor: Option<u64>,
+        limit: Option<usize>,
+    ) -> AppResult<VideoLibraryDto> {
+        let limit = self.validate_page_limit(limit)?;
+        let full = self.get_video_library(session_id).await?;
+        let (videos, next_cursor) =
+            crate::media::slice_page(full.videos, cursor, limit, |video| video.media_id);
+        Ok(VideoLibraryDto {
+            videos,
+            albums: full.albums,
+            next_cursor,
         })
-        .await
+    }
+
+    /// Snapshot of the phone audio library (P1-9: metadata-only list
+    /// response).
+    pub async fn get_audio_library(&self, session_id: SessionId) -> AppResult<AudioLibraryDto> {
+        let mut library = self
+            .request(session_id, "get_audio_library", |client| async move {
+                client.get_audio_library().await.map(Into::into)
+            })
+            .await?;
+        crate::media::strip_audio_thumbnails(&mut library);
+        Ok(library)
+    }
+
+    /// P1-9: one page of the audio library (see `get_photo_library_page`).
+    pub async fn get_audio_library_page(
+        &self,
+        session_id: SessionId,
+        cursor: Option<u64>,
+        limit: Option<usize>,
+    ) -> AppResult<AudioLibraryDto> {
+        let limit = self.validate_page_limit(limit)?;
+        let full = self.get_audio_library(session_id).await?;
+        let (tracks, next_cursor) =
+            crate::media::slice_page(full.tracks, cursor, limit, |track| track.media_id);
+        Ok(AudioLibraryDto {
+            tracks,
+            albums: full.albums,
+            next_cursor,
+        })
+    }
+
+    /// P1-9: page-limit validation shared by the paged library getters.
+    fn validate_page_limit(&self, limit: Option<usize>) -> AppResult<usize> {
+        match limit {
+            None => Ok(crate::media::MEDIA_PAGE_DEFAULT_LIMIT),
+            Some(0) => Err(PublicError::new(
+                PublicErrorCode::InvalidArgument,
+                "limit must be >= 1",
+            )
+            .operation("media.page")),
+            Some(limit) if limit > crate::media::MEDIA_PAGE_MAX_LIMIT => Err(PublicError::new(
+                PublicErrorCode::InvalidArgument,
+                format!(
+                    "limit {} exceeds the maximum of {}",
+                    limit,
+                    crate::media::MEDIA_PAGE_MAX_LIMIT
+                ),
+            )
+            .operation("media.page")),
+            Some(limit) => Ok(limit),
+        }
     }
 
     /// Fetch thumbnails for requested media entries.

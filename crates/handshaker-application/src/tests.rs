@@ -3184,6 +3184,7 @@ fn merge_photo_library_upserts_deletes_and_preserves_snapshot_fields() {
         ],
         albums: vec![],
         camera_album_id: Some(5),
+        next_cursor: None,
     };
     let change = crate::dto::MediaChangeDto {
         media_kind: crate::dto::MediaKindDto::Photo,
@@ -3284,6 +3285,7 @@ fn merge_audio_library_removes_deleted_entry() {
             ..Default::default()
         }],
         albums: vec![],
+        next_cursor: None,
     };
     let change = crate::dto::MediaChangeDto {
         media_kind: crate::dto::MediaKindDto::Audio,

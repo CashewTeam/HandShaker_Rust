@@ -36,10 +36,28 @@ extension HandShakerRuntime {
     // MARK: Media
 
     /// Photo library snapshot (`hs_media_photo_library`, request `{}`).
-    public func photoLibrary(sessionID: UInt64) async throws -> PhotoLibrary {
+    /// Photo library snapshot (`hs_media_photo_library`). Pass `{}` for
+    /// the full library, or `limit`/`cursor` for one page (P1-9):
+    /// `limit` defaults to 500 (max 1000), `cursor` is the previous
+    /// response's `nextCursor`. `nextCursor == nil` on the last page.
+    public func photoLibrary(
+        sessionID: UInt64,
+        limit: Int? = nil,
+        cursor: UInt64? = nil
+    ) async throws -> PhotoLibrary {
         try await callNative {
             try self.handle.withRuntime { runtime in
-                try withHsRequestThrowing("{}") { ptr, len in
+                let request: String
+                if let limit, let cursor {
+                    request = #"{"limit":\(limit),"cursor":\(cursor)}"#
+                } else if let limit {
+                    request = #"{"limit":\(limit)}"#
+                } else if let cursor {
+                    request = #"{"cursor":\(cursor)}"#
+                } else {
+                    request = "{}"
+                }
+                return try withHsRequestThrowing(request) { ptr, len in
                     try hsCall(as: PhotoLibrary.self) {
                         hs_media_photo_library(runtime, sessionID, ptr, len)
                     }
@@ -49,10 +67,26 @@ extension HandShakerRuntime {
     }
 
     /// Video library snapshot (`hs_media_video_library`, request `{}`).
-    public func videoLibrary(sessionID: UInt64) async throws -> VideoLibrary {
+    /// Video library snapshot (`hs_media_video_library`). Supports the
+    /// same paged request shape as `photoLibrary` (P1-9).
+    public func videoLibrary(
+        sessionID: UInt64,
+        limit: Int? = nil,
+        cursor: UInt64? = nil
+    ) async throws -> VideoLibrary {
         try await callNative {
             try self.handle.withRuntime { runtime in
-                try withHsRequestThrowing("{}") { ptr, len in
+                let request: String
+                if let limit, let cursor {
+                    request = #"{"limit":\(limit),"cursor":\(cursor)}"#
+                } else if let limit {
+                    request = #"{"limit":\(limit)}"#
+                } else if let cursor {
+                    request = #"{"cursor":\(cursor)}"#
+                } else {
+                    request = "{}"
+                }
+                return try withHsRequestThrowing(request) { ptr, len in
                     try hsCall(as: VideoLibrary.self) {
                         hs_media_video_library(runtime, sessionID, ptr, len)
                     }
@@ -62,10 +96,26 @@ extension HandShakerRuntime {
     }
 
     /// Audio library snapshot (`hs_media_audio_library`, request `{}`).
-    public func audioLibrary(sessionID: UInt64) async throws -> AudioLibrary {
+    /// Audio library snapshot (`hs_media_audio_library`). Supports the
+    /// same paged request shape as `photoLibrary` (P1-9).
+    public func audioLibrary(
+        sessionID: UInt64,
+        limit: Int? = nil,
+        cursor: UInt64? = nil
+    ) async throws -> AudioLibrary {
         try await callNative {
             try self.handle.withRuntime { runtime in
-                try withHsRequestThrowing("{}") { ptr, len in
+                let request: String
+                if let limit, let cursor {
+                    request = #"{"limit":\(limit),"cursor":\(cursor)}"#
+                } else if let limit {
+                    request = #"{"limit":\(limit)}"#
+                } else if let cursor {
+                    request = #"{"cursor":\(cursor)}"#
+                } else {
+                    request = "{}"
+                }
+                return try withHsRequestThrowing(request) { ptr, len in
                     try hsCall(as: AudioLibrary.self) {
                         hs_media_audio_library(runtime, sessionID, ptr, len)
                     }

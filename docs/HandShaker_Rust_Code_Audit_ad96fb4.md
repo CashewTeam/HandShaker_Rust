@@ -1169,7 +1169,6 @@ APPLICATION_API_VERSION = 1.0.0-preview.1
 2. 列表响应剥离 thumbnail byte array。
 3. 大文件本地 I/O 移到 async/spawn_blocking。
 4. 双架构、自包含 XCFramework。
-5. Linux/Windows CI 和 Release pipeline。
 
 ---
 
@@ -1242,7 +1241,7 @@ APPLICATION_API_VERSION = 1.0.0-preview.1
 - [ ] FFI destroy 并发契约安全或明确受控。
 - [ ] 媒体目录有分页和响应上限。
 - [ ] XCFramework 包含 arm64/x86_64 且不依赖用户 Homebrew 路径。
-- [ ] macOS/Linux/Windows 基础 CI 到位。
+- [ ] macOS 基础 CI 到位。
 - [ ] 真机 acceptance 启用时失败不会被吞掉。
 - [ ] `APPLICATION_API_VERSION`、FFI ABI、JSON contract 分别独立版本化。
 - [ ] 文档、Header、Swift SDK 和实际实现一致。

@@ -86,11 +86,14 @@ public struct PhotoLibrary: Codable, Sendable, Equatable {
     public let images: [ImageFile]
     public let albums: [ImageAlbum]
     public let cameraAlbumID: UInt64?
+    /// P1-9: set when more pages exist; pass to the next call as `cursor`.
+    public let nextCursor: UInt64?
 
     private enum CodingKeys: String, CodingKey {
         case images
         case albums
         case cameraAlbumID = "camera_album_id"
+        case nextCursor = "next_cursor"
     }
 }
 
@@ -149,6 +152,14 @@ public struct VideoAlbum: Codable, Sendable, Equatable {
 public struct VideoLibrary: Codable, Sendable, Equatable {
     public let videos: [VideoFile]
     public let albums: [VideoAlbum]
+    /// P1-9: set when more pages exist; pass to the next call as `cursor`.
+    public let nextCursor: UInt64?
+
+    private enum CodingKeys: String, CodingKey {
+        case videos
+        case albums
+        case nextCursor = "next_cursor"
+    }
 }
 
 // MARK: - Audio
@@ -224,6 +235,14 @@ public struct AudioAlbum: Codable, Sendable, Equatable {
 public struct AudioLibrary: Codable, Sendable, Equatable {
     public let tracks: [AudioFile]
     public let albums: [AudioAlbum]
+    /// P1-9: set when more pages exist; pass to the next call as `cursor`.
+    public let nextCursor: UInt64?
+
+    private enum CodingKeys: String, CodingKey {
+        case tracks
+        case albums
+        case nextCursor = "next_cursor"
+    }
 }
 
 // MARK: - Thumbnails & EXIF

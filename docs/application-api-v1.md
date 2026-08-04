@@ -138,6 +138,13 @@ impl HandShakerRuntime {
 - `session_client()` 过渡入口已移除(Phase D/3):CLI 全部命令走
   Application,`AppSession` 不再持有 core client。
 - 未知/已关闭 Session:`SessionNotFound(2103)`/`SessionClosed(2104)`。
+- 媒体分页(P1-9):`get_photo_library`/`get_video_library`/`get_audio_library`
+  保持完整快照语义(metadata-only,不含缩略图字节);
+  `get_photo_library_page`/`get_video_library_page`/`get_audio_library_page`
+  按 `cursor`(上一页 `next_cursor`,media_id 数值)+ `limit`(默认 500、
+  上限 1000,超限返回 `InvalidArgument`)切片排序后的库,返回
+  `next_cursor`(末页为 null)。网络快照仍是完整 core 库(手机协议无
+  分页读取),切片发生在本层。
 - 相对远端路径由 Application 集中解析(`resolve_remote_path`/`normalize_remote_path`),
   `..` 不越过根目录。
 - `discover_devices`(Phase D/D1):单传输失败不整批失败——失败以

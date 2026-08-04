@@ -105,6 +105,13 @@ typedef struct HsSubscription HsSubscription;
   - v1.5:文件元数据更新(`hs_update_file_info`,UPDATE_FILE_INFO)与
     媒体增量合并(`hs_media_merge_change`——纯函数,kind photo|video|audio,
     库快照 + 手机推送 change → 合并后快照;不需要设备);
+  - v1.5 媒体分页(P1-9):`hs_media_photo_library/video_library/audio_library`
+    请求 `{}` 返回完整快照(兼容旧调用方,`next_cursor` 为 null);
+    `{"limit":N,"cursor":M}` 返回一页——limit 默认 500、上限 1000
+    (超限拒绝,不静默截断),cursor 取上一页响应的 `next_cursor`
+    (media_id 数值,缺省字段时从第一页开始);响应含 `next_cursor`,
+    末页为 null。库响应**不携带缩略图字节**,一律经
+    `hs_media_thumbnail`(磁盘缓存路径)获取;
 - 未导出(按需追加,minor):无(MVP 功能面已齐);
 - 大文件字节**不**经过 JSON/FFI(Rust 直接写文件,任务 ID + 进度事件);
 - 缩略图 bytes 经 FFI 写入 `<state_dir>/thumbnails/` 磁盘缓存并返回

@@ -34,8 +34,8 @@ pub use file_plan::{
 };
 pub use media::{
     AudioAlbumDto, AudioFileDto, AudioLibraryDto, ExifDataDto, ImageAlbumDto, ImageFileDto,
-    PhotoLibraryDto, ThumbnailsDto, VideoAlbumDto, VideoFileDto, VideoLibraryDto,
-    merge_audio_library, merge_photo_library, merge_video_library,
+    MEDIA_PAGE_DEFAULT_LIMIT, MEDIA_PAGE_MAX_LIMIT, PhotoLibraryDto, ThumbnailsDto, VideoAlbumDto,
+    VideoFileDto, VideoLibraryDto, merge_audio_library, merge_photo_library, merge_video_library,
 };
 pub use runtime::{HandShakerRuntime, normalize_remote_path, resolve_remote_path};
 pub use sync::{
