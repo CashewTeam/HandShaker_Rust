@@ -157,9 +157,10 @@ final class RuntimeLifecycleTests: XCTestCase {
                 }
                 results.lock()
                 if let result = result { observed.append(result) }
-                results.unlock()
                 finished += 1
-                if finished == 2 { bothDone.signal() }
+                let done = finished == 2
+                results.unlock()
+                if done { bothDone.signal() }
             }
         }
         barrier.signal()

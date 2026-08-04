@@ -52,12 +52,26 @@ public final class RuntimeHandle: @unchecked Sendable {
     /// Contract (enforced in debug): never call `destroy()` (or deinit)
     /// from *inside* a `withRuntime` body on the same thread — the drain
     /// wait would deadlock. A debug build traps instead; release builds
-    /// treat it as a no-op (the handle is then released by deinit).
+    /// treat it as a no-op (the handle is then released by deinit, which
+    /// runs on a thread outside any body).
     @discardableResult
     public func withRuntime<T>(_ body: (OpaquePointer) throws -> T) throws -> T {
-        let threadKey = "hs.inRuntimeCall"
-        Thread.current.threadDictionary[threadKey] = true
-        defer { Thread.current.threadDictionary[threadKey] = nil }
+        // Per-handle, per-thread depth counter (security review fix): a
+        // plain Bool was shared across handles (destroy on handle B inside
+        // a body of handle A false-positived) and was cleared by a nested
+        // withRuntime's defer. The counter is exact for both cases.
+        let threadKey = "hs.inRuntimeCall.\(ObjectIdentifier(self))"
+        let dictionary = Thread.current.threadDictionary
+        let depth = (dictionary[threadKey] as? Int) ?? 0
+        dictionary[threadKey] = depth + 1
+        defer {
+            let remaining = (dictionary[threadKey] as? Int) ?? 1
+            if remaining <= 1 {
+                dictionary[threadKey] = nil
+            } else {
+                dictionary[threadKey] = remaining - 1
+            }
+        }
         let ptr: OpaquePointer
         condition.lock()
         if destroyed {
@@ -109,8 +123,12 @@ public final class RuntimeHandle: @unchecked Sendable {
     public func destroy() {
         // Contract guard: destroy() from inside a withRuntime body on the
         // same thread would deadlock on the drain wait below. Trap in
-        // debug builds (the handle is still released by deinit in release).
-        if Thread.current.threadDictionary["hs.inRuntimeCall"] as? Bool == true {
+        // debug builds (the handle is still released by deinit in release,
+        // on a thread outside any body). Per-handle key: destroying
+        // handle B inside a body of handle A is legal and must not
+        // false-positive.
+        let threadKey = "hs.inRuntimeCall.\(ObjectIdentifier(self))"
+        if (Thread.current.threadDictionary[threadKey] as? Int ?? 0) > 0 {
             assertionFailure("destroy() must not be called from inside a withRuntime body")
             return
         }
