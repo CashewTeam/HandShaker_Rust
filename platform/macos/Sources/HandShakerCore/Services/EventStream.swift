@@ -27,7 +27,6 @@ extension HandShakerRuntime {
     /// itself only starts when the stream is iterated.
     public func eventStream() throws -> AsyncThrowingStream<EventEnvelope, Error> {
         let subscription = try handle.subscribe()
-        let shutdownFlag = self.shutdownFlag
         let stream: AsyncThrowingStream<EventEnvelope, Error> = AsyncThrowingStream(
             bufferingPolicy: .bufferingNewest(1)
         ) { continuation in
@@ -35,21 +34,23 @@ extension HandShakerRuntime {
                 defer { subscription.destroy() }
                 while !Task.isCancelled {
                     do {
-                        if let data = try subscription.next(timeoutMs: 1000) {
+                        // P1-4: .closed finishes unconditionally — no local
+                        // shutdown flag involved, so a hub closed by Rust
+                        // for any reason ends the stream instead of
+                        // hot-polling.
+                        switch try subscription.next(timeoutMs: 1000) {
+                        case .event(let data):
                             let envelope = try JSONDecoder().decode(
                                 EventEnvelope.self,
                                 from: data
                             )
                             continuation.yield(envelope)
-                        } else if shutdownFlag.isSet {
-                            // The `{"closed":true}` sentinel only appears
-                            // after hs_runtime_shutdown, and shutdown()
-                            // sets the flag before the FFI call — the
-                            // stream is done.
+                        case .timeout:
+                            continue // plain poll timeout — keep waiting
+                        case .closed:
                             continuation.finish()
                             return
                         }
-                        // else: plain poll timeout — keep waiting.
                     } catch {
                         continuation.finish(throwing: error)
                         return

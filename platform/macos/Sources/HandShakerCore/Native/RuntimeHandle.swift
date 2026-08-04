@@ -100,15 +100,24 @@ public final class SubscriptionHandle: @unchecked Sendable {
         self.rawPtr = ptr
     }
 
+    /// One poll result (P1-4): `timeout` and `closed` are distinct — the
+    /// event stream must finish on `.closed` regardless of any local
+    /// shutdown flag (the Rust side may close the hub for other reasons,
+    /// or the runtime may be destroyed by another owner).
+    public enum SubscriptionPoll: Sendable {
+        case event(Data)
+        case timeout
+        case closed
+    }
+
     /// Wait up to `timeoutMs` for the next event.
     ///
-    /// - Returns: the raw `EventEnvelope` JSON bytes (caller decodes it as
-    ///   `EventEnvelope`), or `nil` when the wait timed out
-    ///   (`{"timeout":true}`) or the runtime shut down
-    ///   (`{"closed":true}`).
+    /// - Returns: `.event(raw JSON bytes)` for a real event, `.timeout`
+    ///   for a plain poll timeout (`{"timeout":true}`), `.closed` when
+    ///   the runtime/hub shut down (`{"closed":true}`).
     /// - Throws: `HandShakerError` on native failures (e.g. a lagged
     ///   subscriber) or when the handle is destroyed.
-    public func next(timeoutMs: UInt32) throws -> Data? {
+    public func next(timeoutMs: UInt32) throws -> SubscriptionPoll {
         lock.lock()
         defer { lock.unlock() }
         guard let ptr = rawPtr else {
@@ -121,14 +130,17 @@ public final class SubscriptionHandle: @unchecked Sendable {
         }
         let json = hsString(result.value)
         hs_byte_buffer_free(result.error)
-        guard !json.isEmpty else { return nil }
-        // Sentinel payloads mean "no event this round": timeout or closed.
+        guard !json.isEmpty else { return .timeout }
+        // Sentinel payloads mean "no event this round".
         if let object = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any] {
-            if object["timeout"] as? Bool == true || object["closed"] as? Bool == true {
-                return nil
+            if object["closed"] as? Bool == true {
+                return .closed
+            }
+            if object["timeout"] as? Bool == true {
+                return .timeout
             }
         }
-        return Data(json.utf8)
+        return .event(Data(json.utf8))
     }
 
     /// Release the subscription handle. Idempotent; NULL-safe on the Rust

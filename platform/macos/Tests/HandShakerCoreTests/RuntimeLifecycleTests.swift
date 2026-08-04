@@ -55,9 +55,11 @@ final class RuntimeLifecycleTests: XCTestCase {
         defer { runtime.destroy() }
         let subscription = try runtime.subscribe()
         // No events are produced after subscribe (nothing connects), so
-        // next() must time out and return nil.
-        let data = try subscription.next(timeoutMs: 200)
-        XCTAssertNil(data, "no events expected; nil means timeout/closed")
+        // next() must time out — as .timeout, not .closed (P1-4).
+        let poll = try subscription.next(timeoutMs: 200)
+        guard case .timeout = poll else {
+            return XCTFail("expected .timeout, got \(poll)")
+        }
         subscription.destroy()
         subscription.destroy() // idempotent
     }
