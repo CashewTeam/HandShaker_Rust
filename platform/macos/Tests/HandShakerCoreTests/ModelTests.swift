@@ -366,4 +366,48 @@ final class ModelTests: XCTestCase {
         let transportValue = deviceObject["transport"] as? String
         XCTAssertEqual(transportValue, "wifi")
     }
+    /// DoD item 6 (stable release): every BackendEvent variant has an
+    /// authoritative Rust-generated fixture (examples/gen_event_fixtures.rs).
+    /// Decoding every fixture must succeed; the kind token and a few
+    /// variant-specific fields must survive a decode → re-encode round trip.
+    func testAllEventFixturesDecodeAndReencode() throws {
+        let cases: [(String, String, [String: Any])] = [
+            ("event_runtime_started", "runtime_started", [:]),
+            ("event_runtime_stopping", "runtime_stopping", [:]),
+            ("event_device_added", "device_added", ["id": "phone:9a3f-77ee"]),
+            ("event_device_removed", "device_removed", ["device_id": "phone:9a3f-77ee"]),
+            ("event_connection_lost", "connection_lost", ["session_id": 7]),
+            ("event_clipboard_changed", "clipboard_changed", ["session_id": 7]),
+            ("event_media_changed", "media_changed", ["session_id": 7]),
+            ("event_remote_file_changed", "remote_file_changed", ["session_id": 7]),
+            ("event_sync_watch_applied", "sync_watch_applied", ["profile_id": "photos", "session_id": 7]),
+            ("event_warning", "warning", ["code": "remote_io"]),
+            ("event_transfer_updated", "transfer_updated", ["id": 7, "direction": "download", "state": "running"]),
+            ("event_session_state_changed", "session_state_changed", ["id": 7]),
+        ]
+        for (name, kind, fields) in cases {
+            let data = try rustFixture(name)
+            let envelope = try decoder.decode(EventEnvelope.self, from: data)
+            XCTAssertEqual(envelope.sequence, 1, "\(name): envelope sequence")
+            XCTAssertEqual(envelope.timestampMs, 1_700_000_000_000, "\(name): envelope timestamp")
+
+            let reencoded = try JSONEncoder().encode(envelope)
+            guard let object = try JSONSerialization.jsonObject(with: reencoded) as? [String: Any],
+                  let event = object["event"] as? [String: Any] else {
+                return XCTFail("\(name): re-encoded envelope is not a JSON object")
+            }
+            XCTAssertEqual(event["kind"] as? String, kind, "\(name): kind token")
+            for (key, expected) in fields {
+                let actual = event[key]
+                switch expected {
+                case let string as String:
+                    XCTAssertEqual(actual as? String, string, "\(name): \(key)")
+                case let int as Int:
+                    XCTAssertEqual(actual as? Int, int, "\(name): \(key)")
+                default:
+                    XCTFail("\(name): unsupported expectation for \(key)")
+                }
+            }
+        }
+    }
 }

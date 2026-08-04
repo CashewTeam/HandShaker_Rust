@@ -1,0 +1,12 @@
+{
+  "sequence": 1,
+  "timestamp_ms": 1700000000000,
+  "event": {
+    "kind": "warning",
+    "code": "remote_io",
+    "message": "remote read failed",
+    "detail": null,
+    "retryable": false,
+    "operation": "sync"
+  }
+}

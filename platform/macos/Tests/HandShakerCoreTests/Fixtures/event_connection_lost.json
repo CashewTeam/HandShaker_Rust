@@ -1,0 +1,8 @@
+{
+  "sequence": 1,
+  "timestamp_ms": 1700000000000,
+  "event": {
+    "kind": "connection_lost",
+    "session_id": 7
+  }
+}

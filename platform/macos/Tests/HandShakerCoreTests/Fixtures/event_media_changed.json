@@ -1,0 +1,25 @@
+{
+  "sequence": 1,
+  "timestamp_ms": 1700000000000,
+  "event": {
+    "kind": "media_changed",
+    "session_id": 7,
+    "change": {
+      "media_kind": "photo",
+      "added": [
+        {
+          "media_id": 42,
+          "path": "/storage/emulated/0/DCIM/Camera/IMG_0042.jpg",
+          "size": 2048,
+          "created_at": null,
+          "modified_at": null,
+          "mime_type": null,
+          "title": null,
+          "album_name": null
+        }
+      ],
+      "deleted": [],
+      "updated": []
+    }
+  }
+}

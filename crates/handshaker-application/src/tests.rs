@@ -3491,10 +3491,22 @@ fn slice_page_idless_items_sort_first_and_do_not_fake_end_of_library() {
         tag: &'static str,
     }
     let items = vec![
-        Item { id: None, tag: "no-id-1" },
-        Item { id: None, tag: "no-id-2" },
-        Item { id: Some(10), tag: "ten" },
-        Item { id: Some(20), tag: "twenty" },
+        Item {
+            id: None,
+            tag: "no-id-1",
+        },
+        Item {
+            id: None,
+            tag: "no-id-2",
+        },
+        Item {
+            id: Some(10),
+            tag: "ten",
+        },
+        Item {
+            id: Some(20),
+            tag: "twenty",
+        },
     ];
     let (page, next) = crate::media::slice_page(items, None, 2, |item| item.id);
     // Page 1 is all id-less; the first id-bearing item of the remainder is
@@ -3507,10 +3519,22 @@ fn slice_page_idless_items_sort_first_and_do_not_fake_end_of_library() {
     // Page 2 continues after 10 — no item is lost or repeated.
     let (page2, next2) = crate::media::slice_page(
         vec![
-            Item { id: None, tag: "no-id-1" },
-            Item { id: None, tag: "no-id-2" },
-            Item { id: Some(10), tag: "ten" },
-            Item { id: Some(20), tag: "twenty" },
+            Item {
+                id: None,
+                tag: "no-id-1",
+            },
+            Item {
+                id: None,
+                tag: "no-id-2",
+            },
+            Item {
+                id: Some(10),
+                tag: "ten",
+            },
+            Item {
+                id: Some(20),
+                tag: "twenty",
+            },
         ],
         next,
         500,
@@ -3518,14 +3542,29 @@ fn slice_page_idless_items_sort_first_and_do_not_fake_end_of_library() {
     );
     assert_eq!(page2.len(), 1);
     assert_eq!(page2[0].tag, "twenty");
-    assert_eq!(next2, None, "pagination terminates after the id-bearing tail");
+    assert_eq!(
+        next2, None,
+        "pagination terminates after the id-bearing tail"
+    );
     // With ids present on the page, next_cursor is the last id even if the
     // tail of the full list is id-less.
     let items2 = vec![
-        Item { id: Some(1), tag: "one" },
-        Item { id: Some(2), tag: "two" },
-        Item { id: Some(3), tag: "three" },
-        Item { id: None, tag: "no-id-tail" },
+        Item {
+            id: Some(1),
+            tag: "one",
+        },
+        Item {
+            id: Some(2),
+            tag: "two",
+        },
+        Item {
+            id: Some(3),
+            tag: "three",
+        },
+        Item {
+            id: None,
+            tag: "no-id-tail",
+        },
     ];
     let (page2, next2) = crate::media::slice_page(items2, None, 3, |item| item.id);
     // Sorted order is [None, 1, 2, 3]: the id-less item lands first, the
@@ -3534,10 +3573,22 @@ fn slice_page_idless_items_sort_first_and_do_not_fake_end_of_library() {
     assert_eq!(next2, Some(2));
     let (page3, next3) = crate::media::slice_page(
         vec![
-            Item { id: Some(1), tag: "one" },
-            Item { id: Some(2), tag: "two" },
-            Item { id: Some(3), tag: "three" },
-            Item { id: None, tag: "no-id-tail" },
+            Item {
+                id: Some(1),
+                tag: "one",
+            },
+            Item {
+                id: Some(2),
+                tag: "two",
+            },
+            Item {
+                id: Some(3),
+                tag: "three",
+            },
+            Item {
+                id: None,
+                tag: "no-id-tail",
+            },
         ],
         next2,
         500,
@@ -3575,7 +3626,59 @@ fn strip_photo_thumbnails_also_strips_album_covers() {
     assert!(library.images[0].thumbnail.is_none());
     assert!(!library.images[0].thumbnail_error);
     let cover = library.albums[0].cover_image.as_ref().expect("cover kept");
-    assert!(cover.thumbnail.is_none(), "album cover thumbnail must be stripped");
+    assert!(
+        cover.thumbnail.is_none(),
+        "album cover thumbnail must be stripped"
+    );
     assert!(!cover.thumbnail_error);
-    assert_eq!(cover.path.as_deref(), Some("/cover.jpg"), "identity fields survive");
+    assert_eq!(
+        cover.path.as_deref(),
+        Some("/cover.jpg"),
+        "identity fields survive"
+    );
+}
+
+#[test]
+fn all_event_fixtures_round_trip_and_preserve_kind() {
+    // DoD item 6 (stable release): every BackendEvent variant has an
+    // authoritative Rust-generated fixture (see
+    // examples/gen_event_fixtures.rs — rerun it to regenerate). This test
+    // pins each fixture: it must decode, keep its kind token, and
+    // re-serialize byte-identically (deterministic field order).
+    let kinds = [
+        ("event_runtime_started", "runtime_started"),
+        ("event_runtime_stopping", "runtime_stopping"),
+        ("event_device_added", "device_added"),
+        ("event_device_updated", "device_updated"),
+        ("event_device_removed", "device_removed"),
+        ("event_session_state_changed", "session_state_changed"),
+        ("event_transfer_updated", "transfer_updated"),
+        ("event_connection_lost", "connection_lost"),
+        ("event_clipboard_changed", "clipboard_changed"),
+        ("event_media_changed", "media_changed"),
+        ("event_remote_file_changed", "remote_file_changed"),
+        ("event_sync_watch_applied", "sync_watch_applied"),
+        ("event_warning", "warning"),
+    ];
+    for (name, kind) in kinds {
+        let path = format!(
+            "{}/tests/fixtures/{}.json",
+            env!("CARGO_MANIFEST_DIR"),
+            name
+        );
+        let fixture = std::fs::read_to_string(path).expect("fixture");
+        let envelope: crate::event::EventEnvelope =
+            serde_json::from_str(&fixture).expect("fixture must decode");
+        let value = serde_json::to_value(&envelope).expect("serialize");
+        assert_eq!(
+            value["event"]["kind"], kind,
+            "{name}: kind token must be stable"
+        );
+        let reserialized = serde_json::to_string_pretty(&envelope).expect("serialize");
+        assert_eq!(
+            format!("{reserialized}\n"),
+            fixture,
+            "{name}: re-serialization must match the committed fixture (rerun examples/gen_event_fixtures)"
+        );
+    }
 }

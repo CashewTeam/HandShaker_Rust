@@ -1,0 +1,14 @@
+{
+  "sequence": 1,
+  "timestamp_ms": 1700000000000,
+  "event": {
+    "kind": "remote_file_changed",
+    "session_id": 7,
+    "change": {
+      "change_kind": "directory_changed",
+      "paths": [
+        "/storage/emulated/0/DCIM/Camera"
+      ]
+    }
+  }
+}

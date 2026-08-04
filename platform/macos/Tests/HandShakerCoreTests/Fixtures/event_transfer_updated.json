@@ -1,0 +1,31 @@
+{
+  "sequence": 1,
+  "timestamp_ms": 1700000000000,
+  "event": {
+    "kind": "transfer_updated",
+    "id": 7,
+    "session_id": 1,
+    "direction": "download",
+    "source": "/remote/f.bin",
+    "destination": "/local/f.bin",
+    "state": "running",
+    "transferred_bytes": 12,
+    "total_bytes": 100,
+    "started_at_ms": 1,
+    "finished_at_ms": null,
+    "error": null,
+    "item_count": 3,
+    "completed_items": 1,
+    "failed_items": 0,
+    "current_item": "/remote/g.bin",
+    "batch_result": {
+      "ok": [
+        {
+          "source": "/remote/g.bin",
+          "target": "/local/g.bin"
+        }
+      ],
+      "failures": []
+    }
+  }
+}

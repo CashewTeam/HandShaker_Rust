@@ -1,0 +1,8 @@
+{
+  "sequence": 1,
+  "timestamp_ms": 1700000000000,
+  "event": {
+    "kind": "device_removed",
+    "device_id": "phone:9a3f-77ee"
+  }
+}

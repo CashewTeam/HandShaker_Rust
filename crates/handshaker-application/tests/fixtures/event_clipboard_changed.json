@@ -1,0 +1,14 @@
+{
+  "sequence": 1,
+  "timestamp_ms": 1700000000000,
+  "event": {
+    "kind": "clipboard_changed",
+    "session_id": 7,
+    "entries": [
+      {
+        "text": "hello 锤子",
+        "timestamp_ms": 1700000000000
+      }
+    ]
+  }
+}

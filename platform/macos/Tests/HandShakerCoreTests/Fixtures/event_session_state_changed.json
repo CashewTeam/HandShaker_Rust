@@ -1,0 +1,39 @@
+{
+  "sequence": 1,
+  "timestamp_ms": 1700000000000,
+  "event": {
+    "kind": "session_state_changed",
+    "id": 7,
+    "device": {
+      "id": "phone:9a3f-77ee",
+      "stable_id": "phone:9a3f-77ee",
+      "display_name": "U2 Pro",
+      "model": "OD103",
+      "transport": "wifi",
+      "transport_address": "192.168.1.23:41000",
+      "available": true,
+      "adb": null,
+      "usb": null
+    },
+    "device_info": {
+      "serial": "3f13d4b4",
+      "phone_id": "9a3f-77ee",
+      "name": "U2 Pro",
+      "model": "OD103",
+      "brand": null,
+      "manufacturer": null,
+      "smartisan_version": null,
+      "apk_version": null,
+      "apk_version_name": null,
+      "root_path": "/storage/emulated/0",
+      "external_storage_path": null,
+      "disk_size": null,
+      "used_disk_size": null,
+      "battery_percentage": null,
+      "phone_locked": null
+    },
+    "state": "ready",
+    "connected_at_ms": 1700000000000,
+    "last_activity_at_ms": 1700000000100
+  }
+}

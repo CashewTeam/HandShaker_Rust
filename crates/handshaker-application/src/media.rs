@@ -191,7 +191,10 @@ pub fn slice_page<T: Clone>(
             // page (replacing its last slot) and key the next page on it:
             // the cursor must always point at an item that was actually
             // returned, otherwise that item would be skipped forever.
-            None => match items[end..].iter().position(|item| media_id(item).is_some()) {
+            None => match items[end..]
+                .iter()
+                .position(|item| media_id(item).is_some())
+            {
                 Some(offset) => {
                     let idx = end + offset;
                     let first_id = media_id(&items[idx]).expect("position checked is_some");

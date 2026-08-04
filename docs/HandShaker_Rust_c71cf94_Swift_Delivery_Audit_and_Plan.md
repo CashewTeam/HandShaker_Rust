@@ -5,6 +5,9 @@
 > Phase D 复核提交：`e01bc94`（本文件已按 Phase D 完成状态复核更新）
 > Phase E 复核提交：`4c79380`（FFI 功能扩展 + photo sync 完成，ABI 1.4.0、50 个导出符号）
 > Phase F 复核提交：`7aa655d`（Swift Package/XCFramework 交付、真机验收、update file info + media merge、macOS CI——ABI 1.5.0、52 个导出符号）
+> Phase G 复核提交：`71a050f`（2026-08-04 审计收尾——`docs/HandShaker_Rust_Code_Audit_ad96fb4.md` 全部 5 P0 / 10 P1 / 5 P2 修复并标记；
+> Swift 公共 API 全 async（P1-6）、事件契约 fixture 双向锁死（P0-3）、媒体库分页（P1-9）、universal 双架构 + 静态 libusb（P1-10）；
+> Rust 9 套件 390+ 项 / Swift 47 测试（2 真机 skip）/ C/Swift smoke 全绿）
 > Cargo Workspace 版本：`0.7.3`
 > Application API 标称版本：`1.0.0-preview.1`（Phase D 后维持 preview，见 §5.2 P0-1）
 > FFI Rust 实现版本：`1.2.0`（Header/文档/snapshot 已一致）
@@ -79,8 +82,13 @@
 5. ~~FFI 缺少大量 GUI 必需功能~~（已修复：Phase E 导出 21 个新符号 + photo sync 6 个 + update file info/media merge 2 个，52 个符号覆盖 MVP 功能面）；
 6. ~~`state_dir` 和 `wire_log` 配置语义不真实~~（已修复：state_dir 全链路生效 + CLI `--state-dir`；wire_log 真实写入）；
 7. ~~Application 仍公开 `HandShakerClient` 过渡入口~~（已删除，742f183）；
-8. Swift 交付物仍是宿主架构的 `.a/.dylib`，没有正式 XCFramework；
-9. CI 没有运行 C/Swift smoke，也没有 Linux/Windows FFI 验证和发布 artifact。
+8. ~~Swift 交付物仍是宿主架构的 `.a/.dylib`，没有正式 XCFramework~~（已修复：`platform/macos/Artifacts/HandShakerFFI.xcframework` + Swift Package，P1-10 升级为 arm64+x86_64 universal + 静态 libusb，产物无 libusb 动态依赖，可公证/上架）；
+9. ~~CI 没有运行 C/Swift smoke，也没有 Linux/Windows FFI 验证和发布 artifact~~（已修复：macOS CI 运行 C/Swift smoke + ABI 检查；Linux/Windows 按用户 2026-08-04 平台决策不承诺适配，不建对应 CI——见主审计 P2-3；发布 artifact/checksum 留后续 CI 迭代）。
+
+> **Phase G 复核结论（2026-08-04）**：上述 9 项已全部关闭。剩余未完成项仅
+> 主审计记录的两处建议/遗留：`RuntimeStarted` 仍未由 `create()` 发布
+> （§5.3 P1-6，枚举中仅测试使用）、`DeviceAdded/Removed` 无独立 discovery
+> watcher、真机媒体库分页端到端未验收；上架签名/公证决策待用户确认。
 
 ---
 
@@ -489,6 +497,13 @@ identity 事件（D2），发现 endpoint 仅作临时身份；旧 JSON 反序�
 ping、sync）后更新，并有单元测试。
 
 ### P1-6：RuntimeStarted 等事件没有落实（部分）
+
+> **Phase G 复核（2026-08-04）**：仍为遗留——`RuntimeStarted` 仍在枚举中
+> 但 `create()` 未发布（仅测试使用）；`DeviceAdded/Removed` 无独立
+> discovery watcher。`BackendEvent` 其余事件契约已由主审计 P0-3（Rust
+> 权威 fixture 双向锁死）与 P1-2（SyncWatchApplied 结构化路由）加固。
+> 建议在正式 v1 冻结时决定：发布 `RuntimeStarted`，或从枚举中移除并
+> 升级 Application API minor。
 
 `BackendEvent::RuntimeStarted` 仍在枚举中，但 `create()` 未发布
 （与审计基线相同）；`DeviceAdded/Removed` 没有独立 discovery watcher。
