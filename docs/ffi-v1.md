@@ -76,7 +76,8 @@ typedef struct HsSubscription HsSubscription;
   `hs_delete_paths`、`hs_count_files`、`hs_update_file_info`、
   `hs_create_directory`、`hs_clipboard_set`、`hs_clipboard_delete`、
   `hs_trust_remove`、`hs_trust_reset`、`hs_monitor_folder`、
-  `hs_media_thumbnail`、`hs_media_page`、`hs_batch_transfer`。
+  `hs_media_photo_library`、`hs_media_video_library`、`hs_media_audio_library`
+  (共用 `MediaPageRequestRaw`)、`hs_media_fetch_exif`、`hs_batch_transfer`。
   这是线级行为变化(相对早先"静默忽略未知字段"):外部旧 FFI 消费者若发送
   超出当前字段集合的 JSON 会收到稳定错误。ABI 符号/签名未变,`json_contract`
   仍为 1(字段集合为严格超集变化时不递增;删除/重命名字段必须递增)。
