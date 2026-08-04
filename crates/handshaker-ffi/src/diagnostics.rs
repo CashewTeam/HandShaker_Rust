@@ -83,6 +83,10 @@ pub unsafe extern "C" fn hs_runtime_diagnostics(runtime: *mut c_void) -> HsCallR
             "wire_log_enabled": wire_log_enabled,
             "active_sessions": active_sessions,
             "active_transfers": active_transfers,
+            // P2-5: live event subscriptions (bounded by MAX_SUBSCRIPTIONS).
+            "active_subscriptions": runtime
+                .subscriptions
+                .load(std::sync::atomic::Ordering::Acquire),
             "capabilities": [
                 "files", "clipboard", "trust", "media", "batch", "sync",
                 "monitor", "events", "discovery", "diagnostics",

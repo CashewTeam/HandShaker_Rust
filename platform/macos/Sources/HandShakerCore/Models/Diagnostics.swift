@@ -30,6 +30,9 @@ public struct RuntimeDiagnostics: Codable, Sendable, Equatable {
     /// Feature tokens: "files", "clipboard", "trust", "media", "batch",
     /// "sync", "monitor", "events", "discovery", "diagnostics",
     /// "update_file_info", "media_merge".
+    /// P2-5: live event subscriptions (bounded by the native
+    /// MAX_SUBSCRIPTIONS; each pins a small Tokio runtime).
+    public let activeSubscriptions: Int
     public let capabilities: [String]
 
     /// Minimum JSON contract version this SDK understands (P1-7). Bump
@@ -51,6 +54,7 @@ public struct RuntimeDiagnostics: Codable, Sendable, Equatable {
         case wireLogEnabled = "wire_log_enabled"
         case activeSessions = "active_sessions"
         case activeTransfers = "active_transfers"
+        case activeSubscriptions = "active_subscriptions"
         case capabilities
     }
 
@@ -72,6 +76,7 @@ public struct RuntimeDiagnostics: Codable, Sendable, Equatable {
         wireLogEnabled = try container.decode(Bool.self, forKey: .wireLogEnabled)
         activeSessions = try container.decode(UInt64.self, forKey: .activeSessions)
         activeTransfers = try container.decode(Int64.self, forKey: .activeTransfers)
+        activeSubscriptions = try container.decodeIfPresent(Int.self, forKey: .activeSubscriptions) ?? 0
         capabilities = try container.decode([String].self, forKey: .capabilities)
     }
 }

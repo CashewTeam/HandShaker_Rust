@@ -52,7 +52,16 @@ pub const ABI_VERSION_PATCH: u32 = 0;
 pub(crate) struct HsRuntime {
     pub(crate) _tokio: tokio::runtime::Runtime,
     pub(crate) app: HandShakerRuntime,
+    /// P2-5: bounded live-subscription counter. Each subscription owns an
+    /// independent Tokio runtime, so runaway subscribes are capped;
+    /// diagnostics exposes the current count.
+    pub(crate) subscriptions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
+
+/// P2-5: maximum concurrently live event subscriptions per runtime.
+/// Each one pins a current-thread Tokio runtime; beyond this the caller
+/// must destroy some subscriptions first (or use fewer).
+pub(crate) const MAX_SUBSCRIPTIONS: usize = 64;
 
 /// Event subscription handle: a broadcast receiver owned by the caller.
 /// The receiver is mutex-guarded so concurrent `hs_subscription_next` calls
@@ -60,6 +69,9 @@ pub(crate) struct HsRuntime {
 pub struct HsSubscription {
     _tokio: tokio::runtime::Runtime,
     receiver: tokio::sync::Mutex<broadcast::Receiver<handshaker_application::EventEnvelope>>,
+    /// Shared counter of the owning runtime (P2-5): released on destroy so
+    /// the runtime can hand out more subscriptions.
+    counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +193,7 @@ pub unsafe extern "C" fn hs_runtime_create(
         let runtime = Box::new(HsRuntime {
             _tokio: tokio_runtime,
             app,
+            subscriptions: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         });
         *slot = Box::into_raw(runtime) as *mut c_void;
         ok(&serde_json::json!({ "created": true }))
@@ -637,11 +650,32 @@ pub unsafe extern "C" fn hs_subscribe_events(
     catch("subscribe_events", || {
         let runtime = ffi_try!(runtime_ref(runtime, "subscribe_events"));
         let slot = ffi_try!(out_slot(out_subscription, "subscribe_events"));
+        // P2-5: bound live subscriptions (each pins a Tokio runtime).
+        let previous = runtime
+            .subscriptions
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if previous >= MAX_SUBSCRIPTIONS {
+            runtime
+                .subscriptions
+                .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            return err(&PublicError::new(
+                PublicErrorCode::InvalidState,
+                format!(
+                    "too many live event subscriptions (max {MAX_SUBSCRIPTIONS}); destroy some first"
+                ),
+            )
+            .operation("subscribe_events"));
+        }
         let receiver = runtime.app.subscribe_events();
         let subscription = Box::new(HsSubscription {
+            // P2-5: the subscription runtime only needs the time driver
+            // (broadcast recv + timeout). enable_all pulled in the signal
+            // driver, which consumes file descriptors per subscription and
+            // hit EMFILE well below the process limit once many
+            // subscriptions existed.
             _tokio: ffi_try!(
                 tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
+                    .enable_time()
                     .build()
                     .map_err(|error| {
                         err(&PublicError::new(
@@ -652,6 +686,7 @@ pub unsafe extern "C" fn hs_subscribe_events(
                     })
             ),
             receiver: tokio::sync::Mutex::new(receiver),
+            counter: runtime.subscriptions.clone(),
         });
         *slot = Box::into_raw(subscription) as *mut c_void;
         ok(&serde_json::json!({ "subscribed": true }))
@@ -705,7 +740,12 @@ pub unsafe extern "C" fn hs_subscription_destroy(subscription: *mut c_void) {
         return;
     }
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        drop(Box::from_raw(subscription as *mut HsSubscription));
+        let handle = Box::from_raw(subscription as *mut HsSubscription);
+        // P2-5: release the runtime's live-subscription slot.
+        handle
+            .counter
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        drop(handle);
     }));
 }
 
@@ -944,5 +984,85 @@ pub(crate) mod ffi_test_util {
         let decoded: serde_json::Value = serde_json::from_slice(&bytes).expect("error json");
         unsafe { free_result(HsCallResult::default()) };
         decoded["code"].as_str().unwrap_or("").to_string()
+    }
+}
+
+#[cfg(test)]
+mod subscription_cap_tests {
+    use super::ffi_test_util::{error_code_of, runtime_ptr};
+    use crate::buffer;
+    use crate::diagnostics::hs_runtime_diagnostics;
+    use crate::result::free_result;
+    use crate::{hs_subscribe_events, hs_subscription_destroy};
+
+    #[test]
+    fn subscriptions_are_bounded_and_released_on_destroy() {
+        let runtime = runtime_ptr();
+        // Diagnostics reports the live count.
+        let diag = unsafe { hs_runtime_diagnostics(runtime) };
+        assert_eq!(diag.status, 0);
+        let bytes = unsafe { buffer::into_vec(diag.value) };
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(value["active_subscriptions"], 0);
+        unsafe { free_result(Default::default()) };
+
+        // Take one subscription: count goes to 1.
+        let mut sub: *mut std::ffi::c_void = std::ptr::null_mut();
+        let result = unsafe { hs_subscribe_events(runtime, &mut sub) };
+        assert_eq!(result.status, 0, "first subscribe must succeed");
+        unsafe { free_result(result) };
+        let diag = unsafe { hs_runtime_diagnostics(runtime) };
+        let bytes = unsafe { buffer::into_vec(diag.value) };
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(value["active_subscriptions"], 1);
+        unsafe { free_result(Default::default()) };
+
+        // Destroy releases the slot.
+        unsafe { hs_subscription_destroy(sub) };
+        let diag = unsafe { hs_runtime_diagnostics(runtime) };
+        let bytes = unsafe { buffer::into_vec(diag.value) };
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(value["active_subscriptions"], 0);
+        unsafe { free_result(Default::default()) };
+
+        unsafe { crate::hs_runtime_destroy(runtime) };
+    }
+
+    #[test]
+    fn subscribe_over_capacity_is_rejected() {
+        let runtime = runtime_ptr();
+        let mut subs: Vec<*mut std::ffi::c_void> = Vec::new();
+        // Fill to the cap.
+        for _ in 0..crate::MAX_SUBSCRIPTIONS {
+            let mut sub: *mut std::ffi::c_void = std::ptr::null_mut();
+            let result = unsafe { hs_subscribe_events(runtime, &mut sub) };
+            if result.status != 0 {
+                let bytes = unsafe { buffer::into_vec(result.error) };
+                eprintln!("subscribe error: {}", String::from_utf8_lossy(&bytes));
+                unsafe { free_result(Default::default()) };
+            }
+            assert_eq!(result.status, 0, "subscribe within capacity must succeed");
+            unsafe { free_result(result) };
+            subs.push(sub);
+        }
+        // One more must be rejected with a stable error (not a panic).
+        let mut extra: *mut std::ffi::c_void = std::ptr::null_mut();
+        let result = unsafe { hs_subscribe_events(runtime, &mut extra) };
+        assert_ne!(result.status, 0, "subscribe over capacity must fail");
+        assert_eq!(error_code_of(result), "invalid_state");
+        assert!(extra.is_null());
+
+        // Destroying one frees the slot for a new subscribe.
+        unsafe { hs_subscription_destroy(subs.pop().unwrap()) };
+        let mut replacement: *mut std::ffi::c_void = std::ptr::null_mut();
+        let result = unsafe { hs_subscribe_events(runtime, &mut replacement) };
+        assert_eq!(result.status, 0, "slot freed by destroy must be reusable");
+        unsafe { free_result(result) };
+        subs.push(replacement);
+
+        for sub in subs {
+            unsafe { hs_subscription_destroy(sub) };
+        }
+        unsafe { crate::hs_runtime_destroy(runtime) };
     }
 }
