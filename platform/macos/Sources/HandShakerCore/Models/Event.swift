@@ -1,13 +1,18 @@
 import Foundation
 
 /// Backend event kinds (event.rs `BackendEvent`). Rust serializes with
-/// `#[serde(tag = "kind", rename_all = "snake_case")]`: every variant's
-/// fields are *inlined* next to the `kind` tag (verified by
-/// `backend_event_change_payloads_serialize_with_stable_kinds` in
-/// tests.rs), e.g.:
+/// `#[serde(tag = "kind", rename_all = "snake_case")]`. Most variants
+/// have their fields *inlined* next to the `kind` tag (verified against
+/// the Rust fixture in ModelTests), e.g.:
 ///
 ///     {"kind":"transfer_updated","id":7,"session_id":1,...}
 ///     {"kind":"warning","code":"...","message":"...","detail":null,...}
+///
+/// Exception (P0-3): `device_updated` carries its `DeviceDescriptor` under
+/// a nested `device` key — it is a struct variant, not a newtype variant,
+/// so the descriptor is *not* inlined:
+///
+///     {"kind":"device_updated","session_id":7,"device":{...}}
 ///
 /// Unknown `kind` tokens decode safely as `.unknown(String)` instead of
 /// failing, so a newer Rust library cannot break the Swift client.
@@ -17,6 +22,7 @@ public enum BackendEvent: Codable, Sendable, Equatable {
     /// Newtype payload inlined: the DeviceDescriptor fields sit next to
     /// "kind":"device_added".
     case deviceAdded(DeviceDescriptor)
+    /// Struct payload: the descriptor lives under the nested `device` key.
     case deviceUpdated(sessionID: UInt64, device: DeviceDescriptor)
     case deviceRemoved(deviceID: DeviceID)
     /// Newtype payload inlined: SessionSnapshot fields.
@@ -38,6 +44,7 @@ public enum BackendEvent: Codable, Sendable, Equatable {
         case kind
         case sessionID = "session_id"
         case deviceID = "device_id"
+        case device
         case entries
         case change
     }
@@ -54,7 +61,10 @@ public enum BackendEvent: Codable, Sendable, Equatable {
             self = .deviceAdded(try DeviceDescriptor(from: decoder))
         case "device_updated":
             let sessionID = try container.decode(UInt64.self, forKey: .sessionID)
-            self = .deviceUpdated(sessionID: sessionID, device: try DeviceDescriptor(from: decoder))
+            self = .deviceUpdated(
+                sessionID: sessionID,
+                device: try container.decode(DeviceDescriptor.self, forKey: .device)
+            )
         case "device_removed":
             self = .deviceRemoved(deviceID: try container.decode(DeviceID.self, forKey: .deviceID))
         case "session_state_changed":
@@ -100,7 +110,7 @@ public enum BackendEvent: Codable, Sendable, Equatable {
         case .deviceUpdated(let sessionID, let device):
             try container.encode("device_updated", forKey: .kind)
             try container.encode(sessionID, forKey: .sessionID)
-            try device.encode(to: encoder)
+            try container.encode(device, forKey: .device)
         case .deviceRemoved(let deviceID):
             try container.encode("device_removed", forKey: .kind)
             try container.encode(deviceID, forKey: .deviceID)

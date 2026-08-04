@@ -44,7 +44,10 @@ let package = Package(
         ),
         .testTarget(
             name: "HandShakerCoreTests",
-            dependencies: ["HandShakerCore"]
+            dependencies: ["HandShakerCore"],
+            resources: [
+                .copy("Fixtures"),
+            ]
         ),
     ]
 )

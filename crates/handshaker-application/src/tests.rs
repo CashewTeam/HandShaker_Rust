@@ -3276,3 +3276,54 @@ fn merge_audio_library_removes_deleted_entry() {
     let merged = crate::merge_audio_library(&library, &change).expect("merge");
     assert!(merged.tracks.is_empty(), "deleted entry removed");
 }
+
+#[test]
+fn probe_device_updated_fixture_json() {
+    use crate::dto::{DeviceDescriptor, DeviceId, TransportKind};
+    use crate::event::{BackendEvent, EventEnvelope};
+    let device = DeviceDescriptor {
+        id: DeviceId("phone:9a3f-77ee".into()),
+        stable_id: Some(DeviceId("phone:9a3f-77ee".into())),
+        display_name: Some("U2 Pro".into()),
+        model: Some("OD103".into()),
+        transport: TransportKind::Wifi,
+        transport_address: "192.168.1.23:41000".into(),
+        available: true,
+        adb: None,
+        usb: None,
+    };
+    let event = BackendEvent::DeviceUpdated {
+        session_id: SessionId(7),
+        device,
+    };
+    // P0-3: this is the authoritative Rust-side shape of the event (the
+    // same JSON a live EventHub emits, envelope included). The Swift SDK
+    // decodes the identical fixture (committed at
+    // platform/macos/Tests/HandShakerCoreTests/Fixtures/event_device_updated.json
+    // — keep both copies in sync; the Swift test asserts the same shape).
+    let envelope = EventEnvelope {
+        sequence: 1,
+        timestamp_ms: 1_700_000_000_000,
+        event,
+    };
+    let actual = serde_json::to_string_pretty(&envelope).unwrap();
+    let fixture = std::fs::read_to_string(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/event_device_updated.json"
+        ),
+    )
+    .expect("fixture");
+    assert_eq!(actual + "\n", fixture, "Rust event JSON drifted from fixture");
+    // Nested-device contract: the descriptor lives under "device", not
+    // inlined next to the kind tag.
+    let value = serde_json::to_value(&envelope).unwrap();
+    assert_eq!(value["event"]["kind"], "device_updated");
+    assert_eq!(value["event"]["session_id"], 7);
+    assert!(
+        value["event"].get("device").is_some(),
+        "device must be nested"
+    );
+    assert_eq!(value["event"]["device"]["id"], "phone:9a3f-77ee");
+    assert_eq!(value["event"]["device"]["transport"], "wifi");
+}
