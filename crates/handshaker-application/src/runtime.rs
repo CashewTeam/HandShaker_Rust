@@ -1428,19 +1428,25 @@ impl HandShakerRuntime {
             .media_epoch
             .load(std::sync::atomic::Ordering::SeqCst);
         let library = self.fetch_photo_library(session_id).await?;
-        if self
-            .inner
-            .media_epoch
-            .load(std::sync::atomic::Ordering::SeqCst)
-            == epoch
         {
-            self.inner.media_snapshots.lock().await.insert(
-                key,
-                (
-                    std::time::Instant::now(),
-                    MediaSnapshotEntry::Photo(library.clone()),
-                ),
-            );
+            let mut guard = self.inner.media_snapshots.lock().await;
+            // Re-check the epoch *inside* the lock: an invalidation that
+            // lands between the outer check and the lock would otherwise
+            // slip a stale snapshot in after the cache was cleared.
+            if self
+                .inner
+                .media_epoch
+                .load(std::sync::atomic::Ordering::SeqCst)
+                == epoch
+            {
+                guard.insert(
+                    key,
+                    (
+                        std::time::Instant::now(),
+                        MediaSnapshotEntry::Photo(library.clone()),
+                    ),
+                );
+            }
         }
         Ok(library)
     }
@@ -1479,19 +1485,25 @@ impl HandShakerRuntime {
                 client.get_video_library().await.map(Into::into)
             })
             .await?;
-        if self
-            .inner
-            .media_epoch
-            .load(std::sync::atomic::Ordering::SeqCst)
-            == epoch
         {
-            self.inner.media_snapshots.lock().await.insert(
-                key,
-                (
-                    std::time::Instant::now(),
-                    MediaSnapshotEntry::Video(library.clone()),
-                ),
-            );
+            let mut guard = self.inner.media_snapshots.lock().await;
+            // Re-check the epoch *inside* the lock: an invalidation that
+            // lands between the outer check and the lock would otherwise
+            // slip a stale snapshot in after the cache was cleared.
+            if self
+                .inner
+                .media_epoch
+                .load(std::sync::atomic::Ordering::SeqCst)
+                == epoch
+            {
+                guard.insert(
+                    key,
+                    (
+                        std::time::Instant::now(),
+                        MediaSnapshotEntry::Video(library.clone()),
+                    ),
+                );
+            }
         }
         Ok(library)
     }
@@ -1519,19 +1531,25 @@ impl HandShakerRuntime {
                 client.get_audio_library().await.map(Into::into)
             })
             .await?;
-        if self
-            .inner
-            .media_epoch
-            .load(std::sync::atomic::Ordering::SeqCst)
-            == epoch
         {
-            self.inner.media_snapshots.lock().await.insert(
-                key,
-                (
-                    std::time::Instant::now(),
-                    MediaSnapshotEntry::Audio(library.clone()),
-                ),
-            );
+            let mut guard = self.inner.media_snapshots.lock().await;
+            // Re-check the epoch *inside* the lock: an invalidation that
+            // lands between the outer check and the lock would otherwise
+            // slip a stale snapshot in after the cache was cleared.
+            if self
+                .inner
+                .media_epoch
+                .load(std::sync::atomic::Ordering::SeqCst)
+                == epoch
+            {
+                guard.insert(
+                    key,
+                    (
+                        std::time::Instant::now(),
+                        MediaSnapshotEntry::Audio(library.clone()),
+                    ),
+                );
+            }
         }
         Ok(library)
     }
