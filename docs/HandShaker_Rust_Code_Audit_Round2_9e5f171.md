@@ -1065,3 +1065,28 @@ validation 应拆成针对 device UUID 和 scope 的纯函数，不要伪造 Pro
 - 真机行为已重新验证。
 
 这些动态验证应作为关闭本轮 P0/P1 的必要条件，而不是仅依赖静态代码和既有修复注释。
+
+---
+
+## 遗留加固项处理记录（2026-08-04，提交 1e5f2c0 前）
+
+上一轮 review/security_review 的非 blocking 项已处理：
+
+- **sync_journal**：fsync 错误传播（不再吞掉）+ journal 0600 权限 + parent dir fsync；
+  recover 对重命名失败**保留 staged 文件**（下次重试，不再误删下载）；
+  delete recover 清理**孤儿 trash**（original 被重建场景）；recover 增加
+  **路径安全复核**（绝对路径 + 无 `..`，防篡改 journal 越界）；新增 3 项测试。
+- **reader HOL**：每请求 bounded channel send 加 200ms 超时——慢消费者（如下载写盘慢）
+  不再阻塞心跳/RemoteCancelled 投递；超时丢 chunk，receiver 丢弃才移除条目。
+- **媒体缓存（MEDIUM）**：新增 `media_epoch` 单调失效——MediaChanged/session 关闭
+  使 in-flight fetch 在 insert 时被拒绝（TOCTOU）；`close_session` 现在驱逐该
+  session 的全部快照（重连可能是不同设备）；epoch 语义有回归测试。
+- **unmatched 软上限**：每 entry 上限收紧为 16MiB/64 = 256KiB，真实最坏情况与
+  声明的 16MiB 总量一致。
+- **FFI wire break 记录**：`docs/ffi-v1.md` 明确 `deny_unknown_fields` 为线级
+  严格化（未知字段 → `invalid_argument`）、`json_contract == 1` 精确校验。
+
+**仍留待后续（超出本次范围，需架构决策）**：
+- Profile scope 文件系统别名（嵌套/重叠 local+remote root 仍可能汇聚到同一目标文件，
+  需最近存在祖先 canonicalize 或 scope 重叠检测）；
+- 大缩略图非 JSON 二进制接口（既有计划项）。

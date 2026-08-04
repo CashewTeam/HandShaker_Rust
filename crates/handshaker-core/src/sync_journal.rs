@@ -21,7 +21,11 @@
 //! sync can never be adopted or overwritten.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use crate::domain::{SyncFileRecord, SyncSnapshot};
 use crate::error::{Error, Result};
@@ -92,16 +96,39 @@ impl SyncJournal {
         let tmp = self
             .path
             .with_extension(format!("tmp-{}", rand::random::<u64>()));
-        fs::write(&tmp, &bytes).map_err(|error| {
+        let mut file = fs::File::create(&tmp).map_err(|error| {
             Error::Configuration(i18n::format(
                 "sync.write_failed",
                 &[&tmp.display().to_string(), &error.to_string()],
             ))
         })?;
-        // fsync the journal before the irreversible file step.
-        if let Ok(file) = fs::File::open(&tmp) {
-            let _ = file.sync_all();
-        }
+        file.write_all(&bytes).map_err(|error| {
+            let _ = fs::remove_file(&tmp);
+            Error::Configuration(i18n::format(
+                "sync.write_failed",
+                &[&tmp.display().to_string(), &error.to_string()],
+            ))
+        })?;
+        // fsync the journal before the irreversible file step; a sync
+        // failure propagates (a truncated journal would hard-block every
+        // later run).
+        file.sync_all().map_err(|error| {
+            let _ = fs::remove_file(&tmp);
+            Error::Configuration(i18n::format(
+                "sync.write_failed",
+                &[&tmp.display().to_string(), &error.to_string()],
+            ))
+        })?;
+        // Sensitive journal (paths, ledger state): 0600 like the ledger.
+        #[cfg(unix)]
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600)).map_err(|error| {
+            let _ = fs::remove_file(&tmp);
+            Error::Configuration(i18n::format(
+                "sync.write_failed",
+                &[&tmp.display().to_string(), &error.to_string()],
+            ))
+        })?;
+        drop(file);
         fs::rename(&tmp, &self.path).map_err(|error| {
             let _ = fs::remove_file(&tmp);
             Error::Configuration(i18n::format(
@@ -109,6 +136,11 @@ impl SyncJournal {
                 &[&self.path.display().to_string(), &error.to_string()],
             ))
         })?;
+        // Best-effort directory fsync so the rename itself is durable.
+        #[cfg(unix)]
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
         Ok(())
     }
 
@@ -151,6 +183,17 @@ impl SyncJournal {
     /// Returns the possibly-updated snapshot. Never touches files outside
     /// the journaled paths; a failure (rename/remove/save) keeps the
     /// journal so the next run retries.
+    /// Journaled paths must be absolute and contain no `..` — the journal
+    /// lives in the state dir and could be tampered with by anything that
+    /// can write there; `recover` must never touch files outside the
+    /// journaled paths (round-2 hardening).
+    fn path_is_safe(path: &Path) -> bool {
+        path.is_absolute()
+            && !path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+    }
+
     pub fn recover(
         &self,
         snapshot: &SyncSnapshot,
@@ -159,6 +202,31 @@ impl SyncJournal {
         let Some(action) = self.read()? else {
             return Ok(snapshot.clone());
         };
+        // Reject tampered/foreign journals before touching anything.
+        match &action {
+            PendingSyncAction::Download {
+                final_path,
+                staged_path,
+                ..
+            } => {
+                if !Self::path_is_safe(final_path) || !Self::path_is_safe(staged_path) {
+                    return Err(Error::Configuration(
+                        i18n::text("sync.journal_unsafe").to_string(),
+                    ));
+                }
+            }
+            PendingSyncAction::Delete {
+                original_path,
+                trash_path,
+                ..
+            } => {
+                if !Self::path_is_safe(original_path) || !Self::path_is_safe(trash_path) {
+                    return Err(Error::Configuration(
+                        i18n::text("sync.journal_unsafe").to_string(),
+                    ));
+                }
+            }
+        }
         let mut updated = snapshot.clone();
         match action {
             PendingSyncAction::Download {
@@ -178,7 +246,11 @@ impl SyncJournal {
                         })?;
                     }
                     fs::rename(&staged_path, &final_path).map_err(|error| {
-                        let _ = fs::remove_file(&staged_path);
+                        // Keep the staged file: a transient failure
+                        // (permissions, destination-is-a-directory) must
+                        // not lose the download — the next recovery
+                        // retries the rename or drops it if the caller
+                        // cleaned up.
                         Error::LocalIo(i18n::format(
                             "sync.rename_failed",
                             &[&final_path.display().to_string(), &error.to_string()],
@@ -200,8 +272,18 @@ impl SyncJournal {
                 trash_path,
             } => {
                 if original_path.exists() {
-                    // Rename never happened: nothing to undo, the next
-                    // sync retries the delete.
+                    // Rename never happened (or the file was recreated
+                    // after a crash): a leftover trash from an earlier
+                    // crash is an orphan — remove it, keep the original,
+                    // and let the next sync retry the delete.
+                    if trash_path.exists() {
+                        fs::remove_file(&trash_path).map_err(|error| {
+                            Error::LocalIo(i18n::format(
+                                "sync.delete_failed",
+                                &[&trash_path.display().to_string(), &error.to_string()],
+                            ))
+                        })?;
+                    }
                     self.clear()?;
                 } else if trash_path.exists() {
                     fs::remove_file(&trash_path).map_err(|error| {
@@ -441,5 +523,82 @@ mod tests {
             .expect_err("save must fail");
         assert!(matches!(error, Error::Configuration(_)));
         assert!(journal.path().exists(), "journal retained for retry");
+    }
+    // Round-2 hardening: a transient rename failure must keep the staged
+    // file (recovery retries), not delete the download.
+    #[test]
+    fn download_recover_rename_failure_keeps_staged() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store_at(&temp);
+        let journal = SyncJournal::for_ledger(store.path());
+        // Make the rename fail: the destination directory is read-only.
+        let ro_dir = temp.path().join("ro-dir");
+        fs::create_dir_all(&ro_dir).expect("dir");
+        #[cfg(unix)]
+        fs::set_permissions(&ro_dir, fs::Permissions::from_mode(0o555)).expect("perms");
+        let final_path = ro_dir.join("a.jpg");
+        let staged = temp.path().join("a.jpg.hs-part.1");
+        fs::write(&staged, b"data").expect("staged");
+        let action = PendingSyncAction::Download {
+            remote_path: "/a.jpg".to_string(),
+            final_path: final_path.clone(),
+            staged_path: staged.clone(),
+            new_record: record("/a.jpg"),
+        };
+        journal.write(&action).expect("journal");
+        let error = journal
+            .recover(&SyncSnapshot::default(), save_ok)
+            .expect_err("rename must fail");
+        assert!(matches!(error, Error::LocalIo(_)));
+        assert!(staged.exists(), "staged must survive a failed replay");
+        assert!(journal.path().exists(), "journal kept for retry");
+        #[cfg(unix)]
+        fs::set_permissions(&ro_dir, fs::Permissions::from_mode(0o755)).expect("restore perms");
+    }
+
+    // Round-2 hardening: original recreated after a crash → the leftover
+    // trash is an orphan and must be removed while the original survives.
+    #[test]
+    fn delete_recover_removes_orphan_trash_when_original_recreated() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store_at(&temp);
+        let journal = SyncJournal::for_ledger(store.path());
+        let original = temp.path().join("a.jpg");
+        let trash = temp.path().join("a.jpg.hs-trash.1");
+        fs::write(&original, b"new").expect("original recreated");
+        fs::write(&trash, b"old").expect("orphan trash");
+        let action = PendingSyncAction::Delete {
+            remote_path: "/a.jpg".to_string(),
+            original_path: original.clone(),
+            trash_path: trash.clone(),
+        };
+        journal.write(&action).expect("journal");
+        let snapshot = snapshot_with("/a.jpg", &original.display().to_string());
+        let recovered = journal.recover(&snapshot, save_ok).expect("recover");
+        assert!(original.exists(), "recreated original untouched");
+        assert!(!trash.exists(), "orphan trash removed");
+        assert!(recovered.files.contains_key("/a.jpg"), "row kept for retry");
+        assert!(!journal.path().exists());
+    }
+
+    // Round-2 hardening: a tampered journal with a relative path is
+    // rejected without touching anything.
+    #[test]
+    fn recover_rejects_unsafe_journal_paths() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = store_at(&temp);
+        let journal = SyncJournal::for_ledger(store.path());
+        let action = PendingSyncAction::Download {
+            remote_path: "/a.jpg".to_string(),
+            final_path: PathBuf::from("../escape/a.jpg"),
+            staged_path: temp.path().join("a.jpg.hs-part.1"),
+            new_record: record("/a.jpg"),
+        };
+        journal.write(&action).expect("journal");
+        let error = journal
+            .recover(&SyncSnapshot::default(), save_ok)
+            .expect_err("unsafe path must be rejected");
+        assert!(matches!(error, Error::Configuration(_)));
+        assert!(journal.path().exists(), "journal kept for inspection");
     }
 }

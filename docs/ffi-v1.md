@@ -67,9 +67,15 @@ typedef struct HsSubscription HsSubscription;
 - **JSON 契约独立版本(P1-7)**:ABI 版本只保证符号/签名;请求、响应、事件、
   DTO 的 JSON 形状由 `hs_runtime_diagnostics` 的 `json_contract` 字段版本化
   (当前 `= 1`,定义于 `handshaker_application::JSON_CONTRACT_VERSION`)。Swift
-  在创建 Runtime 时校验 `json_contract >= 1`;JSON breaking change 必须递增
-  该版本并同步 Swift 模型(`RuntimeDiagnostics.minimumJSONContract`),而不是
-  只动 ABI 版本。
+  在创建 Runtime 时校验 `json_contract == 1`(精确相等,round-2 P1-3);JSON
+  breaking change 必须递增该版本并同步 Swift 模型
+  (`RuntimeDiagnostics.supportedJSONContract`),而不是只动 ABI 版本。
+- **请求 JSON 严格解析(round-2 P2-1)**:所有带 request 参数的导出对
+  **未知字段返回 `invalid_argument`**(`serde(deny_unknown_fields)`)。
+  这是线级行为变化(相对早先"静默忽略未知字段"):外部旧 FFI 消费者若发送
+  超出当前字段集合的 JSON 会收到稳定错误。ABI 符号/签名未变,`json_contract`
+  仍为 1(字段集合为严格超集变化时不递增;删除/重命名字段必须递增)。
+  树内 Swift/CLI 消费者发送的字段与 schema 完全一致,不受影响。
 - **单租户信任模型**:ABI 是进程内契约,调用方与库同权限。Session/Transfer 的
   `u64` id 是顺序计数器(非不透明随机句柄),同进程调用方可枚举/猜测 id;库不
   做调用方鉴权。多租户隔离需要宿主进程自行分区(或引入随机 id,破坏 v1 稳定性)。

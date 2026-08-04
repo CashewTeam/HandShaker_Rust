@@ -29,12 +29,22 @@ const PHASE_DOWNLOAD_RAW: u8 = 1;
 /// Per-request response channel capacity (round-2 P1-1): bounded so a
 /// slow consumer backpressures the reader instead of growing memory.
 pub(crate) const REQUEST_CHANNEL_CAPACITY: usize = 64;
+/// Bounded wait for a request channel send (round-2 hardening): the
+/// reader yields to the consumer for at most this long, then drops the
+/// chunk and moves on — one stalled consumer (slow disk mid-download)
+/// must not head-of-line block heartbeat/RemoteCancelled traffic.
+const REQUEST_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 /// Max distinct unmatched sids the reader buffers (round-2 P1-1).
 pub(crate) const MAX_UNMATCHED_SIDS: usize = 64;
 /// Max total bytes buffered for unmatched sids (round-2 P1-1).
 pub(crate) const MAX_UNMATCHED_BYTES: u64 = 16 * 1024 * 1024;
 /// Unmatched sid entries idle for longer than this are dropped (TTL).
 const UNMATCHED_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+/// Per-entry byte cap for unmatched sids (round-2 hardening): the
+/// declared 16 MiB total is meaningless if one sid can hold 4 MiB and the
+/// per-sid push cap is 4 MiB — cap each entry at total/64 so the worst
+/// case matches the advertised bound.
+const UNMATCHED_ENTRY_BYTES: u64 = MAX_UNMATCHED_BYTES / MAX_UNMATCHED_SIDS as u64;
 
 #[derive(Clone)]
 struct PendingRequest {
@@ -600,15 +610,24 @@ where
             }
             let pending = inner.pending.lock().await.get(&sid).cloned();
             if let Some(pending) = pending {
-                // Bounded + backpressure (P1-1): the reader awaits the send;
-                // a dropped receiver (timeout/cancel) removes the entry.
-                if pending
-                    .sender
-                    .send(Ok(Incoming::Data(chunk)))
-                    .await
-                    .is_err()
-                {
-                    inner.pending.lock().await.remove(&sid);
+                // Bounded + backpressure (P1-1): the reader waits up to
+                // REQUEST_SEND_TIMEOUT for the consumer. A timeout drops
+                // the chunk (the request's own timeout cleans the entry),
+                // so a stalled consumer cannot block all session traffic
+                // (heartbeat, RemoteCancelled) — round-2 hardening.
+                let delivered = tokio::time::timeout(REQUEST_SEND_TIMEOUT, async {
+                    pending.sender.send(Ok(Incoming::Data(chunk))).await
+                })
+                .await;
+                match delivered {
+                    Ok(Ok(())) => {}
+                    // Receiver dropped (timeout/cancel): remove the entry.
+                    Ok(Err(_)) => {
+                        inner.pending.lock().await.remove(&sid);
+                    }
+                    // Consumer wedged > timeout: drop this chunk; the
+                    // entry stays until the request times out.
+                    Err(_) => {}
                 }
             } else {
                 // Round-2 P1-1: bounded unmatched buffering — at most
@@ -641,6 +660,16 @@ where
                     last_seen: std::time::Instant::now(),
                 });
                 accumulator.last_seen = std::time::Instant::now();
+                // Round-2 hardening: hard per-entry cap — a single sid
+                // cannot exceed its share of the total budget.
+                if accumulator.bytes.len() as u64 + chunk.len() as u64 > UNMATCHED_ENTRY_BYTES {
+                    unmatched.remove(&sid);
+                    tracing::debug!(
+                        sid = format_args!("{sid:#010x}"),
+                        message = i18n::text("session.unmatched_dropped")
+                    );
+                    continue;
+                }
                 match accumulator.push(&chunk) {
                     Ok(Some(body)) => {
                         unmatched.remove(&sid);

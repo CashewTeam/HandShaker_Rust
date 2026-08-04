@@ -169,8 +169,12 @@ pub(crate) enum MediaSnapshotEntry {
 }
 type MediaSnapshotValue = (std::time::Instant, MediaSnapshotEntry);
 
-/// Drop every cached media snapshot of a session (round-2 P1-2).
-async fn invalidate_media_snapshots_inner(inner: &RuntimeInner, session_id: SessionId) {
+/// Drop every cached media snapshot of a session (round-2 P1-2) and bump
+/// the invalidation epoch so in-flight fetches notice the staleness.
+pub(crate) async fn invalidate_media_snapshots_inner(inner: &RuntimeInner, session_id: SessionId) {
+    inner
+        .media_epoch
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let mut guard = inner.media_snapshots.lock().await;
     guard.retain(|key, _| key.session_id != session_id.0);
 }
@@ -204,6 +208,10 @@ pub(crate) struct RuntimeInner {
     /// cached full snapshot instead of re-fetching the whole library per
     /// page. Invalidated by MediaChanged events; TTL-bounded.
     pub(crate) media_snapshots: Mutex<HashMap<MediaSnapshotKey, MediaSnapshotValue>>,
+    /// Monotonic invalidation epoch: bumped on every MediaChanged or
+    /// session close so an in-flight fetch can detect that its snapshot
+    /// is stale at insert time (round-2 hardening, TOCTOU fix).
+    pub(crate) media_epoch: std::sync::atomic::AtomicU64,
     /// Per-ledger write mutexes keyed by `ledger_scope_key` (round-2
     /// P0-1): two profiles that share one ledger (same device + same
     /// normalized roots) serialize their runs/commits; distinct scopes
@@ -264,6 +272,7 @@ impl HandShakerRuntime {
                 sync_jobs: Mutex::new(HashMap::new()),
                 sync_ledger_locks: Mutex::new(HashMap::new()),
                 media_snapshots: Mutex::new(HashMap::new()),
+                media_epoch: std::sync::atomic::AtomicU64::new(0),
                 launch_gate: tokio::sync::RwLock::new(()),
             }),
         })
@@ -713,6 +722,9 @@ impl HandShakerRuntime {
         self.inner
             .event_hub
             .publish(BackendEvent::SessionStateChanged(Box::new(closed_snapshot)));
+        // Round-2 hardening: drop this session's cached media snapshots —
+        // the phone may be a different device after a reconnect.
+        invalidate_media_snapshots_inner(&self.inner, session_id).await;
         if let Some(error) = close_error {
             warning = Some(error);
         }
@@ -1408,14 +1420,28 @@ impl HandShakerRuntime {
                 return Ok(snapshot.clone());
             }
         }
+        // TOCTOU guard (round-2 hardening): if an invalidation (MediaChanged
+        // or session close) happened while fetching, the epoch moved and
+        // this stale snapshot must not be cached.
+        let epoch = self
+            .inner
+            .media_epoch
+            .load(std::sync::atomic::Ordering::SeqCst);
         let library = self.fetch_photo_library(session_id).await?;
-        self.inner.media_snapshots.lock().await.insert(
-            key,
-            (
-                std::time::Instant::now(),
-                MediaSnapshotEntry::Photo(library.clone()),
-            ),
-        );
+        if self
+            .inner
+            .media_epoch
+            .load(std::sync::atomic::Ordering::SeqCst)
+            == epoch
+        {
+            self.inner.media_snapshots.lock().await.insert(
+                key,
+                (
+                    std::time::Instant::now(),
+                    MediaSnapshotEntry::Photo(library.clone()),
+                ),
+            );
+        }
         Ok(library)
     }
 
@@ -1444,18 +1470,29 @@ impl HandShakerRuntime {
                 return Ok(snapshot.clone());
             }
         }
+        let epoch = self
+            .inner
+            .media_epoch
+            .load(std::sync::atomic::Ordering::SeqCst);
         let library: VideoLibraryDto = self
             .request(session_id, "get_video_library", |client| async move {
                 client.get_video_library().await.map(Into::into)
             })
             .await?;
-        self.inner.media_snapshots.lock().await.insert(
-            key,
-            (
-                std::time::Instant::now(),
-                MediaSnapshotEntry::Video(library.clone()),
-            ),
-        );
+        if self
+            .inner
+            .media_epoch
+            .load(std::sync::atomic::Ordering::SeqCst)
+            == epoch
+        {
+            self.inner.media_snapshots.lock().await.insert(
+                key,
+                (
+                    std::time::Instant::now(),
+                    MediaSnapshotEntry::Video(library.clone()),
+                ),
+            );
+        }
         Ok(library)
     }
 
@@ -1473,18 +1510,29 @@ impl HandShakerRuntime {
                 return Ok(snapshot.clone());
             }
         }
+        let epoch = self
+            .inner
+            .media_epoch
+            .load(std::sync::atomic::Ordering::SeqCst);
         let library: AudioLibraryDto = self
             .request(session_id, "get_audio_library", |client| async move {
                 client.get_audio_library().await.map(Into::into)
             })
             .await?;
-        self.inner.media_snapshots.lock().await.insert(
-            key,
-            (
-                std::time::Instant::now(),
-                MediaSnapshotEntry::Audio(library.clone()),
-            ),
-        );
+        if self
+            .inner
+            .media_epoch
+            .load(std::sync::atomic::Ordering::SeqCst)
+            == epoch
+        {
+            self.inner.media_snapshots.lock().await.insert(
+                key,
+                (
+                    std::time::Instant::now(),
+                    MediaSnapshotEntry::Audio(library.clone()),
+                ),
+            );
+        }
         Ok(library)
     }
 

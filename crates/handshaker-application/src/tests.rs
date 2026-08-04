@@ -3976,3 +3976,53 @@ async fn transfer_registered_before_shutdown_is_cancelled_and_joined() {
         );
     }
 }
+
+// ---- round-2 hardening: media snapshot cache epoch ----
+
+#[tokio::test]
+async fn media_snapshot_invalidation_bumps_epoch_and_clears_cache() {
+    // The epoch guard blocks the TOCTOU insert: cached_* snapshots the
+    // epoch before the network fetch and refuses to cache when an
+    // invalidation moved it meanwhile. This test pins the semantics the
+    // guard relies on — invalidation clears the session's entries and
+    // bumps the epoch monotonically.
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    let key = crate::runtime::MediaSnapshotKey {
+        session_id: 7,
+        kind: crate::runtime::SnapshotMediaKind::Photo,
+    };
+    // Seed a stale-looking entry.
+    runtime.inner.media_snapshots.lock().await.insert(
+        key,
+        (
+            std::time::Instant::now() - std::time::Duration::from_secs(5),
+            crate::runtime::MediaSnapshotEntry::Photo(crate::media::PhotoLibraryDto::default()),
+        ),
+    );
+    let before = runtime
+        .inner
+        .media_epoch
+        .load(std::sync::atomic::Ordering::SeqCst);
+    crate::runtime::invalidate_media_snapshots_inner(&runtime.inner, SessionId(7)).await;
+    let after = runtime
+        .inner
+        .media_epoch
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(after, before + 1, "epoch must bump on invalidation");
+    assert!(
+        runtime.inner.media_snapshots.lock().await.is_empty(),
+        "invalidation must clear the session's entries"
+    );
+    // Idempotent second invalidation keeps bumping (each MediaChanged or
+    // close is a new generation).
+    crate::runtime::invalidate_media_snapshots_inner(&runtime.inner, SessionId(7)).await;
+    assert_eq!(
+        runtime
+            .inner
+            .media_epoch
+            .load(std::sync::atomic::Ordering::SeqCst),
+        after + 1
+    );
+}
