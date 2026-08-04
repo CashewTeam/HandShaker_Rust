@@ -44,8 +44,9 @@ use crate::sync::{
 };
 use crate::transfer::{
     BatchTransferItemDto, BatchTransferRequest, BatchTransferResultDto, DownloadRequest,
-    TransferDirectionDto, TransferFailureDto, TransferId, TransferRegistry, TransferSnapshot,
-    TransferState, TreeTransferDto, UploadRequest, request_options, transfer_options,
+    TaskPublication, TransferDirectionDto, TransferFailureDto, TransferId, TransferRegistry,
+    TransferSnapshot, TransferState, TreeTransferDto, UploadRequest, request_options,
+    transfer_options,
 };
 use crate::trust::{
     RemoveTrustRequest, RemoveTrustResult, ResetWifiTrustRequest, TrustRecordDto,
@@ -154,22 +155,27 @@ struct LedgerListEntry {
     snapshot: handshaker_core::SyncSnapshot,
 }
 
-struct RuntimeInner {
+pub(crate) struct RuntimeInner {
     config: RuntimeConfig,
-    sessions: Mutex<HashMap<SessionId, Arc<ActiveSession>>>,
+    pub(crate) sessions: Mutex<HashMap<SessionId, Arc<ActiveSession>>>,
     next_session_id: AtomicU64,
     shutting_down: AtomicBool,
     event_hub: EventHub,
-    transfers: Arc<TransferRegistry>,
+    pub(crate) transfers: Arc<TransferRegistry>,
     /// Photo-sync jobs keyed by profile id (Phase D / D6). Jobs are created
     /// by `start_sync`/`register_sync_job`, queried by `get_sync_status`,
     /// and removed by `stop_sync` / shutdown.
-    sync_jobs: Mutex<HashMap<String, Arc<SyncJob>>>,
+    pub(crate) sync_jobs: Mutex<HashMap<String, Arc<SyncJob>>>,
     /// Per-ledger write mutexes keyed by `ledger_scope_key` (round-2
     /// P0-1): two profiles that share one ledger (same device + same
     /// normalized roots) serialize their runs/commits; distinct scopes
     /// never contend.
     sync_ledger_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Launch admission gate (round-2 P0-3): launchers hold a read guard
+    /// for register→spawn→publish (no await inside), shutdown takes the
+    /// write guard before enumerating, so a task can never be spawned
+    /// after the runtime started tearing down.
+    pub(crate) launch_gate: tokio::sync::RwLock<()>,
 }
 
 /// Everything the plan mapping and the executor need, in core types. Never
@@ -187,7 +193,7 @@ struct SyncPipeline {
 /// provide their own tokio runtime.
 #[derive(Clone)]
 pub struct HandShakerRuntime {
-    inner: Arc<RuntimeInner>,
+    pub(crate) inner: Arc<RuntimeInner>,
 }
 
 impl HandShakerRuntime {
@@ -219,6 +225,7 @@ impl HandShakerRuntime {
                 shutting_down: AtomicBool::new(false),
                 sync_jobs: Mutex::new(HashMap::new()),
                 sync_ledger_locks: Mutex::new(HashMap::new()),
+                launch_gate: tokio::sync::RwLock::new(()),
             }),
         })
     }
@@ -243,6 +250,11 @@ impl HandShakerRuntime {
             // Already shutting down (or shut down): idempotent no-op.
             return Ok(());
         }
+        // P0-3: take the launch gate write lock — every in-flight launcher
+        // holds a read guard until its register→spawn→publish completes,
+        // so after this point no new task can be (re)published and the
+        // enumeration below is complete.
+        let _launch = self.inner.launch_gate.write().await;
         self.inner.event_hub.publish(BackendEvent::RuntimeStopping);
         // Cancel all transfers first so their tasks release session clients.
         for id in self
@@ -266,10 +278,10 @@ impl HandShakerRuntime {
             job.cancel.cancel();
             // P0-4: poll for the start-side publication instead of taking
             // `None` and letting the task run after shutdown returned.
-            if let Some(task) = take_published_task(&job.task).await {
+            if let Some(task) = take_published_task(&job.task, &job.task_changed).await {
                 sync_joins.push(task);
             }
-            if let Some(task) = take_published_task(&job.watch_task).await {
+            if let Some(task) = take_published_task(&job.watch_task, &job.watch_changed).await {
                 sync_joins.push(task);
             }
         }
@@ -1283,7 +1295,7 @@ impl HandShakerRuntime {
         *entry
             .join
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(handle);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = TaskPublication::Published(handle);
         Ok(id)
     }
 
@@ -1495,6 +1507,17 @@ impl HandShakerRuntime {
 
     /// Start a background download; returns the transfer id immediately.
     pub async fn start_download(&self, request: DownloadRequest) -> AppResult<TransferId> {
+        // P0-3: hold the launch gate (read) across register→spawn→publish.
+        // shutdown takes the write guard before enumerating transfers, so
+        // this task can never be spawned after teardown began.
+        let _launch = self.inner.launch_gate.read().await;
+        if self.inner.shutting_down.load(Ordering::Acquire) {
+            return Err(PublicError::new(
+                PublicErrorCode::RuntimeClosed,
+                "runtime is shutting down",
+            )
+            .operation("transfer.start"));
+        }
         self.ensure_open()?;
         let session = self.session_handle(request.session_id).await?;
         session.record_activity();
@@ -1556,12 +1579,22 @@ impl HandShakerRuntime {
         *entry
             .join
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(handle);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = TaskPublication::Published(handle);
         Ok(id)
     }
 
     /// Start a background upload; returns the transfer id immediately.
     pub async fn start_upload(&self, request: UploadRequest) -> AppResult<TransferId> {
+        // P0-3: launch gate (read) across register→spawn→publish, same as
+        // start_download.
+        let _launch = self.inner.launch_gate.read().await;
+        if self.inner.shutting_down.load(Ordering::Acquire) {
+            return Err(PublicError::new(
+                PublicErrorCode::RuntimeClosed,
+                "runtime is shutting down",
+            )
+            .operation("transfer.start"));
+        }
         self.ensure_open()?;
         let session = self.session_handle(request.session_id).await?;
         session.record_activity();
@@ -1622,7 +1655,7 @@ impl HandShakerRuntime {
         *entry
             .join
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(handle);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = TaskPublication::Published(handle);
         Ok(id)
     }
 
@@ -2363,7 +2396,8 @@ impl HandShakerRuntime {
             }
             this.run_sync_job(task_job).await;
         });
-        *job.task.lock().await = Some(task);
+        *job.task.lock().await = TaskPublication::Published(task);
+        job.task_changed.notify_waiters();
         let _ = start_tx.send(());
         Ok(job.profile.id.clone())
     }
@@ -2432,9 +2466,9 @@ impl HandShakerRuntime {
                 });
             }
         }
-        // The run task is done: clear the slot so the profile can start
-        // again (the job itself stays registered for status queries).
-        *job.task.lock().await = None;
+        // The run task is done: mark the slot Finished so the profile can
+        // start again (the job itself stays registered for status queries).
+        *job.task.lock().await = TaskPublication::Finished;
     }
 
     /// The full core pipeline for one run: session + ledger + photo_sync +
@@ -2518,7 +2552,7 @@ impl HandShakerRuntime {
         // completion; abort + await is). P0-4: poll the slot for the
         // start-side publication instead of taking `None` and returning
         // while the task is about to run.
-        let task = take_published_task(&job.task).await;
+        let task = take_published_task(&job.task, &job.task_changed).await;
         if let Some(mut task) = task {
             match tokio::time::timeout(SYNC_STOP_DEADLINE, &mut task).await {
                 Ok(Ok(())) => {}
@@ -2550,7 +2584,7 @@ impl HandShakerRuntime {
         // Defensive: a watch can only be active here if it was started after
         // this run job was registered and never stopped; never leave a task
         // running against a job that is about to be removed from the map.
-        let watch_task = take_published_task(&job.watch_task).await;
+        let watch_task = take_published_task(&job.watch_task, &job.watch_changed).await;
         if let Some(task) = watch_task {
             task.abort();
             let _ = task.await;
@@ -2678,10 +2712,23 @@ impl HandShakerRuntime {
             .operation("sync.watch.start"));
         }
         session.record_activity();
+        // P0-3: the phone-side monitor is on and the network await has
+        // returned. Re-check shutdown before spawning: if the runtime is
+        // tearing down, best-effort disable the monitor and refuse to
+        // spawn — a watch task must never outlive the runtime.
+        if self.inner.shutting_down.load(Ordering::Acquire) {
+            let _ = client.sync_monitor(false).await;
+            self.release_sync_watch(&job).await;
+            return Err(PublicError::new(
+                PublicErrorCode::RuntimeClosed,
+                "runtime is shutting down",
+            )
+            .operation("sync.watch.start"));
+        }
         // P0-4 launch gate (same pattern as start_sync): the watch task must
         // not run business logic before its JoinHandle is published; a
-        // concurrent stop/shutdown then either joins it (polled take) or the
-        // task observes the cancelled token and exits.
+        // concurrent stop/shutdown then either joins it (notified take) or
+        // the task observes the cancelled token and exits.
         let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
         let this = self.clone();
         let watch_job = job.clone();
@@ -2691,7 +2738,8 @@ impl HandShakerRuntime {
             }
             this.run_sync_watch(watch_job, subscription).await;
         });
-        *job.watch_task.lock().await = Some(watch_task);
+        *job.watch_task.lock().await = TaskPublication::Published(watch_task);
+        job.watch_changed.notify_waiters();
         let _ = start_tx.send(());
         Ok(())
     }
@@ -2708,7 +2756,7 @@ impl HandShakerRuntime {
             .sync_job_for(profile_id)
             .await
             .ok_or_else(|| Self::sync_job_not_found("sync.watch.stop"))?;
-        let watch_task = take_published_task(&job.watch_task).await;
+        let watch_task = take_published_task(&job.watch_task, &job.watch_changed).await;
         if let Some(task) = watch_task {
             // The watch task blocks on the event stream with no cooperative
             // cancellation point; abort it and await the cancellation.
@@ -2852,7 +2900,7 @@ impl HandShakerRuntime {
                 );
             }
         });
-        *job.watch_task.lock().await = None;
+        *job.watch_task.lock().await = TaskPublication::Finished;
     }
 
     /// Apply one debounced batch incrementally with the core
@@ -3279,17 +3327,40 @@ pub fn normalize_remote_path(path: &str) -> String {
 /// about to run. Callers must trigger cancellation (job.cancel.cancel())
 /// *before* calling this; a task that is never observed still exits on
 /// its own, this only closes the handle-ownership gap.
+/// Take a published task handle from a slot, waiting for the publication
+/// via `Notify` when the slot is still Reserved (round-2 P0-3: no fixed
+/// 400 ms polling). `Finished`/`Taken` yield `None` immediately.
 pub(crate) async fn take_published_task(
-    slot: &tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    slot: &tokio::sync::Mutex<TaskPublication>,
+    changed: &tokio::sync::Notify,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    const POLL_ATTEMPTS: u32 = 200; // 200 × 2ms = 400ms bounded
-    for _ in 0..POLL_ATTEMPTS {
-        if let Some(handle) = slot.lock().await.take() {
-            return Some(handle);
+    const PUBLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+    loop {
+        {
+            let mut guard = slot.lock().await;
+            match std::mem::replace(&mut *guard, TaskPublication::Taken) {
+                TaskPublication::Published(handle) => return Some(handle),
+                TaskPublication::Finished => return None,
+                TaskPublication::Taken => return None,
+                TaskPublication::Reserved => {
+                    // Publication is in flight (launcher holds the gate);
+                    // put the slot back and wait for the notify.
+                    *guard = TaskPublication::Reserved;
+                }
+            }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        match tokio::time::timeout(PUBLISH_TIMEOUT, changed.notified()).await {
+            Ok(()) => continue,
+            Err(_) => {
+                // Timeout fallback: take whatever is there now.
+                let mut guard = slot.lock().await;
+                match std::mem::replace(&mut *guard, TaskPublication::Taken) {
+                    TaskPublication::Published(handle) => return Some(handle),
+                    _ => return None,
+                }
+            }
+        }
     }
-    slot.lock().await.take()
 }
 
 /// P0-2: identity comparison between a profile's `device_uuid` and the

@@ -1558,6 +1558,10 @@ fn transfer_history_is_bounded_by_capacity_and_ttl() {
     // over capacity; TTL-expired finished entries are reaped on register.
     use crate::transfer::{TransferDirectionDto, TransferRegistry, TransferState};
 
+    // P0-3: entries are only evictable once their task slot is Finished/
+    // Taken (Reserved = registered but not spawned is never evictable),
+    // so this helper marks the slot Finished right after registering —
+    // simulating an already-recycled task.
     let register = |registry: &TransferRegistry, n: u64| {
         let entry = registry.register(registry.snapshot_for(
             SessionId(1),
@@ -1565,6 +1569,7 @@ fn transfer_history_is_bounded_by_capacity_and_ttl() {
             format!("/remote/{n}.bin"),
             format!("/local/{n}.bin"),
         ));
+        *entry.join.lock().unwrap() = crate::transfer::TaskPublication::Finished;
         entry.snapshot.lock().unwrap().id
     };
 
@@ -3006,7 +3011,7 @@ async fn stop_sync_reports_a_panicked_run_task() {
     // panic to stop_sync, which marks the job failed instead of leaving
     // `running=true` behind (orphaned-task device finding regression).
     let task = tokio::spawn(async { panic!("simulated sync panic") });
-    *job.task.lock().await = Some(task);
+    *job.task.lock().await = crate::transfer::TaskPublication::Published(task);
     runtime.stop_sync("photos").await.expect("stop");
     let error = runtime
         .get_sync_status("photos")
@@ -3385,7 +3390,7 @@ async fn take_published_task_waits_for_start_publication() {
     use crate::runtime::take_published_task;
     use tokio::sync::oneshot;
 
-    let slot = tokio::sync::Mutex::new(None);
+    let slot = tokio::sync::Mutex::new(crate::transfer::TaskPublication::Reserved);
     let (start_tx, start_rx) = oneshot::channel::<()>();
     let task = tokio::spawn(async move {
         if start_rx.await.is_err() {
@@ -3397,15 +3402,18 @@ async fn take_published_task_waits_for_start_publication() {
 
     // Stopper side: races the starter. It must block, not return None.
     let taker_slot = std::sync::Arc::new(slot);
+    let notify = std::sync::Arc::new(tokio::sync::Notify::new());
     let taker = {
         let slot = taker_slot.clone();
-        tokio::spawn(async move { take_published_task(&slot).await })
+        let notify = notify.clone();
+        tokio::spawn(async move { take_published_task(&slot, &notify).await })
     };
 
     // Let the taker observe the empty slot first (this is the race window
-    // that previously lost the handle), then publish + release.
+    // that previously lost the handle), then publish + notify + release.
     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    *taker_slot.lock().await = Some(task);
+    *taker_slot.lock().await = crate::transfer::TaskPublication::Published(task);
+    notify.notify_waiters();
     let _ = start_tx.send(());
 
     let handle = taker
@@ -3414,7 +3422,7 @@ async fn take_published_task_waits_for_start_publication() {
         .expect("take_published_task must wait for the publication");
     handle.await.expect("released task finishes");
     // A second take after completion is empty.
-    assert!(take_published_task(&taker_slot).await.is_none());
+    assert!(take_published_task(&taker_slot, &notify).await.is_none());
 }
 
 #[tokio::test]
@@ -3785,4 +3793,125 @@ async fn ledger_lock_serializes_same_scope_only() {
         "distinct scope -> distinct mutex"
     );
     runtime.shutdown().await.expect("shutdown");
+}
+
+// ---- round-2 P0-3: launch admission gate ----
+
+#[tokio::test]
+async fn shutdown_waits_for_in_flight_launch_and_blocks_new_starts() {
+    // Deterministic barrier: an in-flight launcher holds the read guard
+    // (register→spawn→publish); shutdown must block on the write guard
+    // until the launcher finishes, and after shutdown no new start can
+    // register/spawn.
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    let gate = &runtime.inner.launch_gate;
+    let _read = gate.read().await;
+    let shutdown_task = tokio::spawn({
+        let runtime = runtime.clone();
+        async move { runtime.shutdown().await.expect("shutdown") }
+    });
+    // Give shutdown a chance to contend for the write guard.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        !shutdown_task.is_finished(),
+        "shutdown must wait for the in-flight launcher (P0-3)"
+    );
+    drop(_read);
+    shutdown_task
+        .await
+        .expect("shutdown completes after gate release");
+
+    // New starts are refused after shutdown: the launch gate is read-locked
+    // again and the shutting_down flag rejects the request.
+    let request = crate::DownloadRequest {
+        session_id: SessionId(1),
+        remote_path: "/a.bin".to_string(),
+        local_path: std::path::PathBuf::from("/tmp/a.bin"),
+        overwrite: false,
+    };
+    let error = runtime
+        .start_download(request)
+        .await
+        .expect_err("start after shutdown");
+    assert_eq!(error.code, PublicErrorCode::RuntimeClosed);
+    let guard = runtime.inner.sync_jobs.lock().await;
+    assert!(guard.is_empty(), "no sync jobs survive shutdown");
+    drop(guard);
+    let transfers = runtime.inner.transfers.list();
+    assert!(
+        transfers.is_empty(),
+        "no transfers survive shutdown: {}",
+        transfers.len()
+    );
+}
+
+#[tokio::test]
+async fn transfer_registered_before_shutdown_is_cancelled_and_joined() {
+    // P0-3: a transfer that completed register→spawn→publish before
+    // shutdown must be cancelled and joined by teardown — the task cannot
+    // outlive the runtime holding the session client.
+    use crate::transfer::{TransferDirectionDto, TransferState};
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    // Register + publish a task that blocks forever unless cancelled.
+    let registry = runtime.inner.transfers.clone();
+    let entry = registry.register(registry.snapshot_for(
+        SessionId(1),
+        TransferDirectionDto::Download,
+        "/remote/x.bin".to_string(),
+        "/local/x.bin".to_string(),
+    ));
+    let id = entry.snapshot.lock().unwrap().id;
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+    let handle = tokio::spawn(async move {
+        // Simulates a task that ignores the token for a while (e.g. a
+        // blocking core call); shutdown must still join it via the handle.
+        let _ = release_rx.await;
+    });
+    *entry.join.lock().unwrap() = crate::transfer::TaskPublication::Published(handle);
+    registry.transition(id, TransferState::Running);
+
+    let shutdown_task = tokio::spawn({
+        let runtime = runtime.clone();
+        async move { runtime.shutdown().await.expect("shutdown") }
+    });
+    // Let shutdown cancel + join; then release the task; shutdown's
+    // bounded join must observe the finish.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let _ = release_tx.send(());
+    shutdown_task.await.expect("shutdown");
+    // History entries may remain (bounded history), but every survivor
+    // must be terminal and its task already joined by shutdown. Give the
+    // executor a moment to finish the released task before asserting.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let survivors = runtime.inner.transfers.list();
+    assert!(
+        survivors.iter().all(|t| matches!(
+            t.state,
+            TransferState::Completed | TransferState::Failed | TransferState::Cancelled
+        )),
+        "shutdown must leave only terminal transfers: {survivors:?}"
+    );
+    for survivor in &survivors {
+        // The registry entry's join slot must be Finished/Taken — never a
+        // live Published handle. (TransferSnapshot itself has no join
+        // field; read the registry entry directly.)
+        let entry = runtime
+            .inner
+            .transfers
+            .active_entry(survivor.id)
+            .expect("survivor entry");
+        let slot = &*entry.join.lock().unwrap();
+        let live = matches!(
+            slot,
+            crate::transfer::TaskPublication::Published(handle) if !handle.is_finished()
+        );
+        assert!(
+            !live,
+            "no transfer task may stay live after shutdown (slot: {slot:?})"
+        );
+    }
 }

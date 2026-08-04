@@ -3,6 +3,7 @@
 //! transitions are one-way: Queued -> Running -> Completed|Failed|Cancelled.
 
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -145,12 +146,30 @@ pub struct BatchTransferResultDto {
     pub failures: Vec<TransferFailureDto>,
 }
 
+/// Lifecycle of a background task slot (round-2 P0-3). `Option<JoinHandle>`
+/// conflated "not yet published" with "finished" and "taken", so a cancel
+/// between register and publish could make an entry look evictable while
+/// its task was still about to run. The explicit states make the eviction
+/// condition unambiguous.
+#[derive(Debug)]
+pub(crate) enum TaskPublication {
+    /// Registered; the task has not been spawned yet (only visible while
+    /// the launcher holds the runtime launch gate).
+    Reserved,
+    /// Task running; this slot owns the JoinHandle.
+    Published(tokio::task::JoinHandle<()>),
+    /// Task finished (handle detached after joining).
+    Finished,
+    /// Handle was taken by cancel_for_session/shutdown for a bounded join.
+    Taken,
+}
+
 /// Internal registry entry.
 pub(crate) struct ActiveTransfer {
     pub(crate) snapshot: Mutex<TransferSnapshot>,
     pub(crate) cancel: CancellationToken,
-    /// Join handle kept until the task finishes; cleaned on get/list.
-    pub(crate) join: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Task slot; `Reserved` → `Published` → `Finished`/`Taken`.
+    pub(crate) join: Mutex<TaskPublication>,
     /// Progress event throttling state (M8.1 Phase C / C2): emit at most
     /// ~10/s and at least every 256 KiB, so a 1 GiB transfer emits a
     /// bounded number of events while still tracking size milestones.
@@ -199,7 +218,7 @@ impl TransferRegistry {
         let entry = Arc::new(ActiveTransfer {
             snapshot: Mutex::new(snapshot),
             cancel: CancellationToken::new(),
-            join: Mutex::new(None),
+            join: Mutex::new(TaskPublication::Reserved),
             progress_throttle: Mutex::new(ProgressThrottle::default()),
         });
         let mut guard = self
@@ -239,12 +258,19 @@ impl TransferRegistry {
             if !terminal {
                 return false;
             }
-            entry
+            // P0-3: evict only when the slot is Finished, Taken, or a
+            // Published handle whose task is done — Reserved (registered,
+            // not yet spawned) is never evictable.
+            match entry
                 .join
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .as_ref()
-                .is_none_or(|handle| handle.is_finished())
+                .deref()
+            {
+                TaskPublication::Reserved => false,
+                TaskPublication::Finished | TaskPublication::Taken => true,
+                TaskPublication::Published(handle) => handle.is_finished(),
+            }
         };
         if let Some(ttl) = self.history_ttl {
             let ttl_ms = ttl.as_millis() as u64;
@@ -284,11 +310,12 @@ impl TransferRegistry {
                     // handle must never be left dangling outside the
                     // registry; dropping it detaches a completed task).
                     if let Some(entry) = guard.get(&id) {
-                        let _ = entry
+                        // Finished: dropping the detached handle is safe.
+                        *entry
                             .join
                             .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .take();
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                            TaskPublication::Finished;
                     }
                     guard.remove(&id);
                 }
@@ -300,6 +327,15 @@ impl TransferRegistry {
                 }
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_entry(&self, id: TransferId) -> Option<Arc<ActiveTransfer>> {
+        let guard = self
+            .transfers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.get(&id).cloned()
     }
 
     pub fn get(&self, id: TransferId) -> AppResult<TransferSnapshot> {
@@ -432,17 +468,23 @@ impl TransferRegistry {
             }
             // Take a still-owned task handle even when its public snapshot is
             // already terminal. The close path must join or abort that task.
-            let join = {
+            {
                 let guard = self
                     .transfers
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                guard
-                    .get(&id)
-                    .and_then(|entry| entry.join.lock().ok().and_then(|mut join| join.take()))
-            };
-            if let Some(join) = join {
-                joins.push(join);
+                let Some(entry) = guard.get(&id) else {
+                    continue;
+                };
+                let mut slot = entry.join.lock().ok();
+                if let Some(TaskPublication::Published(handle)) = slot
+                    .as_deref_mut()
+                    .map(|slot| std::mem::replace(slot, TaskPublication::Taken))
+                {
+                    joins.push(handle);
+                }
+                // Reserved has no handle yet (launcher holds the gate);
+                // Finished/Taken have nothing to join.
             }
         }
         joins
@@ -455,14 +497,13 @@ impl TransferRegistry {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         for entry in guard.values() {
-            if let Ok(mut join) = entry.join.lock()
-                && let Some(handle) = join.take()
+            let Ok(mut slot) = entry.join.lock() else {
+                continue;
+            };
+            if let TaskPublication::Published(handle) = &*slot
+                && handle.is_finished()
             {
-                if handle.is_finished() {
-                    // Dropping the handle detaches the finished task.
-                } else {
-                    *join = Some(handle);
-                }
+                *slot = TaskPublication::Finished;
             }
         }
     }
@@ -775,7 +816,7 @@ mod tests {
         *entry
             .join
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(handle);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = TaskPublication::Published(handle);
 
         registry.cancel(id).expect("pre-cancel");
         assert_eq!(registry.get(id).unwrap().state, TransferState::Cancelled);
@@ -813,7 +854,7 @@ mod tests {
         *first
             .join
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(handle);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = TaskPublication::Published(handle);
 
         registry.cancel(first_id).expect("cancel");
         assert_eq!(

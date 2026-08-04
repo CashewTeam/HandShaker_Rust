@@ -136,10 +136,15 @@ pub(crate) struct SyncJob {
     /// the same ledger serialize, and so the ledger is never written by
     /// an aborted task's tail.
     pub ledger_lock: Arc<tokio::sync::Mutex<()>>,
-    /// Live run task (cleared by the task itself when it finishes).
-    pub task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
-    /// Live watch task (taken by `stop_sync_watch` / shutdown).
-    pub watch_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Live run task slot (round-2 P0-3: explicit Reserved/Published/
+    /// Finished/Taken states). The task itself marks Finished on exit.
+    pub task: tokio::sync::Mutex<super::transfer::TaskPublication>,
+    /// Live watch task slot.
+    pub watch_task: tokio::sync::Mutex<super::transfer::TaskPublication>,
+    /// Signalled on every task-slot publication so stop/shutdown can wait
+    /// for a spawn that is still in flight instead of polling (P0-3).
+    pub task_changed: tokio::sync::Notify,
+    pub watch_changed: tokio::sync::Notify,
     pub status: std::sync::RwLock<SyncStatusDto>,
     /// Most recent completed run (or watch batch) result.
     pub last_result: std::sync::RwLock<Option<SyncRunResultDto>>,
@@ -152,8 +157,10 @@ impl SyncJob {
             profile,
             cancel: handshaker_core::CancellationToken::new(),
             ledger_lock,
-            task: tokio::sync::Mutex::new(None),
-            watch_task: tokio::sync::Mutex::new(None),
+            task: tokio::sync::Mutex::new(super::transfer::TaskPublication::Reserved),
+            watch_task: tokio::sync::Mutex::new(super::transfer::TaskPublication::Reserved),
+            task_changed: tokio::sync::Notify::new(),
+            watch_changed: tokio::sync::Notify::new(),
             status: std::sync::RwLock::new(SyncStatusDto {
                 profile_id,
                 running: false,
