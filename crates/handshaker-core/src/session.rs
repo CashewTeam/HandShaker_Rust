@@ -16,7 +16,9 @@ use crate::event_decode::{decode_cancel, decode_event};
 use crate::events::{ClientEvent, EventFilter, EventSubscription, event_channel};
 use crate::i18n;
 use crate::protocol::crypto::SessionKeys;
-use crate::protocol::frame::{WireDirection, WireLog, read_downstream, write_upstream};
+use crate::protocol::frame::{
+    MAX_DOWNSTREAM_CHUNK, WireDirection, WireLog, read_downstream, write_upstream,
+};
 use crate::protocol::handshake::HandshakeStrategy;
 use crate::protocol::proto::{SspHeartBeatRequest, SspRequestType};
 use crate::protocol::wifi_handshake::WifiHandshakeInfo;
@@ -687,10 +689,16 @@ where
                             };
                             let target = inner.pending.lock().await.remove(&target_sid);
                             if let Some(target) = target {
-                                let _ = target
-                                    .sender
-                                    .send(Ok(Incoming::RemoteCancelled(info)))
-                                    .await;
+                                // Bounded like the Data path: a wedged
+                                // consumer must not block the reader
+                                // forever on cancel delivery either.
+                                let _ = tokio::time::timeout(REQUEST_SEND_TIMEOUT, async {
+                                    target
+                                        .sender
+                                        .send(Ok(Incoming::RemoteCancelled(info)))
+                                        .await
+                                })
+                                .await;
                             } else {
                                 inner.publish_event(ClientEvent::RequestCancelled(info));
                             }
@@ -861,6 +869,16 @@ async fn receive_normal(
                 Incoming::RemoteCancelled(info) => return Err(Error::Cancelled(info)),
             };
             assembled.extend_from_slice(&chunk);
+            // Round-2 security hardening (MEDIUM): before the 8-byte
+            // length prefix arrives the buffer is only time-bounded — a
+            // hostile device streaming sub-8-byte chunks could grow it to
+            // wire-rate × request_timeout. Cap it at the length prefix
+            // plus one max chunk while `total` is unknown.
+            if total.is_none() && assembled.len() > 8 + MAX_DOWNSTREAM_CHUNK {
+                return Err(Error::Protocol(
+                    i18n::text("session.response_too_long").to_string(),
+                ));
+            }
             if total.is_none() && assembled.len() >= 8 {
                 total = Some(u64::from_be_bytes(
                     assembled[..8].try_into().expect("eight bytes"),

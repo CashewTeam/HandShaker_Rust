@@ -70,12 +70,20 @@ typedef struct HsSubscription HsSubscription;
   在创建 Runtime 时校验 `json_contract == 1`(精确相等,round-2 P1-3);JSON
   breaking change 必须递增该版本并同步 Swift 模型
   (`RuntimeDiagnostics.supportedJSONContract`),而不是只动 ABI 版本。
-- **请求 JSON 严格解析(round-2 P2-1)**:所有带 request 参数的导出对
-  **未知字段返回 `invalid_argument`**(`serde(deny_unknown_fields)`)。
+- **请求 JSON 严格解析(round-2 P2-1)**:带 serde 反序列化的 request 导出对
+  **未知字段返回 `invalid_argument`**(`serde(deny_unknown_fields)`),覆盖:
+  `hs_list_devices`、`hs_list_files`、`hs_stat_file`、`hs_move_path`、
+  `hs_delete_paths`、`hs_count_files`、`hs_update_file_info`、
+  `hs_create_directory`、`hs_clipboard_set`、`hs_clipboard_delete`、
+  `hs_trust_remove`、`hs_trust_reset`、`hs_monitor_folder`、
+  `hs_media_thumbnail`、`hs_media_page`、`hs_batch_transfer`。
   这是线级行为变化(相对早先"静默忽略未知字段"):外部旧 FFI 消费者若发送
   超出当前字段集合的 JSON 会收到稳定错误。ABI 符号/签名未变,`json_contract`
   仍为 1(字段集合为严格超集变化时不递增;删除/重命名字段必须递增)。
   树内 Swift/CLI 消费者发送的字段与 schema 完全一致,不受影响。
+  **未覆盖**(手动/宽松解析,未知字段按各函数语义忽略或报错,不承诺拒绝):
+  `hs_runtime_create`、`hs_connect`、`hs_transfer_start_download/upload`、
+  `hs_sync_*`、`hs_media_merge_change`——后续可逐个收紧为严格解析。
 - **单租户信任模型**:ABI 是进程内契约,调用方与库同权限。Session/Transfer 的
   `u64` id 是顺序计数器(非不透明随机句柄),同进程调用方可枚举/猜测 id;库不
   做调用方鉴权。多租户隔离需要宿主进程自行分区(或引入随机 id,破坏 v1 稳定性)。
