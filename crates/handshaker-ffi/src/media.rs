@@ -287,6 +287,7 @@ struct FfiThumbnailAudioItem {
 /// (default empty). Entries may be minimal `{"path":"..."}` objects or full
 /// library DTOs (extra fields ignored).
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FfiThumbnailRequest {
     #[serde(default)]
     images: Vec<FfiThumbnailImageItem>,
@@ -679,6 +680,7 @@ pub unsafe extern "C" fn hs_media_fetch_exif(
         let runtime = ffi_try!(runtime_ref(runtime, "media_fetch_exif"));
         let json = ffi_try!(input_str(request_ptr, request_len, "media_fetch_exif"));
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct FfiFetchExifRequest {
             path: String,
         }

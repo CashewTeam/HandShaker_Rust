@@ -28,7 +28,7 @@ final class DeviceAcceptanceTests: XCTestCase {
         let runtime = try HandShakerRuntime()
         let devices = try await runtime.listDevices()
         guard let adb = devices.first(where: { $0.transport == .adb }) else {
-            await runtime.shutdown()
+            try await runtime.shutdown()
             throw XCTSkip("no ADB device attached")
         }
         let session = try await runtime.connect(.init(device: adb))
@@ -44,7 +44,7 @@ final class DeviceAcceptanceTests: XCTestCase {
             _ = try? await runtime.deletePaths(sessionID: sessionID, [testDir])
             _ = try? await runtime.disconnect(sessionID: sessionID)
         }
-        await runtime?.shutdown()
+        try await runtime?.shutdown()
         try await super.tearDown()
     }
 

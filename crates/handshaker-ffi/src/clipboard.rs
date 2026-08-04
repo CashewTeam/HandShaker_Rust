@@ -53,6 +53,7 @@ pub unsafe extern "C" fn hs_clipboard_set(
         let runtime = ffi_try!(runtime_ref(runtime, "clipboard_set"));
         let json = ffi_try!(input_str(request_ptr, request_len, "clipboard_set"));
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct FfiClipboardSetRequest {
             text: String,
         }
@@ -90,6 +91,7 @@ pub unsafe extern "C" fn hs_clipboard_delete(
         let runtime = ffi_try!(runtime_ref(runtime, "clipboard_delete"));
         let json = ffi_try!(input_str(request_ptr, request_len, "clipboard_delete"));
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct FfiClipboardDeleteRequest {
             timestamp_ms: i64,
         }

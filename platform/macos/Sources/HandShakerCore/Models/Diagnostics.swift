@@ -35,10 +35,12 @@ public struct RuntimeDiagnostics: Codable, Sendable, Equatable {
     public let activeSubscriptions: Int
     public let capabilities: [String]
 
-    /// Minimum JSON contract version this SDK understands (P1-7). Bump
-    /// together with the Swift models whenever a breaking JSON change is
-    /// shipped.
-    public static let minimumJSONContract: UInt32 = 1
+    /// JSON wire contract version this SDK understands (P1-7). The Rust
+    /// side bumps `JSON_CONTRACT_VERSION` on any breaking JSON change;
+    /// round-2 P1-3: the check is **exact equality** — accepting `>=`
+    /// would let an SDK that only understands v1 consume a future v2 whose
+    /// fields/nesting/tokens were renamed by definition.
+    public static let supportedJSONContract: UInt32 = 1
 
     private enum CodingKeys: String, CodingKey {
         case abi

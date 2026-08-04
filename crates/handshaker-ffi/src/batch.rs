@@ -34,6 +34,7 @@ use crate::runtime_ref;
 /// remote side of every pair (source for download, target for upload) is
 /// resolved against the device root by the application layer.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FfiBatchRequest {
     #[serde(default)]
     files: Vec<BatchTransferItemDto>,

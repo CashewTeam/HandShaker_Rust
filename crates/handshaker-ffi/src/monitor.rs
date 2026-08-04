@@ -36,6 +36,7 @@ pub unsafe extern "C" fn hs_monitor_folder(
         let runtime = ffi_try!(runtime_ref(runtime, "monitor_folder"));
         let json = ffi_try!(input_str(request_ptr, request_len, "monitor_folder"));
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct FfiMonitorFolderRequest {
             path: String,
             enabled: Option<bool>,

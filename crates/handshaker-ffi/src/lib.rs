@@ -63,6 +63,52 @@ pub(crate) struct HsRuntime {
 /// must destroy some subscriptions first (or use fewer).
 pub(crate) const MAX_SUBSCRIPTIONS: usize = 64;
 
+/// RAII quota reservation for live event subscriptions (round-2 P2-2):
+/// `acquire` increments the counter (rejecting over-quota requests) and
+/// the count is returned either by `disarm()` (success — the
+/// `HsSubscription` handle's Drop owns the count from then on) or by the
+/// reservation's Drop on any failure path before the handle exists.
+struct SubscriptionReservation<'a> {
+    counter: &'a std::sync::atomic::AtomicUsize,
+    armed: bool,
+}
+
+impl<'a> SubscriptionReservation<'a> {
+    fn acquire(
+        counter: &'a std::sync::atomic::AtomicUsize,
+    ) -> std::result::Result<Self, PublicError> {
+        let previous = counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if previous >= MAX_SUBSCRIPTIONS {
+            counter.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+            return Err(PublicError::new(
+                PublicErrorCode::InvalidState,
+                format!(
+                    "too many live event subscriptions (max {MAX_SUBSCRIPTIONS}); destroy some first"
+                ),
+            )
+            .operation("subscribe_events"));
+        }
+        Ok(Self {
+            counter,
+            armed: true,
+        })
+    }
+
+    /// Hand the quota ownership to the subscription handle.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SubscriptionReservation<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.counter
+                .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
+}
+
 /// Event subscription handle: a broadcast receiver owned by the caller.
 /// The receiver is mutex-guarded so concurrent `hs_subscription_next` calls
 /// on one handle are serialized instead of racing.
@@ -270,6 +316,7 @@ pub(crate) fn runtime_ref<'a>(
 /// `hs_list_devices` request JSON: `{"include_adb":true,"include_wifi":true,
 /// "include_usb":true,"wifi_browse_timeout_ms":3000}` (all optional).
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FfiListDevicesRequest {
     include_adb: Option<bool>,
     include_wifi: Option<bool>,
@@ -402,6 +449,7 @@ pub unsafe extern "C" fn hs_list_files(
         let runtime = ffi_try!(runtime_ref(runtime, "list_files"));
         let json = ffi_try!(input_str(request_ptr, request_len, "list_files"));
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct FfiListFilesRequest {
             path: Option<String>,
             depth: Option<u32>,
@@ -443,6 +491,7 @@ pub unsafe extern "C" fn hs_create_directory(
         let runtime = ffi_try!(runtime_ref(runtime, "create_directory"));
         let json = ffi_try!(input_str(request_ptr, request_len, "create_directory"));
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct FfiCreateDirectoryRequest {
             path: String,
         }
@@ -654,22 +703,14 @@ pub unsafe extern "C" fn hs_subscribe_events(
     catch("subscribe_events", || {
         let runtime = ffi_try!(runtime_ref(runtime, "subscribe_events"));
         let slot = ffi_try!(out_slot(out_subscription, "subscribe_events"));
-        // P2-5: bound live subscriptions (each pins a Tokio runtime).
-        let previous = runtime
-            .subscriptions
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        if previous >= MAX_SUBSCRIPTIONS {
-            runtime
-                .subscriptions
-                .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-            return err(&PublicError::new(
-                PublicErrorCode::InvalidState,
-                format!(
-                    "too many live event subscriptions (max {MAX_SUBSCRIPTIONS}); destroy some first"
-                ),
-            )
-            .operation("subscribe_events"));
-        }
+        // P2-5 + round-2 P2-2: bound live subscriptions with an RAII
+        // reservation — the count is released on every failure path
+        // (app.subscribe_events error, tokio runtime build error), not
+        // only when the subscription is destroyed.
+        let mut reservation = match SubscriptionReservation::acquire(&runtime.subscriptions) {
+            Ok(reservation) => reservation,
+            Err(error) => return err(&error),
+        };
         let receiver = runtime.app.subscribe_events();
         let subscription = Box::new(HsSubscription {
             // P2-5: the subscription runtime only needs the time driver
@@ -692,6 +733,7 @@ pub unsafe extern "C" fn hs_subscribe_events(
             receiver: tokio::sync::Mutex::new(receiver),
             counter: runtime.subscriptions.clone(),
         });
+        reservation.disarm(); // success: the handle's Drop owns the count
         *slot = Box::into_raw(subscription) as *mut c_void;
         ok(&serde_json::json!({ "subscribed": true }))
     })
@@ -1068,5 +1110,173 @@ mod subscription_cap_tests {
             unsafe { hs_subscription_destroy(sub) };
         }
         unsafe { crate::hs_runtime_destroy(runtime) };
+    }
+}
+
+#[cfg(test)]
+mod round2_unknown_field_tests {
+    //! Round-2 P2-1: every request struct rejects unknown fields with
+    //! invalid_argument instead of silently ignoring them (a typo like
+    //! {"limt":50} used to fall back to defaults / full-library behavior).
+    use super::*;
+    use crate::ffi_test_util::runtime_ptr;
+    use crate::hs_runtime_destroy;
+
+    /// Requests with a session_id argument.
+    fn call(
+        f: unsafe extern "C" fn(*mut std::ffi::c_void, u64, *const u8, usize) -> HsCallResult,
+        json: &[u8],
+    ) -> HsCallResult {
+        let runtime = runtime_ptr();
+        let result = unsafe { f(runtime, 1, json.as_ptr(), json.len()) };
+        unsafe { hs_runtime_destroy(runtime) };
+        result
+    }
+
+    /// Requests without a session_id argument (list_devices).
+    fn call_no_session(
+        f: unsafe extern "C" fn(*mut std::ffi::c_void, *const u8, usize) -> HsCallResult,
+        json: &[u8],
+    ) -> HsCallResult {
+        let runtime = runtime_ptr();
+        let result = unsafe { f(runtime, json.as_ptr(), json.len()) };
+        unsafe { hs_runtime_destroy(runtime) };
+        result
+    }
+
+    fn assert_rejected(result: HsCallResult, what: &str) {
+        assert_eq!(result.status, 1, "{what}: unknown field must be rejected");
+        let bytes = unsafe { crate::buffer::into_vec(result.error) };
+        let decoded: serde_json::Value = serde_json::from_slice(&bytes).expect("error json");
+        assert_eq!(
+            decoded["code"], "invalid_argument",
+            "{what}: expected invalid_argument, got {}",
+            decoded["code"]
+        );
+    }
+
+    #[test]
+    fn subscription_reservation_releases_quota_on_drop_and_disarm() {
+        // Round-2 P2-2: a failed subscribe path (RAII drop) must return
+        // the quota; disarm() hands ownership to the handle's Drop.
+        let counter = std::sync::atomic::AtomicUsize::new(0);
+        let first = super::SubscriptionReservation::acquire(&counter).expect("first");
+        assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+        drop(first);
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "drop must release the quota"
+        );
+        let mut second = super::SubscriptionReservation::acquire(&counter).expect("second");
+        second.disarm();
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "disarm hands ownership to the subscription handle"
+        );
+    }
+
+    #[test]
+    fn list_devices_rejects_unknown_fields() {
+        let result = call_no_session(hs_list_devices, br#"{"include_adb":true,"typo":1}"#);
+        assert_rejected(result, "hs_list_devices");
+    }
+
+    #[test]
+    fn list_files_rejects_unknown_fields() {
+        let result = call(hs_list_files, br#"{"path":"/","unknown":true}"#);
+        assert_rejected(result, "hs_list_files");
+    }
+
+    #[test]
+    fn stat_file_rejects_unknown_fields() {
+        let result = call(crate::files::hs_stat_file, br#"{"path":"/a.jpg","oops":1}"#);
+        assert_rejected(result, "hs_stat_file");
+    }
+
+    #[test]
+    fn move_path_rejects_unknown_fields() {
+        let result = call(
+            crate::files::hs_move_path,
+            br#"{"source":"/a","target":"/b","extra":1}"#,
+        );
+        assert_rejected(result, "hs_move_path");
+    }
+
+    #[test]
+    fn delete_paths_rejects_unknown_fields() {
+        let result = call(
+            crate::files::hs_delete_paths,
+            br#"{"paths":["/a"],"force":true,"typo":1}"#,
+        );
+        assert_rejected(result, "hs_delete_paths");
+    }
+
+    #[test]
+    fn count_files_rejects_unknown_fields() {
+        let result = call(crate::files::hs_count_files, br#"{"path":"/","z":1}"#);
+        assert_rejected(result, "hs_count_files");
+    }
+
+    #[test]
+    fn update_file_info_rejects_unknown_fields() {
+        let result = call(
+            crate::files::hs_update_file_info,
+            br#"{"path":"/a","mtime_ms":1,"x":1}"#,
+        );
+        assert_rejected(result, "hs_update_file_info");
+    }
+
+    #[test]
+    fn create_directory_rejects_unknown_fields() {
+        let result = call(hs_create_directory, br#"{"path":"/d","extra":1}"#);
+        assert_rejected(result, "hs_create_directory");
+    }
+
+    #[test]
+    fn clipboard_set_rejects_unknown_fields() {
+        let result = call(
+            crate::clipboard::hs_clipboard_set,
+            br#"{"text":"hi","typo":1}"#,
+        );
+        assert_rejected(result, "hs_clipboard_set");
+    }
+
+    #[test]
+    fn clipboard_delete_rejects_unknown_fields() {
+        let result = call(
+            crate::clipboard::hs_clipboard_delete,
+            br#"{"entry_id":1,"typo":1}"#,
+        );
+        assert_rejected(result, "hs_clipboard_delete");
+    }
+
+    #[test]
+    fn thumbnail_rejects_unknown_fields() {
+        let result = call(
+            crate::media::hs_media_thumbnail,
+            br#"{"images":[],"typo":1}"#,
+        );
+        assert_rejected(result, "hs_media_thumbnail");
+    }
+
+    #[test]
+    fn monitor_folder_rejects_unknown_fields() {
+        let result = call(
+            crate::monitor::hs_monitor_folder,
+            br#"{"path":"/","unknown":1}"#,
+        );
+        assert_rejected(result, "hs_monitor_start");
+    }
+
+    #[test]
+    fn trust_remove_rejects_unknown_fields() {
+        // hs_trust_remove takes no session_id.
+        let result = call_no_session(
+            crate::trust::hs_trust_remove,
+            br#"{"device_uuid":"x","typo":1}"#,
+        );
+        assert_rejected(result, "hs_trust_remove");
     }
 }

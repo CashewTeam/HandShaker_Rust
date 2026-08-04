@@ -178,11 +178,11 @@ public actor HandShakerRuntime {
                 hs_runtime_diagnostics(runtime)
             }
         }
-        guard contract.jsonContract >= RuntimeDiagnostics.minimumJSONContract else {
+        guard contract.jsonContract == RuntimeDiagnostics.supportedJSONContract else {
             handle.destroy()
             throw HandShakerError.unsupported(
-                "incompatible JSON contract \(contract.jsonContract): this SDK requires "
-                    + "json_contract >= \(RuntimeDiagnostics.minimumJSONContract)"
+                "incompatible JSON contract \(contract.jsonContract): this SDK supports exactly "
+                    + "json_contract == \(RuntimeDiagnostics.supportedJSONContract)"
             )
         }
         self.handle = handle
@@ -197,13 +197,14 @@ public actor HandShakerRuntime {
     /// Shut the runtime down (`hs_runtime_shutdown`). Idempotent: a second
     /// call (or a call after the handle was destroyed) is a no-op. Sets the
     /// shutdown flag first so active event streams finish with `closed`.
-    public func shutdown() async {
+    /// Round-2 P1-5: the native failure is surfaced instead of swallowed.
+    public func shutdown() async throws {
         shutdownFlag.set()
-        _ = try? await callNative {
+        try await callNative {
             try self.handle.withRuntime { runtime in
-                let result: HsCallResult = hs_runtime_shutdown(runtime)
-                hs_byte_buffer_free(result.value)
-                hs_byte_buffer_free(result.error)
+                try hsCallVoid {
+                    hs_runtime_shutdown(runtime)
+                }
             }
         }
     }

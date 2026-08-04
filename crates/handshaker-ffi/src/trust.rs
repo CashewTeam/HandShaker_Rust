@@ -71,6 +71,7 @@ pub unsafe extern "C" fn hs_trust_remove(
         let runtime = ffi_try!(runtime_ref(runtime, "trust_remove"));
         let json = ffi_try!(input_str(request_ptr, request_len, "trust_remove"));
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct FfiTrustRemoveRequest {
             device_id: String,
         }
@@ -111,6 +112,7 @@ pub unsafe extern "C" fn hs_trust_reset(
         let runtime = ffi_try!(runtime_ref(runtime, "trust_reset"));
         let json = ffi_try!(input_str(request_ptr, request_len, "trust_reset"));
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct FfiTrustResetRequest {
             endpoint: String,
             expected_device_id: String,

@@ -204,6 +204,6 @@ final class RuntimeLifecycleTests: XCTestCase {
         // Fire-and-forget: the actor is deallocated with the runtime when
         // the test ends; an explicit shutdown is still attempted to keep
         // the native side deterministic.
-        Task { await runtime.shutdown() }
+        Task { try? await runtime.shutdown() }
     }
 }

@@ -38,6 +38,7 @@ pub unsafe extern "C" fn hs_stat_file(
         let runtime = ffi_try!(runtime_ref(runtime, "stat_file"));
         let json = ffi_try!(input_str(request_ptr, request_len, "stat_file"));
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct FfiStatFileRequest {
             path: Option<String>,
         }
@@ -78,6 +79,7 @@ pub unsafe extern "C" fn hs_count_files(
         let runtime = ffi_try!(runtime_ref(runtime, "count_files"));
         let json = ffi_try!(input_str(request_ptr, request_len, "count_files"));
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct FfiCountFilesRequest {
             path: Option<String>,
             depth: Option<u32>,
@@ -122,6 +124,7 @@ pub unsafe extern "C" fn hs_move_path(
         let runtime = ffi_try!(runtime_ref(runtime, "move_path"));
         let json = ffi_try!(input_str(request_ptr, request_len, "move_path"));
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct FfiMovePathRequest {
             source: String,
             target: String,
@@ -165,6 +168,7 @@ pub unsafe extern "C" fn hs_delete_paths(
         let runtime = ffi_try!(runtime_ref(runtime, "delete_paths"));
         let json = ffi_try!(input_str(request_ptr, request_len, "delete_paths"));
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct FfiDeletePathsRequest {
             #[serde(default)]
             paths: Vec<String>,
@@ -216,6 +220,7 @@ pub unsafe extern "C" fn hs_update_file_info(
         let runtime = ffi_try!(runtime_ref(runtime, "update_file_info"));
         let json = ffi_try!(input_str(request_ptr, request_len, "update_file_info"));
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct FfiUpdateFileInfoRequest {
             #[serde(default)]
             files: Vec<UpdateFileInfoItemDto>,
