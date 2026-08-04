@@ -2438,10 +2438,12 @@ impl HandShakerRuntime {
     }
 
     /// The full core pipeline for one run: session + ledger + photo_sync +
-    /// diff + conflict check, then `execute_plan` (which skips conflicted
-    /// entries). `Ok(None)` means the run was cancelled before any network
-    /// work. `execute_plan` cannot be interrupted mid-download; `stop_sync`
-    /// aborts the task after a bounded wait instead.
+    /// diff + conflict check, then `execute_plan_with_checkpoint` (which
+    /// skips conflicted entries and journals each side effect, round-2
+    /// P0-2). `Ok(None)` means the run was cancelled before any network
+    /// work. A pending journal action from a previous crashed/aborted run
+    /// is recovered first so the ledger and the local files are consistent
+    /// before the new diff is computed.
     async fn run_sync_once(
         &self,
         job: &SyncJob,
@@ -2458,13 +2460,20 @@ impl HandShakerRuntime {
         if job.cancel.is_cancelled() {
             return Ok(None);
         }
-        let (result, updated) = handshaker_core::execute_plan(
+        let store = self.sync_store_for(&job.profile)?;
+        let journal = handshaker_core::SyncJournal::for_ledger(store.path());
+        let snapshot = journal
+            .recover(&pipeline.snapshot, |updated| store.save(updated))
+            .map_err(|error| from_core_error(error, "sync.recover"))?;
+        let (result, updated) = handshaker_core::execute_plan_with_checkpoint(
             &pipeline.client,
             &pipeline.config,
             &pipeline.phone_files,
             &pipeline.diff,
-            &pipeline.snapshot,
+            &snapshot,
             &pipeline.conflicts,
+            &journal,
+            &store,
         )
         .await
         .map_err(|error| from_core_error(error, "sync.run"))?;
@@ -2864,10 +2873,16 @@ impl HandShakerRuntime {
         let session = self.session_handle(profile.session_id).await?;
         session.record_activity();
         let store = self.sync_store_for(profile)?;
+        let journal = handshaker_core::SyncJournal::for_ledger(store.path());
         let mut snapshot = store
             .load()
             .map_err(|error| from_core_error(error, "sync.watch"))?
             .unwrap_or_default();
+        // Round-2 P0-2: recover a pending journal action from a previous
+        // crashed/aborted run before applying new changes.
+        snapshot = journal
+            .recover(&snapshot, |updated| store.save(updated))
+            .map_err(|error| from_core_error(error, "sync.recover"))?;
         let state = self
             .state_store()?
             .load_or_create()
@@ -2898,10 +2913,16 @@ impl HandShakerRuntime {
                 run.conflicts.push(file.path.clone());
                 continue;
             }
-            let result =
-                handshaker_core::apply_file_change(&session.client, &config, change, &mut snapshot)
-                    .await
-                    .map_err(|error| from_core_error(error, "sync.watch"))?;
+            let result = handshaker_core::apply_file_change_with_checkpoint(
+                &session.client,
+                &config,
+                change,
+                &mut snapshot,
+                &journal,
+                &store,
+            )
+            .await
+            .map_err(|error| from_core_error(error, "sync.watch"))?;
             touched = true;
             run.downloaded.extend(result.downloaded);
             run.deleted.extend(result.deleted);

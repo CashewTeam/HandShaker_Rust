@@ -18,6 +18,7 @@ mod protocol;
 mod session;
 mod state;
 mod sync;
+mod sync_journal;
 mod sync_store;
 #[cfg(test)]
 mod test_support;
@@ -48,8 +49,10 @@ pub use events::{
 };
 pub use state::{State, StateStore};
 pub use sync::{
-    SyncRunResult, apply_file_change, check_conflicts, execute_plan, local_destination, plan_diff,
+    SyncRunResult, apply_file_change_with_checkpoint, check_conflicts,
+    execute_plan_with_checkpoint, local_destination, plan_diff,
 };
+pub use sync_journal::{PendingSyncAction, SyncJournal};
 pub use sync_store::{
     SyncLedgerIdentity, SyncStore, default_config_dir, ledger_scope_key, normalize_root,
     pc_id_from_host_uuid, sync_config,

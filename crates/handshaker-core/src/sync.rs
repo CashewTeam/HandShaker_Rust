@@ -18,6 +18,8 @@ use crate::domain::{RemoteFile, SyncConfig, SyncDiff, SyncFileRecord, SyncSnapsh
 use crate::error::{Error, Result};
 use crate::events::FileChange;
 use crate::i18n;
+use crate::sync_journal::{PendingSyncAction, SyncJournal};
+use crate::sync_store::SyncStore;
 
 /// The phone's photo root must never be reachable through a relative escape.
 const PHONE_ROOT_MISSING: &str = "sync.path_outside_root";
@@ -113,46 +115,23 @@ pub fn check_conflicts(diff: &SyncDiff, snapshot: &SyncSnapshot) -> Vec<String> 
     conflicts
 }
 
-/// Remove a synced local file and report the outcome. Returns `true` when
-/// the ledger row may be dropped: the file was already gone (expected final
-/// state) or was deleted successfully. Returns `false` when removal failed
-/// (permission, in-use, read-only volume, transient I/O) — the caller must
-/// then keep the ledger row so a later sync can retry and so the recorded
-/// SHA-256 still protects user modifications.
-///
-/// Both the full-sync delete path and the incremental FILE_CHANGE(Deleted)
-/// path must use this single helper — two delete semantics are not allowed.
-fn remove_local_synced_file(
-    remote_path: &str,
-    local_path: &Path,
-    result: &mut SyncRunResult,
-) -> bool {
-    if !local_path.exists() {
-        // Already in the desired final state; safe to drop the row.
-        return true;
-    }
-    match fs::remove_file(local_path) {
-        Ok(()) => {
-            result.deleted.push(remote_path.to_string());
-            true
-        }
-        Err(_) => {
-            result.failures.push(remote_path.to_string());
-            false
-        }
-    }
-}
-
-/// Execute a plan: download added/modified files, delete removed ones, and
-/// return the updated snapshot. Failures are aggregated, never aborting the
-/// run. On success the caller commits the returned snapshot atomically.
-pub async fn execute_plan(
+/// Execute a plan with per-item checkpointing (round-2 P0-2): every
+/// download/delete is journaled (WAL), applied, and the ledger saved
+/// before the next item starts, so a crash or hard abort at any point
+/// leaves at most one recoverable pending action instead of an
+/// inconsistent "files changed, ledger stale" window. Failures are
+/// aggregated, never aborting the run. `info_modified` entries are
+/// metadata-only and committed with the final save.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_plan_with_checkpoint(
     client: &HandShakerClient,
     config: &SyncConfig,
     phone_files: &[RemoteFile],
     diff: &SyncDiff,
     snapshot: &SyncSnapshot,
     conflicts: &[String],
+    journal: &SyncJournal,
+    store: &SyncStore,
 ) -> Result<(SyncRunResult, SyncSnapshot)> {
     let mut result = SyncRunResult {
         conflicts: conflicts.to_vec(),
@@ -171,23 +150,17 @@ pub async fn execute_plan(
             continue;
         };
         let destination = local_destination(config, path)?;
-        match download_one(client, path, destination).await {
-            Ok((local_path, local_sha)) => {
-                result.downloaded.push(path.clone());
-                updated.files.insert(
-                    path.clone(),
-                    SyncFileRecord {
-                        size: file.size,
-                        checksum: file.checksum.clone(),
-                        ext_data: file.ext_data.clone(),
-                        modified_at: file.modified_at,
-                        local_path,
-                        local_sha256: Some(local_sha),
-                    },
-                );
-            }
-            Err(_) => result.failures.push(path.clone()),
-        }
+        journaled_download(
+            client,
+            path,
+            file,
+            destination,
+            &mut updated,
+            &mut result,
+            journal,
+            store,
+        )
+        .await?;
     }
 
     for path in &diff.deleted {
@@ -198,9 +171,7 @@ pub async fn execute_plan(
             continue;
         };
         let local = PathBuf::from(&record.local_path);
-        if remove_local_synced_file(path, &local, &mut result) {
-            updated.files.remove(path);
-        }
+        journaled_delete(path, &local, &mut updated, &mut result, journal, store)?;
     }
 
     for path in &diff.info_modified {
@@ -215,16 +186,138 @@ pub async fn execute_plan(
         }
     }
 
+    // Metadata-only changes since the last per-item checkpoint.
+    store.save(&updated)?;
     Ok((result, updated))
+}
+
+/// Download one file with journal + checkpoint (round-2 P0-2):
+/// staged fsync → journal → rename staged→final → ledger save → clear.
+/// A rename failure keeps the journal so the next run's recovery finishes
+/// or cleanly abandons the action; the item is reported as a failure.
+#[allow(clippy::too_many_arguments)]
+async fn journaled_download(
+    client: &HandShakerClient,
+    remote_path: &str,
+    file: &RemoteFile,
+    destination: PathBuf,
+    snapshot: &mut SyncSnapshot,
+    result: &mut SyncRunResult,
+    journal: &SyncJournal,
+    store: &SyncStore,
+) -> Result<()> {
+    let (part, hash) = match download_to_staged(client, remote_path, &destination).await {
+        Ok(staged) => staged,
+        Err(_) => {
+            result.failures.push(remote_path.to_string());
+            return Ok(());
+        }
+    };
+    let new_record = SyncFileRecord {
+        size: file.size,
+        checksum: file.checksum.clone(),
+        ext_data: file.ext_data.clone(),
+        modified_at: file.modified_at,
+        local_path: destination.display().to_string(),
+        local_sha256: Some(hash),
+    };
+    let action = PendingSyncAction::Download {
+        remote_path: remote_path.to_string(),
+        final_path: destination.clone(),
+        staged_path: part.clone(),
+        new_record: new_record.clone(),
+    };
+    if let Err(error) = journal.write(&action) {
+        let _ = fs::remove_file(&part);
+        result.failures.push(remote_path.to_string());
+        return Err(error);
+    }
+    if let Err(_error) = fs::rename(&part, &destination) {
+        // Failure is aggregated (the run continues with the next item);
+        // the journal stays so the next run's recovery finishes the
+        // rename from staged or abandons it.
+        result.failures.push(remote_path.to_string());
+        return Ok(());
+    }
+    snapshot.files.insert(remote_path.to_string(), new_record);
+    result.downloaded.push(remote_path.to_string());
+    store.save(snapshot)?;
+    journal.clear()?;
+    Ok(())
+}
+
+/// Delete one synced file with journal + checkpoint (round-2 P0-2):
+/// journal → rename file→same-dir trash → ledger save → remove trash →
+/// clear. A failed removal keeps the ledger row (retryable) and is
+/// reported as a failure, never silently dropped.
+fn journaled_delete(
+    remote_path: &str,
+    local: &Path,
+    snapshot: &mut SyncSnapshot,
+    result: &mut SyncRunResult,
+    journal: &SyncJournal,
+    store: &SyncStore,
+) -> Result<()> {
+    if !local.exists() {
+        // Already in the desired final state; safe to drop the row.
+        snapshot.files.remove(remote_path);
+        store.save(snapshot)?;
+        return Ok(());
+    }
+    if local.is_dir() {
+        // A directory where a synced file is expected: never trash it
+        // (it may hold user data); keep the row and report a failure so
+        // the operator can resolve it.
+        result.failures.push(remote_path.to_string());
+        return Ok(());
+    }
+    let mut trash_name = local.as_os_str().to_owned();
+    trash_name.push(format!(".hs-trash.{}", rand::random::<u64>()));
+    let trash = PathBuf::from(trash_name);
+    let action = PendingSyncAction::Delete {
+        remote_path: remote_path.to_string(),
+        original_path: local.to_path_buf(),
+        trash_path: trash.clone(),
+    };
+    if let Err(error) = journal.write(&action) {
+        result.failures.push(remote_path.to_string());
+        return Err(error);
+    }
+    if let Err(_error) = fs::rename(local, &trash) {
+        // File untouched; failure aggregated. The journaled Delete is
+        // abandoned by recovery (original present) and retried next run.
+        result.failures.push(remote_path.to_string());
+        return Ok(());
+    }
+    snapshot.files.remove(remote_path);
+    result.deleted.push(remote_path.to_string());
+    store.save(snapshot)?;
+    // Remove the trash before clearing the journal: a failure here keeps
+    // the journal so the next run's recovery retries the removal.
+    fs::remove_file(&trash).map_err(|error| {
+        Error::LocalIo(i18n::format(
+            "sync.delete_failed",
+            &[&trash.display().to_string(), &error.to_string()],
+        ))
+    })?;
+    journal.clear()?;
+    Ok(())
 }
 
 /// Apply a single FILE_CHANGE(38) event to the snapshot in place, returning
 /// the run result for this one file (empty unless a download/delete ran).
-pub async fn apply_file_change(
+/// Apply one incremental change with journal + checkpoint (round-2 P0-2):
+/// downloads and deletes go through the same journaled helpers as the
+/// full-sync plan, so a crash mid-batch leaves at most one recoverable
+/// pending action. Metadata-only changes are applied in memory; the
+/// caller persists them with the batch's final save.
+pub async fn apply_file_change_with_checkpoint(
     client: &HandShakerClient,
     config: &SyncConfig,
     change: &FileChange,
     snapshot: &mut SyncSnapshot,
+    journal: &SyncJournal,
+    store: &SyncStore,
 ) -> Result<SyncRunResult> {
     use crate::events::FileChangeStatus;
     let mut result = SyncRunResult::default();
@@ -240,23 +333,17 @@ pub async fn apply_file_change(
         | FileChangeStatus::Modified
         | FileChangeStatus::FileAndInfoModified => {
             let destination = local_destination(config, &path)?;
-            match download_one(client, &path, destination).await {
-                Ok((local_path, local_sha)) => {
-                    snapshot.files.insert(
-                        path.clone(),
-                        SyncFileRecord {
-                            size: file.size,
-                            checksum: file.checksum.clone(),
-                            ext_data: file.ext_data.clone(),
-                            modified_at: file.modified_at,
-                            local_path,
-                            local_sha256: Some(local_sha),
-                        },
-                    );
-                    result.downloaded.push(path.clone());
-                }
-                Err(_) => result.failures.push(path.clone()),
-            }
+            journaled_download(
+                client,
+                &path,
+                file,
+                destination,
+                snapshot,
+                &mut result,
+                journal,
+                store,
+            )
+            .await?;
         }
         FileChangeStatus::Deleted => {
             if let Some(record) = snapshot.files.get(&path) {
@@ -264,9 +351,7 @@ pub async fn apply_file_change(
                 // Same helper and same semantics as the full-sync delete
                 // path: a failed removal keeps the ledger row (retryable)
                 // and is reported as a failure, never silently dropped.
-                if remove_local_synced_file(&path, &local, &mut result) {
-                    snapshot.files.remove(&path);
-                }
+                journaled_delete(&path, &local, snapshot, &mut result, journal, store)?;
             }
         }
         FileChangeStatus::InfoModified | FileChangeStatus::None | FileChangeStatus::Unknown => {
@@ -310,11 +395,14 @@ pub fn local_destination(config: &SyncConfig, phone_path: &str) -> Result<PathBu
 /// file on every error path (download failure, hash failure, rename
 /// failure); the SHA-256 read runs on a blocking pool so a large photo
 /// does not stall the Tokio workers (heartbeat/events stay responsive).
-async fn download_one(
+/// Download to a unique staged temp in the destination's directory and
+/// hash it; does NOT rename (the caller owns the rename inside the
+/// journal transaction, round-2 P0-2). Returns (staged_path, sha256).
+async fn download_to_staged(
     client: &HandShakerClient,
     phone_path: &str,
-    destination: PathBuf,
-) -> Result<(String, String)> {
+    destination: &Path,
+) -> Result<(PathBuf, String)> {
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             Error::LocalIo(i18n::format(
@@ -353,14 +441,7 @@ async fn download_one(
             return Err(error);
         }
     };
-    fs::rename(&part, &destination).map_err(|error| {
-        let _ = fs::remove_file(&part);
-        Error::LocalIo(i18n::format(
-            "sync.rename_failed",
-            &[&destination.display().to_string(), &error.to_string()],
-        ))
-    })?;
-    Ok((destination.display().to_string(), hash))
+    Ok((part, hash))
 }
 
 /// SHA-256 of a file on the blocking pool (P1-3: large local files must
@@ -417,6 +498,33 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync_store::{SyncLedgerIdentity, SyncStore};
+
+    /// Tempdir + store + journal for checkpointed tests (round-2 P0-2).
+    struct TestLedger {
+        _temp: tempfile::TempDir,
+        store: SyncStore,
+        journal: SyncJournal,
+    }
+
+    fn test_ledger() -> TestLedger {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = SyncStore::discover(
+            temp.path(),
+            &SyncLedgerIdentity {
+                device_uuid: "test-dev".to_string(),
+                remote_root: "/storage/emulated/0/DCIM/Camera".to_string(),
+                local_root: temp.path().display().to_string(),
+            },
+        );
+        let journal = SyncJournal::for_ledger(store.path());
+        TestLedger {
+            _temp: temp,
+            store,
+            journal,
+        }
+    }
+
     use crate::domain::{SyncConfig, SyncFileRecord};
 
     fn config(local_root: &Path) -> SyncConfig {
@@ -569,6 +677,7 @@ mod tests {
     #[tokio::test]
     async fn execute_plan_downloads_new_files_and_rerun_is_idempotent() {
         let fake = crate::test_support::FakeWifiSsp::start().await;
+        let ledger = test_ledger();
         let client = fake.connect().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let config = config(temp.path());
@@ -580,10 +689,18 @@ mod tests {
         )];
         let diff = plan_diff(&phone, &snapshot);
         let conflicts = check_conflicts(&diff, &snapshot);
-        let (result, updated) =
-            execute_plan(&client, &config, &phone, &diff, &snapshot, &conflicts)
-                .await
-                .expect("execute");
+        let (result, updated) = execute_plan_with_checkpoint(
+            &client,
+            &config,
+            &phone,
+            &diff,
+            &snapshot,
+            &conflicts,
+            &ledger.journal,
+            &ledger.store,
+        )
+        .await
+        .expect("execute");
         assert_eq!(
             result.downloaded,
             vec!["/storage/emulated/0/DCIM/Camera/a.jpg".to_string()],
@@ -682,6 +799,7 @@ mod tests {
     #[tokio::test]
     async fn execute_plan_deletes_locally_when_phone_file_disappears() {
         let fake = crate::test_support::FakeWifiSsp::start().await;
+        let ledger = test_ledger();
         let client = fake.connect().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let config = config(temp.path());
@@ -691,13 +809,15 @@ mod tests {
             None,
         )];
         let snapshot = SyncSnapshot::default();
-        let (_, updated) = execute_plan(
+        let (_, updated) = execute_plan_with_checkpoint(
             &client,
             &config,
             &phone,
             &plan_diff(&phone, &snapshot),
             &snapshot,
             &[],
+            &ledger.journal,
+            &ledger.store,
         )
         .await
         .expect("first sync");
@@ -711,9 +831,18 @@ mod tests {
             diff.deleted,
             vec!["/storage/emulated/0/DCIM/Camera/a.jpg".to_string()]
         );
-        let (result, final_snapshot) = execute_plan(&client, &config, &empty, &diff, &updated, &[])
-            .await
-            .expect("delete run");
+        let (result, final_snapshot) = execute_plan_with_checkpoint(
+            &client,
+            &config,
+            &empty,
+            &diff,
+            &updated,
+            &[],
+            &ledger.journal,
+            &ledger.store,
+        )
+        .await
+        .expect("delete run");
         assert_eq!(
             result.deleted,
             vec!["/storage/emulated/0/DCIM/Camera/a.jpg".to_string()]
@@ -727,6 +856,7 @@ mod tests {
     #[tokio::test]
     async fn execute_plan_preserves_user_modified_local_files_as_conflicts() {
         let fake = crate::test_support::FakeWifiSsp::start().await;
+        let ledger = test_ledger();
         let client = fake.connect().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let config = config(temp.path());
@@ -736,13 +866,15 @@ mod tests {
             None,
         )];
         let snapshot = SyncSnapshot::default();
-        let (_, updated) = execute_plan(
+        let (_, updated) = execute_plan_with_checkpoint(
             &client,
             &config,
             &phone,
             &plan_diff(&phone, &snapshot),
             &snapshot,
             &[],
+            &ledger.journal,
+            &ledger.store,
         )
         .await
         .expect("first sync");
@@ -766,10 +898,18 @@ mod tests {
             conflicts,
             vec!["/storage/emulated/0/DCIM/Camera/a.jpg".to_string()]
         );
-        let (result, final_snapshot) =
-            execute_plan(&client, &config, &changed, &diff, &updated, &conflicts)
-                .await
-                .expect("run");
+        let (result, final_snapshot) = execute_plan_with_checkpoint(
+            &client,
+            &config,
+            &changed,
+            &diff,
+            &updated,
+            &conflicts,
+            &ledger.journal,
+            &ledger.store,
+        )
+        .await
+        .expect("run");
         assert!(result.downloaded.is_empty());
         assert_eq!(fs::read(&local).expect("read"), b"user content");
         // Ledger unchanged for the conflicted file.
@@ -793,22 +933,19 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let jpg = temp.path().join("a.jpg");
         let png = temp.path().join("a.png");
-        let (jpg_local, jpg_sha) = download_one(
-            &client,
-            "/storage/emulated/0/DCIM/Camera/a.jpg",
-            jpg.clone(),
-        )
-        .await
-        .expect("download jpg");
-        let (png_local, png_sha) = download_one(
-            &client,
-            "/storage/emulated/0/DCIM/Camera/a.png",
-            png.clone(),
-        )
-        .await
-        .expect("download png");
-        assert_eq!(jpg_local, jpg.display().to_string());
-        assert_eq!(png_local, png.display().to_string());
+        let (jpg_part, jpg_sha) =
+            download_to_staged(&client, "/storage/emulated/0/DCIM/Camera/a.jpg", &jpg)
+                .await
+                .expect("download jpg");
+        let (png_part, png_sha) =
+            download_to_staged(&client, "/storage/emulated/0/DCIM/Camera/a.png", &png)
+                .await
+                .expect("download png");
+        // Staged files are distinct (unique random names), and the
+        // caller-owned rename yields the final files.
+        assert_ne!(jpg_part, png_part);
+        fs::rename(&jpg_part, &jpg).expect("rename jpg");
+        fs::rename(&png_part, &png).expect("rename png");
         assert_eq!(fs::read(&jpg).expect("read"), b"download-data");
         assert_eq!(fs::read(&png).expect("read"), b"download-data");
         assert!(!jpg_sha.is_empty());
@@ -831,6 +968,7 @@ mod tests {
     #[tokio::test]
     async fn apply_file_change_adds_then_deletes_and_updates_metadata() {
         let fake = crate::test_support::FakeWifiSsp::start().await;
+        let ledger = test_ledger();
         let client = fake.connect().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let config = config(temp.path());
@@ -845,9 +983,16 @@ mod tests {
             )),
             status: crate::events::FileChangeStatus::Added,
         };
-        let result = apply_file_change(&client, &config, &added, &mut snapshot)
-            .await
-            .expect("apply added");
+        let result = apply_file_change_with_checkpoint(
+            &client,
+            &config,
+            &added,
+            &mut snapshot,
+            &ledger.journal,
+            &ledger.store,
+        )
+        .await
+        .expect("apply added");
         assert_eq!(
             result.downloaded,
             vec!["/storage/emulated/0/DCIM/Camera/live.jpg".to_string()]
@@ -869,9 +1014,16 @@ mod tests {
             )),
             status: crate::events::FileChangeStatus::InfoModified,
         };
-        let result = apply_file_change(&client, &config, &info, &mut snapshot)
-            .await
-            .expect("apply info");
+        let result = apply_file_change_with_checkpoint(
+            &client,
+            &config,
+            &info,
+            &mut snapshot,
+            &ledger.journal,
+            &ledger.store,
+        )
+        .await
+        .expect("apply info");
         assert!(result.downloaded.is_empty());
         assert_eq!(
             snapshot.files["/storage/emulated/0/DCIM/Camera/live.jpg"]
@@ -889,9 +1041,16 @@ mod tests {
             )),
             status: crate::events::FileChangeStatus::Deleted,
         };
-        let result = apply_file_change(&client, &config, &deleted, &mut snapshot)
-            .await
-            .expect("apply deleted");
+        let result = apply_file_change_with_checkpoint(
+            &client,
+            &config,
+            &deleted,
+            &mut snapshot,
+            &ledger.journal,
+            &ledger.store,
+        )
+        .await
+        .expect("apply deleted");
         assert_eq!(
             result.deleted,
             vec!["/storage/emulated/0/DCIM/Camera/live.jpg".to_string()]
@@ -921,6 +1080,7 @@ mod tests {
     #[tokio::test]
     async fn execute_plan_delete_success_removes_file_and_ledger_row() {
         let fake = crate::test_support::FakeWifiSsp::start().await;
+        let ledger = test_ledger();
         let client = fake.connect().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let config = config(temp.path());
@@ -932,9 +1092,18 @@ mod tests {
             deleted: vec![path.to_string()],
             ..SyncDiff::default()
         };
-        let (result, updated) = execute_plan(&client, &config, &[], &diff, &snapshot, &[])
-            .await
-            .expect("run");
+        let (result, updated) = execute_plan_with_checkpoint(
+            &client,
+            &config,
+            &[],
+            &diff,
+            &snapshot,
+            &[],
+            &ledger.journal,
+            &ledger.store,
+        )
+        .await
+        .expect("run");
         assert_eq!(result.deleted, vec![path.to_string()]);
         assert!(result.failures.is_empty());
         assert!(!local.exists());
@@ -946,6 +1115,7 @@ mod tests {
     #[tokio::test]
     async fn execute_plan_delete_missing_file_drops_row_without_failure() {
         let fake = crate::test_support::FakeWifiSsp::start().await;
+        let ledger = test_ledger();
         let client = fake.connect().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let config = config(temp.path());
@@ -956,9 +1126,18 @@ mod tests {
             deleted: vec![path.to_string()],
             ..SyncDiff::default()
         };
-        let (result, updated) = execute_plan(&client, &config, &[], &diff, &snapshot, &[])
-            .await
-            .expect("run");
+        let (result, updated) = execute_plan_with_checkpoint(
+            &client,
+            &config,
+            &[],
+            &diff,
+            &snapshot,
+            &[],
+            &ledger.journal,
+            &ledger.store,
+        )
+        .await
+        .expect("run");
         assert!(result.deleted.is_empty());
         assert!(result.failures.is_empty());
         assert!(!updated.files.contains_key(path));
@@ -969,6 +1148,7 @@ mod tests {
     #[tokio::test]
     async fn execute_plan_delete_failure_keeps_file_and_ledger_row() {
         let fake = crate::test_support::FakeWifiSsp::start().await;
+        let ledger = test_ledger();
         let client = fake.connect().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let config = config(temp.path());
@@ -983,9 +1163,18 @@ mod tests {
             deleted: vec![path.to_string()],
             ..SyncDiff::default()
         };
-        let (result, updated) = execute_plan(&client, &config, &[], &diff, &snapshot, &[])
-            .await
-            .expect("run");
+        let (result, updated) = execute_plan_with_checkpoint(
+            &client,
+            &config,
+            &[],
+            &diff,
+            &snapshot,
+            &[],
+            &ledger.journal,
+            &ledger.store,
+        )
+        .await
+        .expect("run");
         assert!(result.deleted.is_empty());
         assert_eq!(result.failures, vec![path.to_string()]);
         assert!(local.exists());
@@ -999,6 +1188,7 @@ mod tests {
     async fn execute_plan_delete_permission_denied_keeps_file_and_ledger_row() {
         use std::os::unix::fs::PermissionsExt;
 
+        let ledger = test_ledger();
         let fake = crate::test_support::FakeWifiSsp::start().await;
         let client = fake.connect().await;
         let temp = tempfile::tempdir().expect("tempdir");
@@ -1014,9 +1204,18 @@ mod tests {
             deleted: vec![path.to_string()],
             ..SyncDiff::default()
         };
-        let (result, updated) = execute_plan(&client, &config, &[], &diff, &snapshot, &[])
-            .await
-            .expect("run");
+        let (result, updated) = execute_plan_with_checkpoint(
+            &client,
+            &config,
+            &[],
+            &diff,
+            &snapshot,
+            &[],
+            &ledger.journal,
+            &ledger.store,
+        )
+        .await
+        .expect("run");
         assert!(result.deleted.is_empty());
         assert_eq!(result.failures, vec![path.to_string()]);
         assert!(updated.files.contains_key(path), "ledger row must survive");
@@ -1027,6 +1226,7 @@ mod tests {
     #[tokio::test]
     async fn apply_file_change_deleted_failure_keeps_row_and_is_retryable() {
         let fake = crate::test_support::FakeWifiSsp::start().await;
+        let ledger = test_ledger();
         let client = fake.connect().await;
         let temp = tempfile::tempdir().expect("tempdir");
         let config = config(temp.path());
@@ -1039,9 +1239,16 @@ mod tests {
             file: Some(phone_file_help(path, "c-live-del", None)),
             status: crate::events::FileChangeStatus::Deleted,
         };
-        let result = apply_file_change(&client, &config, &deleted, &mut snapshot)
-            .await
-            .expect("apply deleted");
+        let result = apply_file_change_with_checkpoint(
+            &client,
+            &config,
+            &deleted,
+            &mut snapshot,
+            &ledger.journal,
+            &ledger.store,
+        )
+        .await
+        .expect("apply deleted");
         assert!(result.deleted.is_empty());
         assert_eq!(result.failures, vec![path.to_string()]);
         assert!(snapshot.files.contains_key(path));
@@ -1051,9 +1258,16 @@ mod tests {
         // The file no longer exists, so no delete operation is recorded —
         // the ledger row is dropped and the run reports no failure.
         fs::remove_dir(&local).expect("rmdir");
-        let result = apply_file_change(&client, &config, &deleted, &mut snapshot)
-            .await
-            .expect("apply deleted retry");
+        let result = apply_file_change_with_checkpoint(
+            &client,
+            &config,
+            &deleted,
+            &mut snapshot,
+            &ledger.journal,
+            &ledger.store,
+        )
+        .await
+        .expect("apply deleted retry");
         assert!(result.deleted.is_empty());
         assert!(result.failures.is_empty());
         assert!(!snapshot.files.contains_key(path));
