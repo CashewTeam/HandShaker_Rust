@@ -146,6 +146,12 @@ public actor HandShakerRuntime {
     /// Run `body` (the actual FFI call) on the native queue and await its
     /// result. `body` must be self-contained: it captures the request
     /// body and session ids, not actor state.
+    ///
+    /// Cancellation note: the FFI call runs synchronously on the queue
+    /// (Tokio `block_on`), so cancelling the awaiting task does NOT abort
+    /// it — the call still completes on the queue and the result is
+    /// discarded. Long-running work must be started as a transfer/sync id
+    /// and observed via events, exactly as the service contract requires.
     func callNative<T: Sendable>(
         _ body: @escaping @Sendable () throws -> T
     ) async throws -> T {

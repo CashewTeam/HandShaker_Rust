@@ -48,8 +48,16 @@ public final class RuntimeHandle: @unchecked Sendable {
     /// the pointer past the closure: destroy() may run at any time.
     /// Concurrent calls are allowed; only the pointer hand-out is
     /// serialized (P1-6).
+    ///
+    /// Contract (enforced in debug): never call `destroy()` (or deinit)
+    /// from *inside* a `withRuntime` body on the same thread — the drain
+    /// wait would deadlock. A debug build traps instead; release builds
+    /// treat it as a no-op (the handle is then released by deinit).
     @discardableResult
     public func withRuntime<T>(_ body: (OpaquePointer) throws -> T) throws -> T {
+        let threadKey = "hs.inRuntimeCall"
+        Thread.current.threadDictionary[threadKey] = true
+        defer { Thread.current.threadDictionary[threadKey] = nil }
         let ptr: OpaquePointer
         condition.lock()
         if destroyed {
@@ -99,6 +107,13 @@ public final class RuntimeHandle: @unchecked Sendable {
     /// Blocks until in-flight calls drain and the Rust side finishes its
     /// shutdown (P1-6: destroy must never race a call).
     public func destroy() {
+        // Contract guard: destroy() from inside a withRuntime body on the
+        // same thread would deadlock on the drain wait below. Trap in
+        // debug builds (the handle is still released by deinit in release).
+        if Thread.current.threadDictionary["hs.inRuntimeCall"] as? Bool == true {
+            assertionFailure("destroy() must not be called from inside a withRuntime body")
+            return
+        }
         condition.lock()
         guard !destroyed else {
             condition.unlock()

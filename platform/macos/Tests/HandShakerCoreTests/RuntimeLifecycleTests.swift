@@ -167,4 +167,35 @@ final class RuntimeLifecycleTests: XCTestCase {
         bothDone.wait()
         XCTAssertEqual(observed.sorted(), [11, 22], "both concurrent calls must complete")
     }
+
+    func testConcurrentRealFFICallsSucceed() async throws {
+        // Review follow-up: the lease premise is that REAL overlapping FFI
+        // calls are safe (the Rust side serializes on its own executor) —
+        // not just sleep-imitated bodies. Four concurrent real
+        // hs_runtime_diagnostics calls (via the public API) must all
+        // succeed; the actor suspends inside callNative, so the FFI calls
+        // genuinely overlap on the native queue.
+        let runtime = try HandShakerRuntime(config: .defaults)
+        defer { handleShutdown(runtime) }
+        let count = 4
+        var successes = 0
+        await withTaskGroup(of: Bool.self) { group in
+            for _ in 0..<count {
+                group.addTask {
+                    (try? await runtime.diagnostics()) != nil
+                }
+            }
+            for await ok in group where ok {
+                successes += 1
+            }
+        }
+        XCTAssertEqual(successes, count, "all overlapping real FFI calls must succeed")
+    }
+
+    private func handleShutdown(_ runtime: HandShakerRuntime) {
+        // Fire-and-forget: the actor is deallocated with the runtime when
+        // the test ends; an explicit shutdown is still attempted to keep
+        // the native side deterministic.
+        Task { await runtime.shutdown() }
+    }
 }
