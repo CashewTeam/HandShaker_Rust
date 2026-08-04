@@ -61,14 +61,16 @@ extension HandShakerRuntime {
         remotePath: String,
         localPath: String,
         overwrite: Bool = false
-    ) throws -> TransferID {
+    ) async throws -> TransferID {
         let body = try ServicesJSON.encode(
             TransferStartRequest(remotePath: remotePath, localPath: localPath, overwrite: overwrite)
         )
-        return try handle.withRuntime { runtime in
-            try withHsRequestThrowing(body) { ptr, len in
-                try hsCall(as: TransferID.self) {
-                    hs_transfer_start_download(runtime, sessionID, ptr, len)
+        return try await callNative {
+            try self.handle.withRuntime { runtime in
+                try withHsRequestThrowing(body) { ptr, len in
+                    try hsCall(as: TransferID.self) {
+                        hs_transfer_start_download(runtime, sessionID, ptr, len)
+                    }
                 }
             }
         }
@@ -87,14 +89,16 @@ extension HandShakerRuntime {
         remotePath: String,
         localPath: String,
         overwrite: Bool = false
-    ) throws -> TransferID {
+    ) async throws -> TransferID {
         let body = try ServicesJSON.encode(
             TransferStartRequest(remotePath: remotePath, localPath: localPath, overwrite: overwrite)
         )
-        return try handle.withRuntime { runtime in
-            try withHsRequestThrowing(body) { ptr, len in
-                try hsCall(as: TransferID.self) {
-                    hs_transfer_start_upload(runtime, sessionID, ptr, len)
+        return try await callNative {
+            try self.handle.withRuntime { runtime in
+                try withHsRequestThrowing(body) { ptr, len in
+                    try hsCall(as: TransferID.self) {
+                        hs_transfer_start_upload(runtime, sessionID, ptr, len)
+                    }
                 }
             }
         }
@@ -115,14 +119,16 @@ extension HandShakerRuntime {
         files: [BatchTransferItem] = [],
         trees: [TreeTransfer] = [],
         overwrite: Bool = false
-    ) throws -> TransferID {
+    ) async throws -> TransferID {
         let body = try ServicesJSON.encode(
             BatchTransferStartRequest(files: files, trees: trees, overwrite: overwrite)
         )
-        return try handle.withRuntime { runtime in
-            try withHsRequestThrowing(body) { ptr, len in
-                try hsCall(as: TransferID.self) {
-                    hs_transfer_start_batch_download(runtime, sessionID, ptr, len)
+        return try await callNative {
+            try self.handle.withRuntime { runtime in
+                try withHsRequestThrowing(body) { ptr, len in
+                    try hsCall(as: TransferID.self) {
+                        hs_transfer_start_batch_download(runtime, sessionID, ptr, len)
+                    }
                 }
             }
         }
@@ -142,14 +148,16 @@ extension HandShakerRuntime {
         files: [BatchTransferItem] = [],
         trees: [TreeTransfer] = [],
         overwrite: Bool = false
-    ) throws -> TransferID {
+    ) async throws -> TransferID {
         let body = try ServicesJSON.encode(
             BatchTransferStartRequest(files: files, trees: trees, overwrite: overwrite)
         )
-        return try handle.withRuntime { runtime in
-            try withHsRequestThrowing(body) { ptr, len in
-                try hsCall(as: TransferID.self) {
-                    hs_transfer_start_batch_upload(runtime, sessionID, ptr, len)
+        return try await callNative {
+            try self.handle.withRuntime { runtime in
+                try withHsRequestThrowing(body) { ptr, len in
+                    try hsCall(as: TransferID.self) {
+                        hs_transfer_start_batch_upload(runtime, sessionID, ptr, len)
+                    }
                 }
             }
         }
@@ -157,28 +165,34 @@ extension HandShakerRuntime {
 
     /// Cancel a transfer (`hs_transfer_cancel`, result `{"cancelled":true}`).
     /// No-op for transfers already in a terminal state.
-    public func cancelTransfer(_ id: UInt64) throws {
-        try handle.withRuntime { runtime in
-            try hsCallVoid { hs_transfer_cancel(runtime, id) }
+    public func cancelTransfer(_ id: UInt64) async throws {
+        try await callNative {
+            try self.handle.withRuntime { runtime in
+                try hsCallVoid { hs_transfer_cancel(runtime, id) }
+            }
         }
     }
 
     /// Snapshot of one transfer (`hs_transfer_get`). Throws
     /// `.transferNotFound` for unknown ids.
-    public func transfer(_ id: UInt64) throws -> TransferSnapshot {
-        try handle.withRuntime { runtime in
-            try hsCall(as: TransferSnapshot.self) {
-                hs_transfer_get(runtime, id)
+    public func transfer(_ id: UInt64) async throws -> TransferSnapshot {
+        try await callNative {
+            try self.handle.withRuntime { runtime in
+                try hsCall(as: TransferSnapshot.self) {
+                    hs_transfer_get(runtime, id)
+                }
             }
         }
     }
 
     /// Snapshots of all transfers, including the bounded finished history
     /// (`hs_transfer_list`).
-    public func transfers() throws -> [TransferSnapshot] {
-        try handle.withRuntime { runtime in
-            try hsCall(as: [TransferSnapshot].self) {
-                hs_transfer_list(runtime)
+    public func transfers() async throws -> [TransferSnapshot] {
+        try await callNative {
+            try self.handle.withRuntime { runtime in
+                try hsCall(as: [TransferSnapshot].self) {
+                    hs_transfer_list(runtime)
+                }
             }
         }
     }

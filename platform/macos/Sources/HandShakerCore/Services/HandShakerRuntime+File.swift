@@ -71,12 +71,14 @@ extension HandShakerRuntime {
     ///   - path: absolute remote path (relative paths resolve against the
     ///     device root).
     ///   - depth: recursion depth (0 = one level).
-    public func listFiles(sessionID: UInt64, path: String, depth: UInt32 = 1) throws -> [FileEntry] {
+    public func listFiles(sessionID: UInt64, path: String, depth: UInt32 = 1) async throws -> [FileEntry] {
         let body = try ServicesJSON.encode(ListFilesRequest(path: path, depth: depth))
-        return try handle.withRuntime { runtime in
-            try withHsRequestThrowing(body) { ptr, len in
-                try hsCall(as: [FileEntry].self) {
-                    hs_list_files(runtime, sessionID, ptr, len)
+        return try await callNative {
+            try self.handle.withRuntime { runtime in
+                try withHsRequestThrowing(body) { ptr, len in
+                    try hsCall(as: [FileEntry].self) {
+                        hs_list_files(runtime, sessionID, ptr, len)
+                    }
                 }
             }
         }
@@ -86,12 +88,14 @@ extension HandShakerRuntime {
     ///
     /// - Returns: the entry, or `nil` when the path does not exist
     ///   (`{"file":null}`).
-    public func statFile(sessionID: UInt64, path: String) throws -> FileEntry? {
+    public func statFile(sessionID: UInt64, path: String) async throws -> FileEntry? {
         let body = try ServicesJSON.encode(StatFileRequest(path: path))
-        let result = try handle.withRuntime { runtime in
-            try withHsRequestThrowing(body) { ptr, len in
-                try hsCall(as: FileStatResult.self) {
-                    hs_stat_file(runtime, sessionID, ptr, len)
+        let result = try await callNative {
+            try self.handle.withRuntime { runtime in
+                try withHsRequestThrowing(body) { ptr, len in
+                    try hsCall(as: FileStatResult.self) {
+                        hs_stat_file(runtime, sessionID, ptr, len)
+                    }
                 }
             }
         }
@@ -106,14 +110,16 @@ extension HandShakerRuntime {
         path: String,
         depth: UInt32 = 1,
         exclusions: [String] = []
-    ) throws -> UInt64 {
+    ) async throws -> UInt64 {
         let body = try ServicesJSON.encode(
             CountFilesRequest(path: path, depth: depth, exclusions: exclusions)
         )
-        let result = try handle.withRuntime { runtime in
-            try withHsRequestThrowing(body) { ptr, len in
-                try hsCall(as: CountResult.self) {
-                    hs_count_files(runtime, sessionID, ptr, len)
+        let result = try await callNative {
+            try self.handle.withRuntime { runtime in
+                try withHsRequestThrowing(body) { ptr, len in
+                    try hsCall(as: CountResult.self) {
+                        hs_count_files(runtime, sessionID, ptr, len)
+                    }
                 }
             }
         }
@@ -122,21 +128,25 @@ extension HandShakerRuntime {
 
     /// Create one remote directory (`hs_create_directory`, result
     /// `{"created":true}`).
-    public func createDirectory(sessionID: UInt64, path: String) throws {
+    public func createDirectory(sessionID: UInt64, path: String) async throws {
         let body = try ServicesJSON.encode(CreateDirectoryRequest(path: path))
-        try handle.withRuntime { runtime in
-            try withHsRequestThrowing(body) { ptr, len in
-                try hsCallVoid { hs_create_directory(runtime, sessionID, ptr, len) }
+        try await callNative {
+            try self.handle.withRuntime { runtime in
+                try withHsRequestThrowing(body) { ptr, len in
+                    try hsCallVoid { hs_create_directory(runtime, sessionID, ptr, len) }
+                }
             }
         }
     }
 
     /// Move/rename a remote path (`hs_move_path`, result `{"moved":true}`).
-    public func movePath(sessionID: UInt64, source: String, target: String) throws {
+    public func movePath(sessionID: UInt64, source: String, target: String) async throws {
         let body = try ServicesJSON.encode(MovePathRequest(source: source, target: target))
-        try handle.withRuntime { runtime in
-            try withHsRequestThrowing(body) { ptr, len in
-                try hsCallVoid { hs_move_path(runtime, sessionID, ptr, len) }
+        try await callNative {
+            try self.handle.withRuntime { runtime in
+                try withHsRequestThrowing(body) { ptr, len in
+                    try hsCallVoid { hs_move_path(runtime, sessionID, ptr, len) }
+                }
             }
         }
     }
@@ -154,14 +164,16 @@ extension HandShakerRuntime {
         _ paths: [String],
         trash: Bool = false,
         sync: Bool = false
-    ) throws -> DeleteResult {
+    ) async throws -> DeleteResult {
         let body = try ServicesJSON.encode(
             DeletePathsRequest(paths: paths, trash: trash, sync: sync)
         )
-        return try handle.withRuntime { runtime in
-            try withHsRequestThrowing(body) { ptr, len in
-                try hsCall(as: DeleteResult.self) {
-                    hs_delete_paths(runtime, sessionID, ptr, len)
+        return try await callNative {
+            try self.handle.withRuntime { runtime in
+                try withHsRequestThrowing(body) { ptr, len in
+                    try hsCall(as: DeleteResult.self) {
+                        hs_delete_paths(runtime, sessionID, ptr, len)
+                    }
                 }
             }
         }
@@ -175,13 +187,15 @@ extension HandShakerRuntime {
         sessionID: UInt64,
         _ items: [UpdateFileInfoItem],
         isSync: Bool = false
-    ) throws {
+    ) async throws {
         let body = try ServicesJSON.encode(
             UpdateFileInfoRequest(files: items, isSync: isSync)
         )
-        try handle.withRuntime { runtime in
-            try withHsRequestThrowing(body) { ptr, len in
-                try hsCallVoid { hs_update_file_info(runtime, sessionID, ptr, len) }
+        try await callNative {
+            try self.handle.withRuntime { runtime in
+                try withHsRequestThrowing(body) { ptr, len in
+                    try hsCallVoid { hs_update_file_info(runtime, sessionID, ptr, len) }
+                }
             }
         }
     }

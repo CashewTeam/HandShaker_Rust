@@ -25,11 +25,13 @@ extension HandShakerRuntime {
     ///   - sessionID: open session id.
     ///   - path: absolute remote directory to watch.
     ///   - enabled: `true` registers, `false` unregisters (default true).
-    public func monitorFolder(sessionID: UInt64, path: String, enabled: Bool = true) throws {
+    public func monitorFolder(sessionID: UInt64, path: String, enabled: Bool = true) async throws {
         let body = try ServicesJSON.encode(MonitorFolderRequest(path: path, enabled: enabled))
-        try handle.withRuntime { runtime in
-            try withHsRequestThrowing(body) { ptr, len in
-                try hsCallVoid { hs_monitor_folder(runtime, sessionID, ptr, len) }
+        try await callNative {
+            try self.handle.withRuntime { runtime in
+                try withHsRequestThrowing(body) { ptr, len in
+                    try hsCallVoid { hs_monitor_folder(runtime, sessionID, ptr, len) }
+                }
             }
         }
     }

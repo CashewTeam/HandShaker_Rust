@@ -91,4 +91,80 @@ final class RuntimeLifecycleTests: XCTestCase {
         XCTAssertEqual(decoded?.eventCapacity, 64)
         XCTAssertNil(decoded?.stateDirUTF8)
     }
+
+    // MARK: - P1-6 lifecycle lease
+
+    func testConcurrentCallsRunAndDestroyDrainsInflight() throws {
+        // P1-6: ordinary calls run concurrently (no global serial lock) and
+        // destroy() waits for in-flight calls to drain before freeing the
+        // handle. Deterministic: all calls enter withRuntime first, then
+        // destroy races their in-flight bodies.
+        let runtime = try RuntimeHandle(configJson: "{}")
+        let count = 4
+        let queue = DispatchQueue(label: "hs.concurrent", attributes: .concurrent)
+        let entered = DispatchSemaphore(value: 0)
+        let allFinished = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var completed = 0
+        for _ in 0..<count {
+            queue.async {
+                _ = try? runtime.withRuntime { _ in
+                    entered.signal() // in-flight counter already bumped
+                    Thread.sleep(forTimeInterval: 0.1) // simulated call
+                    return 0
+                }
+                lock.lock()
+                completed += 1
+                lock.unlock()
+                if completed == count {
+                    allFinished.signal()
+                }
+            }
+        }
+        for _ in 0..<count {
+            entered.wait()
+        }
+        // All four calls are inside withRuntime now; destroy must block
+        // until they drain.
+        runtime.destroy()
+        XCTAssertEqual(completed, count, "destroy must wait for in-flight calls")
+        XCTAssertThrowsError(try runtime.withRuntime { _ in 0 }) { error in
+            guard case .runtimeClosed = error as? HandShakerError else {
+                return XCTFail("expected .runtimeClosed after destroy, got \(error)")
+            }
+        }
+    }
+
+    func testConcurrentCallsBothSucceedWithOneLeaseEach() throws {
+        // Two overlapping withRuntime calls must both succeed (the lease
+        // hands out the same pointer twice — the Rust side serializes
+        // internally). The old global lock would also pass this, but it
+        // also serialized unrelated network calls; the lease keeps the
+        // pointer safe without blocking.
+        let runtime = try RuntimeHandle(configJson: "{}")
+        defer { runtime.destroy() }
+        let queue = DispatchQueue(label: "hs.concurrent.2", attributes: .concurrent)
+        let barrier = DispatchSemaphore(value: 0)
+        let results = NSLock()
+        var observed: [Int] = []
+        let bothDone = DispatchSemaphore(value: 0)
+        var finished = 0
+        for value in [11, 22] {
+            queue.async {
+                let result = try? runtime.withRuntime { _ -> Int in
+                    barrier.wait()
+                    return value
+                }
+                results.lock()
+                if let result = result { observed.append(result) }
+                results.unlock()
+                finished += 1
+                if finished == 2 { bothDone.signal() }
+            }
+        }
+        barrier.signal()
+        barrier.signal()
+        bothDone.wait()
+        XCTAssertEqual(observed.sorted(), [11, 22], "both concurrent calls must complete")
+    }
 }

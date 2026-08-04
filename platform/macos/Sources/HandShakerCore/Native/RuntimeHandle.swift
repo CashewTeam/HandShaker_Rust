@@ -4,15 +4,22 @@ import HandShakerFFI
 /// Owns an `HsRuntime` handle (the Rust runtime: tokio executor +
 /// application runtime).
 ///
-/// Threading contract (handshaker_ffi.h): `hs_runtime_destroy` must never
-/// run concurrently with ordinary calls on the same handle. Every FFI call
-/// against the handle is therefore serialized through the same `NSLock`
-/// that guards `destroy()`, so a destroy either happens-before a call or
-/// the call sees the handle already destroyed and fails fast with
-/// `runtimeClosed` instead of touching freed memory.
+/// Threading contract (P1-6): ordinary FFI calls may run **concurrently**
+/// (the Rust side serializes internally via its own Tokio executor); a
+/// short critical section hands out the raw pointer and bumps an
+/// in-flight counter, and `destroy()` marks the handle closing (new calls
+/// fail fast with `runtimeClosed`), waits for in-flight calls to drain,
+/// then frees the handle. `hs_runtime_destroy` therefore never runs
+/// concurrently with a call — the lease replaces the old global NSLock
+/// that serialized every network call and blocked one 30s request behind
+/// another.
+///
+/// Contract: never call `destroy()` (or deinit) from *inside* a
+/// `withRuntime` body — that would deadlock on the drain wait.
 public final class RuntimeHandle: @unchecked Sendable {
-    private let lock = NSLock()
+    private let condition = NSCondition()
     private var rawPtr: OpaquePointer?
+    private var inFlight = 0
     private var destroyed = false
 
     /// Create a runtime from an `FfiRuntimeConfig` JSON body
@@ -39,12 +46,30 @@ public final class RuntimeHandle: @unchecked Sendable {
     /// The raw handle pointer, valid only inside `withRuntime`.
     /// Callers (Services layer) must use `withRuntime` and never capture
     /// the pointer past the closure: destroy() may run at any time.
+    /// Concurrent calls are allowed; only the pointer hand-out is
+    /// serialized (P1-6).
     @discardableResult
     public func withRuntime<T>(_ body: (OpaquePointer) throws -> T) throws -> T {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let ptr = rawPtr else {
+        let ptr: OpaquePointer
+        condition.lock()
+        if destroyed {
+            condition.unlock()
             throw HandShakerError.runtimeClosed("runtime handle is destroyed")
+        }
+        guard let handle = rawPtr else {
+            condition.unlock()
+            throw HandShakerError.runtimeClosed("runtime handle is destroyed")
+        }
+        inFlight += 1
+        ptr = handle
+        condition.unlock()
+        defer {
+            condition.lock()
+            inFlight -= 1
+            if inFlight == 0 {
+                condition.signal()
+            }
+            condition.unlock()
         }
         return try body(ptr)
     }
@@ -71,15 +96,24 @@ public final class RuntimeHandle: @unchecked Sendable {
 
     /// Shut the runtime down and release the handle. Idempotent; safe to
     /// call from any thread and safe on an already-destroyed handle.
-    /// Blocks until the Rust side finishes its shutdown.
+    /// Blocks until in-flight calls drain and the Rust side finishes its
+    /// shutdown (P1-6: destroy must never race a call).
     public func destroy() {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !destroyed else { return }
+        condition.lock()
+        guard !destroyed else {
+            condition.unlock()
+            return
+        }
         destroyed = true
-        guard let ptr = rawPtr else { return }
+        while inFlight > 0 {
+            condition.wait()
+        }
+        let ptr = rawPtr
         rawPtr = nil
-        hs_runtime_destroy(ptr)
+        condition.unlock()
+        if let ptr = ptr {
+            hs_runtime_destroy(ptr)
+        }
     }
 
     deinit {

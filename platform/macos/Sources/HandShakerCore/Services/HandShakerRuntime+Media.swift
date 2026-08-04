@@ -36,33 +36,39 @@ extension HandShakerRuntime {
     // MARK: Media
 
     /// Photo library snapshot (`hs_media_photo_library`, request `{}`).
-    public func photoLibrary(sessionID: UInt64) throws -> PhotoLibrary {
-        try handle.withRuntime { runtime in
-            try withHsRequestThrowing("{}") { ptr, len in
-                try hsCall(as: PhotoLibrary.self) {
-                    hs_media_photo_library(runtime, sessionID, ptr, len)
+    public func photoLibrary(sessionID: UInt64) async throws -> PhotoLibrary {
+        try await callNative {
+            try self.handle.withRuntime { runtime in
+                try withHsRequestThrowing("{}") { ptr, len in
+                    try hsCall(as: PhotoLibrary.self) {
+                        hs_media_photo_library(runtime, sessionID, ptr, len)
+                    }
                 }
             }
         }
     }
 
     /// Video library snapshot (`hs_media_video_library`, request `{}`).
-    public func videoLibrary(sessionID: UInt64) throws -> VideoLibrary {
-        try handle.withRuntime { runtime in
-            try withHsRequestThrowing("{}") { ptr, len in
-                try hsCall(as: VideoLibrary.self) {
-                    hs_media_video_library(runtime, sessionID, ptr, len)
+    public func videoLibrary(sessionID: UInt64) async throws -> VideoLibrary {
+        try await callNative {
+            try self.handle.withRuntime { runtime in
+                try withHsRequestThrowing("{}") { ptr, len in
+                    try hsCall(as: VideoLibrary.self) {
+                        hs_media_video_library(runtime, sessionID, ptr, len)
+                    }
                 }
             }
         }
     }
 
     /// Audio library snapshot (`hs_media_audio_library`, request `{}`).
-    public func audioLibrary(sessionID: UInt64) throws -> AudioLibrary {
-        try handle.withRuntime { runtime in
-            try withHsRequestThrowing("{}") { ptr, len in
-                try hsCall(as: AudioLibrary.self) {
-                    hs_media_audio_library(runtime, sessionID, ptr, len)
+    public func audioLibrary(sessionID: UInt64) async throws -> AudioLibrary {
+        try await callNative {
+            try self.handle.withRuntime { runtime in
+                try withHsRequestThrowing("{}") { ptr, len in
+                    try hsCall(as: AudioLibrary.self) {
+                        hs_media_audio_library(runtime, sessionID, ptr, len)
+                    }
                 }
             }
         }
@@ -82,17 +88,19 @@ extension HandShakerRuntime {
         images: [ImageFile] = [],
         videos: [VideoFile] = [],
         audioAlbums: [AudioAlbum] = []
-    ) throws -> ThumbnailResult {
+    ) async throws -> ThumbnailResult {
         let request = ThumbnailRequest(
             images: images.compactMap(\.path).map(ThumbnailEntry.init(path:)),
             videos: videos.compactMap(\.path).map(ThumbnailEntry.init(path:)),
             audioAlbums: audioAlbums.compactMap(\.path).map(ThumbnailEntry.init(path:))
         )
         let body = try ServicesJSON.encode(request)
-        return try handle.withRuntime { runtime in
-            try withHsRequestThrowing(body) { ptr, len in
-                try hsCall(as: ThumbnailResult.self) {
-                    hs_media_thumbnail(runtime, sessionID, ptr, len)
+        return try await callNative {
+            try self.handle.withRuntime { runtime in
+                try withHsRequestThrowing(body) { ptr, len in
+                    try hsCall(as: ThumbnailResult.self) {
+                        hs_media_thumbnail(runtime, sessionID, ptr, len)
+                    }
                 }
             }
         }
@@ -100,12 +108,14 @@ extension HandShakerRuntime {
 
     /// EXIF metadata of one remote image (`hs_media_fetch_exif`, request
     /// `{"path":"..."}`).
-    public func fetchExif(sessionID: UInt64, path: String) throws -> ExifData {
+    public func fetchExif(sessionID: UInt64, path: String) async throws -> ExifData {
         let body = try ServicesJSON.encode(ExifRequest(path: path))
-        return try handle.withRuntime { runtime in
-            try withHsRequestThrowing(body) { ptr, len in
-                try hsCall(as: ExifData.self) {
-                    hs_media_fetch_exif(runtime, sessionID, ptr, len)
+        return try await callNative {
+            try self.handle.withRuntime { runtime in
+                try withHsRequestThrowing(body) { ptr, len in
+                    try hsCall(as: ExifData.self) {
+                        hs_media_fetch_exif(runtime, sessionID, ptr, len)
+                    }
                 }
             }
         }
@@ -121,8 +131,8 @@ extension HandShakerRuntime {
     public func mergePhotoChange(
         library: PhotoLibrary,
         change: MediaChange
-    ) throws -> PhotoLibrary {
-        try mergeMediaChange(
+    ) async throws -> PhotoLibrary {
+        try await mergeMediaChange(
             kind: "photo",
             libraryJSON: ServicesJSON.encode(library),
             changeJSON: ServicesJSON.encode(change)
@@ -135,8 +145,8 @@ extension HandShakerRuntime {
     public func mergeVideoChange(
         library: VideoLibrary,
         change: MediaChange
-    ) throws -> VideoLibrary {
-        try mergeMediaChange(
+    ) async throws -> VideoLibrary {
+        try await mergeMediaChange(
             kind: "video",
             libraryJSON: ServicesJSON.encode(library),
             changeJSON: ServicesJSON.encode(change)
@@ -149,8 +159,8 @@ extension HandShakerRuntime {
     public func mergeAudioChange(
         library: AudioLibrary,
         change: MediaChange
-    ) throws -> AudioLibrary {
-        try mergeMediaChange(
+    ) async throws -> AudioLibrary {
+        try await mergeMediaChange(
             kind: "audio",
             libraryJSON: ServicesJSON.encode(library),
             changeJSON: ServicesJSON.encode(change)
@@ -163,17 +173,19 @@ extension HandShakerRuntime {
         kind: String,
         libraryJSON: String,
         changeJSON: String
-    ) throws -> T {
-        try handle.withRuntime { runtime in
-            try withHsString(kind) { kindPtr, kindLen in
-                try withHsString(libraryJSON) { libraryPtr, libraryLen in
-                    try withHsString(changeJSON) { changePtr, changeLen in
-                        try hsCall(as: T.self) {
-                            hs_media_merge_change(
-                                runtime, kindPtr, kindLen,
-                                libraryPtr, libraryLen,
-                                changePtr, changeLen
-                            )
+    ) async throws -> T {
+        try await callNative {
+            try self.handle.withRuntime { runtime in
+                try withHsString(kind) { kindPtr, kindLen in
+                    try withHsString(libraryJSON) { libraryPtr, libraryLen in
+                        try withHsString(changeJSON) { changePtr, changeLen in
+                            try hsCall(as: T.self) {
+                                hs_media_merge_change(
+                                    runtime, kindPtr, kindLen,
+                                    libraryPtr, libraryLen,
+                                    changePtr, changeLen
+                                )
+                            }
                         }
                     }
                 }
