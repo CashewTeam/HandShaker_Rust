@@ -3443,3 +3443,124 @@ async fn shutdown_during_start_sync_never_orphans_the_task() {
         .expect_err("runtime is closed");
     assert_eq!(status.code, PublicErrorCode::RuntimeClosed);
 }
+
+// ---------------------------------------------------------------------------
+// P1-9 media pagination: slice_page + thumbnail stripping
+// ---------------------------------------------------------------------------
+
+#[test]
+fn slice_page_sorts_by_media_id_and_paginates() {
+    let ids = [5u64, 1, 9, 3];
+    let items: Vec<u64> = ids.to_vec();
+    let (page, next) = crate::media::slice_page(items, None, 2, |&id| Some(id));
+    assert_eq!(page, vec![1, 3]);
+    assert_eq!(next, Some(3));
+    let (page2, next2) = crate::media::slice_page(vec![5u64, 1, 9, 3], next, 2, |&id| Some(id));
+    assert_eq!(page2, vec![5, 9]);
+    assert_eq!(next2, None);
+}
+
+#[test]
+fn slice_page_empty_library_returns_empty_page() {
+    let (page, next) = crate::media::slice_page(Vec::<u64>::new(), None, 500, |&id| Some(id));
+    assert!(page.is_empty());
+    assert_eq!(next, None);
+}
+
+#[test]
+fn slice_page_zero_limit_does_not_panic() {
+    let (page, next) = crate::media::slice_page(vec![1u64, 2], None, 0, |&id| Some(id));
+    assert!(page.is_empty());
+    assert_eq!(next, None);
+}
+
+#[test]
+fn slice_page_cursor_past_end_returns_empty_page() {
+    let (page, next) = crate::media::slice_page(vec![1u64, 2], Some(999), 500, |&id| Some(id));
+    assert!(page.is_empty());
+    assert_eq!(next, None);
+}
+
+#[test]
+fn slice_page_idless_items_sort_first_and_do_not_fake_end_of_library() {
+    // Items without ids sort first (unwrap_or(0)); a page that is not the
+    // last must still return a next_cursor from its id-bearing items.
+    #[derive(Clone)]
+    struct Item {
+        id: Option<u64>,
+        tag: &'static str,
+    }
+    let items = vec![
+        Item { id: None, tag: "no-id-1" },
+        Item { id: None, tag: "no-id-2" },
+        Item { id: Some(10), tag: "ten" },
+        Item { id: Some(20), tag: "twenty" },
+    ];
+    let (page, next) = crate::media::slice_page(items, None, 2, |item| item.id);
+    assert_eq!(page.len(), 2);
+    assert!(page[0].id.is_none());
+    assert!(page[1].id.is_none());
+    // The page itself has no id to key on, so the cursor falls back to the
+    // first id-bearing item of the remainder — pagination continues and no
+    // data is lost.
+    assert_eq!(next, Some(10), "id-less page must not fake end of library");
+    // With ids present on the page, next_cursor is the last id even if the
+    // tail of the full list is id-less.
+    let items2 = vec![
+        Item { id: Some(1), tag: "one" },
+        Item { id: Some(2), tag: "two" },
+        Item { id: Some(3), tag: "three" },
+        Item { id: None, tag: "no-id-tail" },
+    ];
+    let (page2, next2) = crate::media::slice_page(items2, None, 3, |item| item.id);
+    // Sorted order is [None, 1, 2, 3]: the id-less item lands first, the
+    // page is [None, 1, 2] and pagination continues from id 2.
+    assert_eq!(page2.len(), 3);
+    assert_eq!(next2, Some(2));
+    let (page3, next3) = crate::media::slice_page(
+        vec![
+            Item { id: Some(1), tag: "one" },
+            Item { id: Some(2), tag: "two" },
+            Item { id: Some(3), tag: "three" },
+            Item { id: None, tag: "no-id-tail" },
+        ],
+        next2,
+        500,
+        |item| item.id,
+    );
+    assert_eq!(page3.len(), 1);
+    assert_eq!(page3[0].tag, "three");
+    assert_eq!(next3, None, "last page terminates");
+}
+
+#[test]
+fn strip_photo_thumbnails_also_strips_album_covers() {
+    use crate::media::{ImageAlbumDto, ImageFileDto, PhotoLibraryDto};
+    let mut library = PhotoLibraryDto {
+        images: vec![ImageFileDto {
+            path: Some("/a.jpg".to_string()),
+            thumbnail: Some(vec![0xFF, 0xD8]),
+            ..Default::default()
+        }],
+        albums: vec![ImageAlbumDto {
+            path: Some("/album".to_string()),
+            album_id: Some(1),
+            name: Some("A".to_string()),
+            cover_image: Some(Box::new(ImageFileDto {
+                path: Some("/cover.jpg".to_string()),
+                thumbnail: Some(vec![0xFF, 0xD8]),
+                thumbnail_error: true,
+                ..Default::default()
+            })),
+        }],
+        camera_album_id: None,
+        next_cursor: None,
+    };
+    crate::media::strip_photo_thumbnails(&mut library);
+    assert!(library.images[0].thumbnail.is_none());
+    assert!(!library.images[0].thumbnail_error);
+    let cover = library.albums[0].cover_image.as_ref().expect("cover kept");
+    assert!(cover.thumbnail.is_none(), "album cover thumbnail must be stripped");
+    assert!(!cover.thumbnail_error);
+    assert_eq!(cover.path.as_deref(), Some("/cover.jpg"), "identity fields survive");
+}

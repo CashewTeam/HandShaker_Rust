@@ -151,12 +151,24 @@ pub const MEDIA_PAGE_MAX_LIMIT: usize = 1000;
 /// media_id (missing ids sort first) so the cursor is stable across
 /// refreshes; `cursor` is the last-visible media_id of the previous page.
 /// Returns (page, next_cursor) — `next_cursor` is `None` on the last page.
+///
+/// Defensive properties (P1-9 review):
+/// - `limit == 0` returns an empty page instead of panicking;
+/// - a trailing item without a media_id does not truncate pagination:
+///   `next_cursor` falls back to the last id-bearing item on the page
+///   (a page whose items all lack ids returns `None` — such a library
+///   cannot be keyed, which callers should treat as one-shot);
+/// - keyset semantics assume ids are unique within a page; duplicate
+///   ids would skip same-value boundary items (documented precondition).
 pub fn slice_page<T: Clone>(
     mut items: Vec<T>,
     cursor: Option<u64>,
     limit: usize,
     media_id: impl Fn(&T) -> Option<u64>,
 ) -> (Vec<T>, Option<u64>) {
+    if limit == 0 {
+        return (Vec::new(), None);
+    }
     items.sort_by_key(|item| media_id(item).unwrap_or(0));
     let start = match cursor {
         Some(cursor) => items
@@ -168,7 +180,12 @@ pub fn slice_page<T: Clone>(
     let end = (start + limit).min(items.len());
     let page = items[start..end].to_vec();
     let next = if end < items.len() {
-        media_id(&items[end - 1])
+        // Last-visible id, walking back over trailing id-less items so a
+        // None tail cannot fake "end of library".
+        page.iter()
+            .rev()
+            .find_map(&media_id)
+            .or_else(|| items[end..].iter().find_map(&media_id))
     } else {
         None
     };
@@ -181,6 +198,14 @@ pub fn strip_photo_thumbnails(library: &mut PhotoLibraryDto) {
     for image in &mut library.images {
         image.thumbnail = None;
         image.thumbnail_error = false;
+    }
+    // Album covers carry a full ImageFileDto — strip it too, otherwise
+    // thumbnail bytes still leak into the list response.
+    for album in &mut library.albums {
+        if let Some(cover) = album.cover_image.as_mut() {
+            cover.thumbnail = None;
+            cover.thumbnail_error = false;
+        }
     }
 }
 

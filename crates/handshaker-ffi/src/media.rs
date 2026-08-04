@@ -48,6 +48,7 @@ enum MediaPageRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MediaPageRequestRaw {
     limit: Option<usize>,
     cursor: Option<u64>,
