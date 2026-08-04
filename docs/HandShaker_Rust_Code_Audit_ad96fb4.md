@@ -1089,6 +1089,23 @@ run: bash scripts/swift-device-acceptance.sh || true
 - AddressSanitizer/ThreadSanitizer 可行子集；
 - Release artifact、checksum、SBOM 上传。
 
+### 决策（已评估，不执行）
+
+用户 2026-08-04 平台决策：本仓库定位为 **Rust 后端**（不做 GUI 应用工程），
+**现阶段适配目标为现代 macOS（ARM64）**，其他平台**暂不承诺适配**，但架构
+按未来多平台设计（transport/平台实现隔离在 Core，Application 为 UI 无关
+契约，FFI 为稳定 C ABI）。因此：
+
+- **不新增** Ubuntu/Windows CI job（无对应平台交付承诺，构建/测试通过
+  不能替代真实平台验收，且当前无维护资源）；
+- macOS 构建已在 P1-10 升级为 **arm64+x86_64 universal + 静态 libusb**
+  （`scripts/build-ffi-macos.sh`），CI 已验证；
+- Linux/Windows 的 FFI 产物、C# PInvoke smoke 与 USB driver 说明留待
+  平台决策变更时再实施（AGENTS.md §18.7 的声称前提：真做之前不得声称
+  跨平台可用）；
+- 其余低成本项（Frame/protobuf/event JSON fuzz、ASan/TSan 子集、
+  Release artifact + checksum）可在后续 CI 迭代按需加入，不阻塞本次审计。
+
 ---
 
 ## P2-4：Wire log 会完整记录原始协议负载
