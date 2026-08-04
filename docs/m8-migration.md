@@ -103,7 +103,7 @@
 > **历史快照**:本节记录 2965f64 时点的核对结果,表格中过期条目(如
 > Application API `"1.0.0"`、FFI 21 导出 ABI 1.1.0、`hs_create_directory`/
 > `hs_ping` 未导出、`generate-ffi-header.sh` 未建)反映当时状态;
-> 最新状态见 §8(M8.1 Phase A:ABI 1.2.0 / 23 导出 / Application preview)。
+> 最新状态见 §12 与 `docs/ffi-v1.md`(ABI 1.5.0 / 52 导出 / Application preview)。
 > 核对范围:CLI 命令迁移矩阵、Application 冻结条款、FFI 导出与未完成条目、
 > Phase 7 脚本/产物。核对方式:逐命令/逐导出 grep 代码,与 §4/§5 记录比对。
 
@@ -297,6 +297,17 @@ connect/disconnect/get session、list files、subscribe/next/destroy。
   落在指定 tempdir)、FFI `runtime_config_state_dir_and_wire_log_are_applied`、
   Core `from_dir_roots_state_file_in_config_dir`。
 
+### 9.1a Wire log 敏感度收口(P2-4)
+
+- wire log **默认关闭**;开启后默认 **header-only**(只记录方向/type/长度,
+  不含 payload);
+- payload hex dump 需显式 opt-in(`RuntimeConfig.wire_log_payload` /
+  FFI `wire_log_payload`,默认 `false`)——payload 可能含剪贴板文本、路径
+  与媒体字节,文档与 UI 必须提示敏感;
+- 日志文件 64 MiB 轮转(`.1`/`.2` 保留),不再跨运行无界累积;
+- Core `WireLog::open(path, payload)` 双参数化;FFI `hs_runtime_diagnostics`
+  的 `json_contract` 未变(无 ABI 变化)。
+
 ### 9.2 Registry 并发模型(B1)
 
 - `ActiveSession` 改为 `Arc<ActiveSession>`(state 用 `AtomicU8` 存
@@ -472,3 +483,49 @@ connect/disconnect/get session、list files、subscribe/next/destroy。
   (Phase D 范围);`RemoteFileChangeDto` 仅路径摘要(全元数据后续可加,
   不破坏 schema);media album payload 未桥接(MediaChangeItemDto 子集);
 - batch 传输仍无逐文件进度事件(任务面 start_* 有)。
+
+## 12. M8.5 审计收尾记录(2026-08-04)
+
+对应 `docs/HandShaker_Rust_Code_Audit_ad96fb4.md` 全部 20 项(P0×5/P1×10/P2×5)
+修复,提交链 `0405a53`→`71a050f`。本节只记录与既有文档/契约相关的兼容性结论:
+
+### 12.1 媒体库分页(P1-9)——向后兼容扩展
+
+- `hs_media_photo/video/audio_library` 请求 `{}` 行为不变(全量快照);
+  `{"limit":N,"cursor":M}` 新增分页(默认 500/上限 1000,超限
+  `InvalidArgument`);响应新增 `next_cursor`(serde default,旧解析器兼容);
+- 列表响应**移除缩略图字节**(metadata-only):FFI 层本就以
+  `hs_media_thumbnail`(磁盘 cache path)为唯一字节接口,core 库响应中的
+  `thumbnail` 字段由 Application 剥离——依赖旧库响应内嵌字节的调用方
+  需改用 thumbnail 接口(当前无此类调用方);
+- `slice_page` keyset 语义:按 media_id 排序切片;id-less 项排最前且
+  首页拉入式回退,保证无丢无重(详见 media.rs 文档注释)。
+
+### 12.2 Apple 产物(P1-10)
+
+- `scripts/build-ffi-macos.sh` 现产出 arm64+x86_64 universal
+  `dist/apple/` 与 XCFramework;`LIBUSB_STATIC=1` 静态链接 libusb
+  (arm64 用 Homebrew .a,x86_64 自动 vendored 编译),产物无
+  libusb 动态依赖;x86_64 std 缺失时 `HS_X86_CARGO` 逃生舱;
+- Swift Package 的 binaryTarget 不变(路径
+  `platform/macos/Artifacts/HandShakerFFI.xcframework`)。
+
+### 12.3 wire log(P2-4)
+
+见 §9.1a:默认关闭 → header-only → payload opt-in(`wire_log_payload`),
+64 MiB 轮转;`RuntimeConfig` 与 FFI config JSON 均新增 `wire_log_payload`
+(可选字段,缺省 false,旧配置兼容)。
+
+### 12.4 watch 语义收紧(P1-2)
+
+见 `docs/application-api-v1.md` §4 同步条目:`SyncWatchApplied` 由
+`SyncRunResultDto` 直包改为结构化 `{profile_id, session_id, result}`
+(JSON kind token 不变);Lagged/应用失败后 watch 停止并置
+`reconciliation_required`,`start_sync_watch` 拒绝直至重新完整同步。
+
+### 12.5 遗留
+
+- 真机媒体库分页端到端(大数据量多页)未验收——本地切片逻辑已由
+  单元测试覆盖,手机协议侧无分页读取(网络仍为全量快照);
+- Swift SDK 正式打包(XCFramework + Package 已就绪)与上架签名/公证
+  决策待用户确认。

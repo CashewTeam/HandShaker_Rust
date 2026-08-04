@@ -125,14 +125,19 @@ impl HandShakerRuntime {
 - `state_dir` 真实生效:连接、信任(Phase D/D3)记录、host UUID 与 sync
   ledger(Phase D/D6)写入 `state_dir`(缺省为 Core 默认配置目录);
   `wire_log` 真实开启线路日志(默认关闭)。
-- 同步(Phase D/D6):`plan_sync` 只读预检(不触网之外的动作);
-  `start_sync` 校验 plan 可执行后后台执行,ledger 仅在运行完整结束后
-  原子提交(per-file 失败聚合进 `SyncRunResultDto`,transport 级失败不
-  提交);`stop_sync` 有界 join + abort,且不会误删并发重注册的新 job;
-  `start_sync_watch` 与运行中 job 互斥(锁内判定),watch 事件流 Closed
+- 同步(Phase D/D6,watch 语义按 P1-2 收紧):`plan_sync` 只读预检(不触网
+  之外的动作);`start_sync` 校验 plan 可执行后后台执行,ledger 仅在运行
+  完整结束后原子提交(per-file 失败聚合进 `SyncRunResultDto`,transport 级
+  失败不提交);`stop_sync` 有界 join + abort,且不会误删并发重注册的新
+  job;`start_sync_watch` 与运行中 job 互斥(锁内判定),watch 事件流 Closed
   时 `monitoring=false` + `last_error=ConnectionLost`;watch 批次应用后
-  发布 `BackendEvent::SyncWatchApplied(SyncRunResultDto)`,事件 Lagged
-  记录为 `last_error` 并发布 `Warning`(提示全量同步对账)。
+  发布结构化 `BackendEvent::SyncWatchApplied { profile_id, session_id,
+  result }`(kind=sync_watch_applied,result 为 `SyncRunResultDto`);
+  **事件 Lagged 或批次应用失败后 watch 停止**并置
+  `SyncStatusDto.reconciliation_required=true` + 发布 `Warning`(提示全量
+  同步对账),此时 `start_sync_watch` 被拒绝直到 `sync` 重新完整运行
+  (reconciliation_required 清除);`SyncStatusDto` 新增
+  `reconciliation_required`/`last_sequence_gap`(serde default,旧 JSON 兼容)。
 - `monitor_folder`(Phase D/D6):注册/注销手机端目录监控,事件经事件桥
   以 `RemoteFileChanged` 送达(含 `files`/`statuses` 完整元数据)。
 - `session_client()` 过渡入口已移除(Phase D/3):CLI 全部命令走

@@ -77,12 +77,12 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
   全部告警修复（collapsible-if/match-result-ok/io-other-error/needless-borrow
   等，行为不变）；`BackendEvent::SessionStateChanged` 装箱为
   `Box<SessionSnapshot>`（serde JSON 输出不变，Application 事件 API 源码级调整）。
-- **M8.1 Phase A 契约止血（进行中）**：FFI ABI 单一事实来源建立——Header 注释、
+- **M8.1 Phase A 契约止血（已完成）**：FFI ABI 单一事实来源建立——Header 注释、
   `docs/ffi-v1.md` 与新增 `docs/ffi-abi-snapshot.md` 全部对齐 ABI 1.2.0；
   `scripts/check-ffi-abi.py` 校验符号/签名/ABI 版本注释/snapshot 一致性，
   CI 新增 ABI 检查与 C/Swift smoke；`APPLICATION_API_VERSION` 改为
   `1.0.0-preview.1`（v1 契约收口前允许破坏性修改，见 `docs/application-api-v1.md`）。
-- **M8.1 Phase B Runtime 并发修复（进行中）**：`state_dir`/`wire_log` 配置
+- **M8.1 Phase B Runtime 并发修复（已完成）**：`state_dir`/`wire_log` 配置
   真实生效（Core 公开 `StateStore::from_dir` 与 `connect_with_state`，FFI
   `wire_log_utf8` 落地）；Session Registry 不再有锁跨网络 await（短临界区
   clone client）；`disconnect` 重构为确定性关闭（Disconnecting → 取消传输
@@ -148,6 +148,29 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
   生成，43 个 Swift 测试本地全过，真机读路径验收通过
   （`scripts/swift-device-acceptance.sh`，写路径手机端拒绝时精确
   SKIP）；macOS CI 已接入（`.github/workflows/macos-ci.yml`）。
+- **M8.5 审计修复与 Swift SDK 收尾（已完成，0.7.3）**：
+  `docs/HandShaker_Rust_Code_Audit_ad96fb4.md` 全部 5 项 P0、10 项 P1、
+  5 项 P2 修复并逐项标记（commit 链 `0405a53`→`71a050f`）：
+  - P0：sync 台账删除失败保留（P0-1）、台账 v2 设备身份与防碰撞
+    （P0-2）、Swift `device_updated` 嵌套契约 + Rust 权威 fixture 双向
+    锁死（P0-3）、后台任务注册/发布/放行原子化（P0-4）、Transfer
+    history 只淘汰已回收任务（P0-5）；
+  - P1：sync 冲突检查失败闭合（P1-1）、watch Lagged/失败后停止并要求
+    reconcile + 结构化 `SyncWatchApplied` 路由（P1-2）、临时文件唯一化
+    与哈希移出 Tokio worker（P1-3）、Swift Subscription 区分
+    timeout/closed（P1-4）、EventStream 背压 + 序列缺口上报（P1-5）、
+    Swift 公共 API 全 async（callNative 并发队列 + lease 生命周期，
+    P1-6）、FFI JSON contract 版本化（P1-7）、destroy 并发契约文档化
+    （P1-8）、**媒体库分页**（`limit`/`cursor`→`next_cursor`，
+    metadata-only 列表 + 磁盘缓存缩略图按需加载，P1-9）、**universal
+    双架构 + 静态 libusb 构建产物**（P1-10）；
+  - P2：FFI 文档版本表对齐 ABI 1.5.0（P2-1）、CI 真机验收不再吞错
+    （P2-2）、平台决策记录（仅 macOS，P2-3）、wire log header-only
+    默认 + payload opt-in + 64 MiB 轮转（P2-4）、订阅数量有界
+    （P2-5）。
+  验证：Rust 9 套件（390+ 项）、Swift 47 测试（2 真机 skip）、C/Swift
+  smoke、clippy/fmt 全绿；媒体分页支持按单张照片按需加载（库列表
+  metadata-only + `hs_media_thumbnail` 磁盘缓存，回看零网络）。
 - 剪贴板/目录监控之外的推送发送侧仍属于后续里程碑。
 
 ## 命令行教程

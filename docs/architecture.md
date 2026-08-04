@@ -55,7 +55,8 @@ handshaker-core(协议、传输、会话)
   `BackendEvent::SyncWatchApplied` 发布);
 - `SessionId(u64)`/`TransferId(u64)` 单调分配;长任务后台执行 + 事件轮询;
 - 配置真实生效:`state_dir` 控制信任记录/host UUID/sync ledger 位置(缺省
-  Core 默认目录;CLI 提供 `--state-dir`),`wire_log` 真实开启线路日志;
+  Core 默认目录;CLI 提供 `--state-dir`),`wire_log` 真实开启线路日志
+  (P2-4:默认关闭/header-only,payload 需显式 opt-in,64 MiB 轮转);
   Registry 锁不跨网络 await(短临界区 clone client);
 - 事件:`EventEnvelope { sequence, timestamp_ms, event }`,broadcast,
   Lagged 显式上报;Runtime shutdown 后订阅流以 `Closed` 结束;
@@ -69,7 +70,7 @@ handshaker-core(协议、传输、会话)
 
 ## 4. FFI 契约(v1)
 
-见 `docs/ffi-v1.md`。要点:ABI 1.2.0 独立版本(Rust 常量/Header/文档/snapshot
+见 `docs/ffi-v1.md`。要点:ABI 1.5.0 独立版本(Rust 常量/Header/文档/snapshot
 由 `scripts/generate-ffi-header.sh` 校验一致);Rust 分配 Rust 释放;
 所有函数 catch panic;NULL 句柄稳定报错;短操作同步阻塞调用线程
 (调用方在后台线程);事件队列拉取,无跨语言回调。
@@ -83,6 +84,10 @@ handshaker-core(协议、传输、会话)
   `HandShakerRuntime`;`session_client()` 过渡入口已删除,`AppSession`
   不再持有 Core client)。仅剩 `device discover`(Wi-Fi mDNS)直连 core,
   `fs rm/count` 输出适配保留在 CLI(见 `docs/m8-migration.md` §4/§7);
-- FFI 已导出 23 个符号(设备/会话/文件/传输/事件/ABI 1.2 的
-  `hs_create_directory`/`hs_ping`),stat/move/delete、媒体、剪贴板、
-  信任、批量传输、sync 待按需追加(Application 层均已具备)。
+- FFI 已导出 52 个符号(ABI 1.5.0,`docs/ffi-v1.md`/`docs/ffi-abi-snapshot.md`
+  同步):设备/会话/文件/传输/事件/剪贴板/信任/监控/批量传输/媒体
+  (library 分页 + 磁盘缓存缩略图 + EXIF)/sync/update_file_info/
+  media_merge/diagnostics;`json_contract=1` 版本化 JSON 契约;
+  destroy 并发契约写入 Header;Apple 产物由
+  `scripts/build-ffi-macos.sh` 生成 **arm64+x86_64 universal +
+  静态 libusb**(无动态依赖,可公证/上架)。

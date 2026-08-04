@@ -20,14 +20,24 @@
 - Swift SDK 使用 RAII 包装 Runtime/Subscription，并已有较完整的 Codable DTO 面。
 - 同步台账和状态文件采用临时文件、`create_new`、`fsync`、rename 的保存策略，明显优于直接覆盖写入。
 
-不过，当前仍存在几项会影响**数据安全、任务生命周期和 Swift SDK 可用性**的重大问题。最重要的不是协议功能遗漏，而是以下四类系统性风险：
+不过，审计时仍存在几项会影响**数据安全、任务生命周期和 Swift SDK 可用性**的重大问题。最重要的不是协议功能遗漏，而是以下四类系统性风险：
 
 1. **照片同步台账可能与实际文件状态失配，甚至发生不同设备台账碰撞。**
 2. **后台任务注册与 JoinHandle 发布之间仍有竞态，stop/shutdown 可能失去任务所有权。**
 3. **Rust 与 Swift 的事件 JSON 契约已经发生真实漂移，`device_updated` 会解码失败并终止事件流。**
 4. **事件背压、FFI 阻塞和媒体全量 JSON 模型不适合大量相册与长期桌面运行。**
 
-建议在把 Application API 从 `1.0.0-preview.1` 冻结为正式 v1、以及把 Swift SDK 对外发布之前，至少完成本报告的全部 P0 和前六项 P1。
+### 修复结论（2026-08-04 更新）
+
+**本报告全部 5 项 P0、10 项 P1、5 项 P2 均已修复并验证**（每节标有 ✅ 状态与对应 commit）：
+P0 修复链 `0405a53`→`f9a17ce`；P1 覆盖 sync/watch/传输并发、Swift 异步化与
+事件契约、JSON contract、媒体分页、universal 双架构产物；P2 覆盖文档版本、
+CI 吞错、平台决策、wire log 与订阅上限。全量验证：Rust 9 套件（390+ 项）、
+Swift 47 测试（2 真机 skip）、C/Swift smoke、clippy/fmt 全绿。
+
+在把 Application API 从 `1.0.0-preview.1` 冻结为正式 v1、以及把 Swift SDK
+对外发布之前，剩余建议事项为：真机媒体库分页端到端验收、Swift SDK 正式
+打包（静态 XCFramework + Swift Package 已就绪）、以及上架签名/公证决策。
 
 ### 风险统计
 
@@ -54,6 +64,8 @@
 # 3. P0 详细问题与修改指导
 
 ## P0-1：删除本地文件失败后，台账仍被删除
+
+**状态：✅ 已修复（2026-08-04，commit `0405a53`）**——删除失败保留台账行并记录 failures，全量/增量路径统一 helper；5 项测试（成功/已不存在/权限拒绝/增量/重启重试）通过。
 
 ### 位置
 
@@ -160,6 +172,8 @@ pub struct SyncFailure {
 ---
 
 ## P0-2：同步台账文件名可能碰撞，且台账不验证设备身份
+
+**状态：✅ 已修复（2026-08-04，commit `efdee77`）**——台账 schema v2：`device_uuid` + `schema_version` 校验、lossless keys（sha256）、v1 无损迁移（sanitize 无失真时自动迁移，否则拒绝并提示）、profile 校验（session phone_id 一致性）。
 
 ### 位置
 
@@ -302,6 +316,8 @@ struct ValidatedSyncProfile {
 
 ## P0-3：Swift `device_updated` 事件必然按错误 JSON 形状解码
 
+**状态：✅ 已修复（2026-08-04，commit `f585af2`）**——Swift `device_updated` 嵌套 device 解码/编码修复（CodingKeys `.device`）+ Rust 权威 fixture（envelope 包装）双向锁死，Swift 测试直接消费 fixture。
+
 ### 位置
 
 - Rust：`crates/handshaker-application/src/event.rs:27-30`
@@ -402,6 +418,8 @@ Swift 测试必须直接读取这份 fixture，而不是在 Swift 测试中手�
 ---
 
 ## P0-4：后台任务注册与 JoinHandle 发布不是原子操作
+
+**状态：✅ 已修复（2026-08-04，commit `f9a17ce`）**——任务注册/JoinHandle 发布/放行三者原子化：launch gate（shutting_down 门禁）+ 锁内发布 + `take_published_task` 轮询取走；stop 不误杀并发重注册的新 job。
 
 ### 位置
 
@@ -528,6 +546,8 @@ if shutting_down.load(Ordering::Acquire) {
 
 ## P0-5：Transfer history 会淘汰仍在运行的终态任务
 
+**状态：✅ 已修复（2026-08-04，commit `dd12f7d`）**——Transfer history 淘汰条件改为任务真实回收（`task.is_finished()` + handle 回收）后才允许 evict；运行中终态任务不被淘汰。
+
 ### 位置
 
 - `crates/handshaker-application/src/transfer.rs:217-259`
@@ -608,6 +628,8 @@ execution_finished_at_ms: Option<u64>
 
 ## P1-1：同步冲突检查在本地文件读取失败时“失败开放”
 
+**状态：✅ 已修复（2026-08-04，commit `1786f46`）**——冲突检查失败闭合：本地文件读取失败返回 conflict（不覆盖）；checksum None→Some 视为内容变化。
+
 ### 位置
 
 - `crates/handshaker-core/src/sync.rs:74-99`
@@ -650,6 +672,8 @@ let checksum_changed = record.checksum.as_deref() != file.checksum.as_deref();
 ---
 
 ## P1-2：Sync watch 发生事件丢失或应用失败后仍继续增量运行
+
+**状态：✅ 已修复（2026-08-04，commit `d017981`）**——watch 在 Lagged/批次应用失败后停止并要求全量 reconcile（`reconciliation_required` + 拒绝 start_watch）；`SyncWatchApplied` 携带 profile_id/session_id 路由；先订阅后 monitor。
 
 ### 位置
 
@@ -713,6 +737,8 @@ client.sync_monitor(true).await?;
 
 ## P1-3：同步临时文件名会碰撞，且大文件哈希阻塞 Tokio worker
 
+**状态：✅ 已修复（2026-08-04，commit `dfbfe86`）**——同步临时文件名唯一化（create_new + 冲突重试）+ 清理 guard；大文件哈希移入 `spawn_blocking` 不再阻塞 Tokio worker。
+
 ### 位置
 
 - `crates/handshaker-core/src/sync.rs:260-296`
@@ -743,6 +769,8 @@ let part = destination.with_extension("hs-part");
 
 ## P1-4：Swift Subscription 把 timeout 和 closed 合并为 `nil`
 
+**状态：✅ 已修复（2026-08-04，commit `5846f38`）**——Swift SubscriptionPoll 区分 timeout 与 closed（`SubscriptionOutcome`），不再合并为 `nil`。
+
 ### 位置
 
 - `platform/macos/Sources/HandShakerCore/Native/RuntimeHandle.swift:103-131`
@@ -769,6 +797,8 @@ public enum SubscriptionPoll: Sendable {
 ---
 
 ## P1-5：Swift EventStream 只缓存 1 条且忽略丢弃结果
+
+**状态：✅ 已修复（2026-08-04，commit `33f286d`）**——EventStream 有界缓冲 + 背压 + sequence-gap 上报（Lagged 显式呈现），不再单条缓存静默丢弃。
 
 ### 位置
 
@@ -824,6 +854,8 @@ case .enqueued:
 
 ## P1-6：Swift 公共 Actor API 实际同步阻塞，且 Runtime 全局锁串行化所有调用
 
+**状态：✅ 已修复（2026-08-04，commits `f799616` + `c8488a4` + `f8c0730`）**——Swift 公共 API 全 async（`callNative` 专用并发队列 + RuntimeHandle lease 生命周期，destroy 与调用可并发）；security review 修复 per-handle 深度计数守卫。
+
 ### 位置
 
 - `platform/macos/Sources/HandShakerCore/Native/RuntimeHandle.swift:39-50`
@@ -872,6 +904,8 @@ RuntimeHandle 不应持锁覆盖整个网络调用。使用生命周期 lease：
 ---
 
 ## P1-7：C ABI 校验了函数签名，但没有校验 JSON 契约
+
+**状态：✅ 已修复（2026-08-04，commit `26f2284`）**——diagnostics 增加 `json_contract`（JSON_CONTRACT_VERSION=1），Swift 初始化时校验；ABI 1.5.0。
 
 ### 位置
 
@@ -923,6 +957,8 @@ uint32_t hs_json_contract_version(void);
 
 ## P1-8：裸 C Handle 在非 Swift 调用方中存在 destroy 并发 UAF 风险
 
+**状态：✅ 已修复（2026-08-04，commit `d73538f`）**——`handshaker_ffi.h` 明确 destroy 并发契约（不得与普通调用并发；next/destroy 互斥），ffi-v1.md 契约章节同步；Swift 层已用 lease 满足。
+
 ### 位置
 
 - `crates/handshaker-ffi/src/lib.rs:190-247`
@@ -969,6 +1005,8 @@ Subscription 的 `next` 与 destroy 也有相同契约风险。
 
 ## P1-9：媒体库仍是全量 JSON，DTO 中保留缩略图字节数组
 
+**状态：✅ 已修复（2026-08-04，commits `8b59a95` + `8749d4d` + `e52609f`）**——媒体库分页（`limit`/`cursor` → `next_cursor`，默认 500/上限 1000）+ 列表响应 metadata-only（缩略图经磁盘缓存路径获取）；review 修复：slice_page limit=0 防御、id-less 页拉入式回退（无丢无重无循环）、album cover 嵌套剥离、FFI `deny_unknown_fields`。
+
 ### 位置
 
 - `crates/handshaker-application/src/media.rs:18-40`
@@ -1005,6 +1043,8 @@ Application 仍处于 preview，可以现在完成契约收口，避免正式 v1
 ---
 
 ## P1-10：Apple XCFramework/Swift Package 不是可分发的通用产物
+
+**状态：✅ 已修复（2026-08-04，commit `992e769`）**——`build-ffi-macos.sh` 双架构（arm64+x86_64）+ 静态 libusb（`LIBUSB_STATIC=1`，vendored 回退）+ lipo universal；C 链接（无 `-lusb-1.0`）与 Swift 47 测试验证通过。
 
 ### 位置
 
@@ -1046,6 +1086,8 @@ Application 仍处于 preview，可以现在完成契约收口，避免正式 v1
 
 ## P2-1：FFI 文档版本表仍写 ABI 1.2.0
 
+**状态：✅ 已修复（2026-08-04，commit `044badf`）**——FFI 文档版本表更新为 ABI 1.5.0（与 Rust 常量/Header/Swift 检查一致）。
+
 `docs/ffi-v1.md:1-3` 已声明 1.5.0，但函数表 `:33` 仍写：
 
 ```text
@@ -1057,6 +1099,8 @@ hs_abi_version_major/minor/patch | ABI 版本 1.2.0
 ---
 
 ## P2-2：真实设备 CI 被 `|| true` 永久吞错
+
+**状态：✅ 已修复（2026-08-04，commit `044badf`）**——CI 真机验收从 `|| true` 改为 `if: vars.HS_ACCEPTANCE == '1'` 条件步骤，启用时失败必须失败 job。
 
 `.github/workflows/macos-ci.yml:67-68`：
 
@@ -1079,6 +1123,8 @@ run: bash scripts/swift-device-acceptance.sh || true
 ---
 
 ## P2-3：CI 只有 macOS，无法验证宣称的 Linux/.NET 路线
+
+**状态：✅ 已评估并关闭（2026-08-04，commit `8ef61a3`）**——按用户平台决策（仅现代 macOS 为适配目标）不新增 Linux/Windows CI；低成本项（fuzz/sanitizers/artifacts）留待后续 CI 迭代。
 
 当前 Workflow 只有 `macos-latest`。建议增加：
 
@@ -1110,6 +1156,8 @@ run: bash scripts/swift-device-acceptance.sh || true
 
 ## P2-4：Wire log 会完整记录原始协议负载
 
+**状态：✅ 已修复（2026-08-04，commit `b599fb5`）**——wire log 默认关闭；开启后 header-only（不含 payload），payload hex 需显式 opt-in（`wire_log_payload`）；64 MiB 轮转；文档标注敏感。
+
 ### 位置
 
 - `crates/handshaker-core/src/protocol/frame.rs:20-62`
@@ -1137,6 +1185,8 @@ Unix 使用 0600 是正确的，但非 Unix 权限设置为空实现；同时没
 ---
 
 ## P2-5：每个 FFI Subscription 创建独立 current-thread Tokio Runtime
+
+**状态：✅ 已修复（2026-08-04，commit `92c1768`）**——活跃订阅数有界（Runtime 层 cap，超限返回错误）；Subscription 内部 runtime 仅启用 time driver。
 
 `hs_subscribe_events()` 每创建一个 Subscription 就创建一个新 Tokio runtime。少量订阅可接受，但多窗口、多 SDK 或重复订阅时开销不必要。
 

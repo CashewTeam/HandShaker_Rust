@@ -77,7 +77,9 @@ typedef struct HsSubscription HsSubscription;
 ## 4. Swift 接入
 
 - `include/module.modulemap` 提供模块 `HandShakerFFI`;
-- 构建:`scripts/build-ffi-macos.sh`(stage 到 `dist/apple/`);
+- 构建:`scripts/build-ffi-macos.sh`(stage 到 `dist/apple/`;**arm64+x86_64
+  universal** + **静态 libusb**,产物无 libusb 动态依赖——App Store/公证
+  交付前提;x86_64 std 缺失时可用 `HS_X86_CARGO` 指定备用 toolchain);
 - 冒烟:`scripts/run-ffi-smoke-tests.sh`(C + Swift);
 - Swift 层结构建议:`platform/macos/HandShakerCore/Native/`(RuntimeHandle RAII、
   NativeCall、NativeError)+ `Models/`(Codable DTO)+ `HandShakerClient.swift`(
