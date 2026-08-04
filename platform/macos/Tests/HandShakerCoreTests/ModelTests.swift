@@ -275,7 +275,7 @@ final class ModelTests: XCTestCase {
     func testRuntimeDiagnosticsDecodes() throws {
         // ffi/src/diagnostics.rs result JSON (P1-7: json_contract field).
         let json = """
-        {"abi":"1.5.0","application_api":"1.0.0-preview.1","json_contract":1,\
+        {"abi":"1.5.0","application_api":"1.0.0","json_contract":1,\
         "crate_version":"0.6.0",\
         "platform":"macos","arch":"aarch64","adb_path":"adb","adb_available":false,\
         "adb_version":null,"state_dir":null,"wire_log_enabled":false,\

@@ -20,7 +20,7 @@ use crate::result::{HsCallResult, catch, ok};
 use crate::runtime_ref;
 
 /// `hs_runtime_diagnostics` — no request. Result JSON:
-/// `{"abi":"1.5.0","application_api":"1.0.0-preview.1",
+/// `{"abi":"1.5.0","application_api":"1.0.0",
 ///   "crate_version":"0.x.y","platform":"macos","arch":"aarch64",
 ///   "adb_path":"adb","adb_available":true|false,
 ///   "adb_version":"Android Debug Bridge version 1.0.41"|null,
@@ -191,7 +191,7 @@ mod tests {
             decoded["json_contract"], 1,
             "JSON contract version must be present and stable"
         );
-        assert_eq!(decoded["application_api"], "1.0.0-preview.1");
+        assert_eq!(decoded["application_api"], "1.0.0");
         assert!(decoded["crate_version"].is_string());
         assert!(decoded["platform"].is_string());
         assert!(decoded["arch"].is_string());

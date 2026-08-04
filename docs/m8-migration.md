@@ -129,7 +129,7 @@
 
 | 条款 | 状态 | 证据 |
 |---|---|---|
-| `APPLICATION_API_VERSION` | ✅ | `crates/handshaker-application/src/lib.rs` = `"1.0.0-preview.1"`(preview 冻结前允许破坏性源码级修改) |
+| `APPLICATION_API_VERSION` | ✅ | `crates/handshaker-application/src/lib.rs` = `"1.0.0"`(2026-08-04 正式冻结;破坏性变更须升 major) |
 | DTO serde 契约 | ✅ | `dto.rs` 全部 `Serialize/Deserialize`,snake_case |
 | enum 判别值不复用 | ✅ | `TransportKind{1,2,3}`/`SessionState{1..5}` 固定 |
 | 错误码分区 | ✅ | `PublicErrorCode` 1001–9001(见 `docs/application-api-v1.md`) |

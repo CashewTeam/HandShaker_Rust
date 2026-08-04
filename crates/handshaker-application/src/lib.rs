@@ -61,7 +61,14 @@ mod tests;
 /// source-level changes are allowed until the freeze; consumers must not
 /// treat preview versions as stable. The freeze will drop the
 /// `-preview.N` suffix (see `docs/application-api-v1.md`).
-pub const APPLICATION_API_VERSION: &str = "1.0.0-preview.1";
+///
+/// Frozen as `1.0.0` on 2026-08-04 (audit DoD 16/16, see
+/// `docs/HandShaker_Rust_Code_Audit_ad96fb4.md` §8): the v1 contract is
+/// stable — breaking source-level/JSON changes now require a major bump.
+/// Note: `RuntimeStarted`/`DeviceAdded`/`DeviceRemoved` event variants are
+/// part of the contract (Swift handles them) but are not emitted by the
+/// runtime yet (no discovery watcher).
+pub const APPLICATION_API_VERSION: &str = "1.0.0";
 
 /// P1-7: version of the **JSON wire contract** (requests, responses,
 /// events, DTO shapes) exposed over the FFI, independent of the C ABI
