@@ -30,7 +30,7 @@ typedef struct HsSubscription HsSubscription;
 
 | 函数 | 说明 |
 |---|---|
-| `hs_abi_version_major/minor/patch` | ABI 版本 1.2.0 |
+| `hs_abi_version_major/minor/patch` | ABI 版本 1.5.0 |
 | `hs_byte_buffer_free` / `hs_call_result_free` | 释放 |
 | `hs_runtime_create(config_json, len, out_runtime)` | 创建(JSON: `adb_path_utf8/default_timeout_ms/heartbeat_interval_ms/state_dir_utf8/event_capacity`, 均可选) |
 | `hs_runtime_shutdown(runtime)` | 幂等;NULL → 成功 |

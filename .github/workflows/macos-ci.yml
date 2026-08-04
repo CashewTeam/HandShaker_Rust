@@ -62,7 +62,9 @@ jobs:
         working-directory: platform/macos
         run: swift test
 
-      # Real-device acceptance is opt-in: without HS_ACCEPTANCE=1 the
-      # DeviceAcceptanceTests skip themselves, so the job stays green.
-      - name: Swift real-device acceptance (opt-in, skips without phone)
-        run: bash scripts/swift-device-acceptance.sh || true
+      # Real-device acceptance is opt-in (vars.HS_ACCEPTANCE == '1'); the
+      # script self-skips without a phone, but when enabled a failure must
+      # fail the job — never swallow it with `|| true` (P2-2).
+      - name: Swift real-device acceptance (opt-in)
+        if: vars.HS_ACCEPTANCE == '1'
+        run: bash scripts/swift-device-acceptance.sh
