@@ -77,7 +77,7 @@ typedef struct HsSubscription HsSubscription;
   `hs_create_directory`、`hs_clipboard_set`、`hs_clipboard_delete`、
   `hs_trust_remove`、`hs_trust_reset`、`hs_monitor_folder`、
   `hs_media_thumbnail`、`hs_media_photo_library`、`hs_media_video_library`、
-  `hs_media_audio_library` (共用 `MediaPageRequestRaw`)、`hs_media_fetch_exif`、
+  `hs_media_audio_library` (后三者共用 `MediaPageRequestRaw`)、`hs_media_fetch_exif`、
   `hs_transfer_start_batch_download`、`hs_transfer_start_batch_upload`
   (共用 `FfiBatchRequest`)。
   这是线级行为变化(相对早先"静默忽略未知字段"):外部旧 FFI 消费者若发送
