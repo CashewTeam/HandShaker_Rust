@@ -239,13 +239,12 @@ impl TransferRegistry {
             if !terminal {
                 return false;
             }
-            let execution_finished = entry
+            entry
                 .join
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .as_ref()
-                .map_or(true, |handle| handle.is_finished());
-            execution_finished
+                .is_none_or(|handle| handle.is_finished())
         };
         if let Some(ttl) = self.history_ttl {
             let ttl_ms = ttl.as_millis() as u64;
