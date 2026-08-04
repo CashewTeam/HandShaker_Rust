@@ -19,11 +19,16 @@
 - 同步临时文件唯一化、大文件哈希移入 `spawn_blocking`；
 - Swift timeout/closed、事件序列缺口、RuntimeHandle lease 等已大幅改善。
 
-但仓库中“20/20 全部关闭”的结论仍然偏乐观。当前仍存在 **3 项 P0、6 项 P1、5 项 P2**。其中 P0 主要集中在：
+本轮的 3 项 P0、6 项 P1、5 项 P2 **已全部修复并验证**（commit：93d3353、c1af9c2、f941a2b、8160b24、327bc97）：
 
-1. **同一手机的多个同步 Profile 共用一个台账，可能跨目录污染甚至删除错误目录中的文件。**
-2. **同步文件副作用与台账提交不是事务，取消、崩溃或强制 abort 后可能形成不可恢复的一致性窗口。**
-3. **Transfer 和 Sync Watch 的任务发布仍未与 shutdown/reap 完全原子化，后台任务仍可能脱离 Runtime 生命周期。**
+1. **P0-1 多 Profile 台账隔离** → ledger v3 scope identity + 写互斥；
+2. **P0-2 同步事务化** → journal/WAL + 逐项 checkpoint + recover；
+3. **P0-3 任务发布原子化** → TaskPublication 状态机 + launch admission gate；
+4. **P1-1/P1-2**（Reader 边界、媒体分页快照）→ 327bc97；
+5. **P1-3..P1-6**（Swift 契约/事件/shutdown/静态链接）→ 8160b24；
+6. **P2-1..P2-5**（FFI 严格解析、RAII 配额、ledger scope、注释、CI clean-consumer）。
+
+验证：cargo 9 套件全绿（core 149 / application 124 / ffi 118）、clippy/fmt 干净、Swift 48 测试全过、smoke 无 Homebrew flags 通过、otool 自包含检查通过。
 
 因此本轮结论是：
 
@@ -73,6 +78,8 @@
 # 3. P0 问题
 
 ## P0-1：同步台账只按设备 UUID 区分，多个 Profile 会共享并覆盖同一个台账
+
+> **修复状态**：✅ 已修复（93d3353）：ledger v3 按 Profile scope（device+remote+local）隔离 + 每 ledger 写互斥 + 旧版无 scope 台账拒绝迁移（防跨 Profile 污染）。
 
 ### 位置
 
@@ -216,6 +223,8 @@ struct RuntimeInner {
 ---
 
 ## P0-2：同步文件副作用与台账提交不是事务，取消或崩溃后可能形成错误冲突与覆盖窗口
+
+> **修复状态**：✅ 已修复（c1af9c2）：下载/删除逐项 journal（WAL）+ checkpoint，recover 确定性收尾；8 个故障注入场景测试。
 
 ### 位置
 
@@ -366,6 +375,8 @@ execute_plan_with_checkpoint(
 
 ## P0-3：Transfer 与 Sync Watch 的任务发布仍未与 shutdown/reap 原子化
 
+> **修复状态**：✅ 已修复（f941a2b）：TaskPublication 显式状态机 + launch admission gate；barrier 测试证明 shutdown 后无任务存活。
+
 ### 位置
 
 - `crates/handshaker-application/src/runtime.rs:220-269`
@@ -504,6 +515,8 @@ Sync Watch 的 `sync_monitor(true)` 也必须属于被管理的 activation task�
 
 ## P1-1：协议 Reader 的每请求队列和 unmatched SID 总量无边界，可被异常手机端耗尽内存
 
+> **修复状态**：✅ 已修复（327bc97）：请求队列 bounded(64)+背压；unmatched 双上限（64 sid/16MiB）+30s TTL。
+
 ### 位置
 
 - `crates/handshaker-core/src/session.rs:24-32`
@@ -574,6 +587,8 @@ const MAX_UNMATCHED_BYTES: usize = 16 * 1024 * 1024;
 
 ## P1-2：媒体“分页”每一页仍重新拉取整库，无法解决大相册峰值和快照一致性
 
+> **修复状态**：✅ 已修复（327bc97）：全量快照缓存（30s TTL），MediaChanged 失效；每页不再重拉整库。
+
 ### 位置
 
 - `crates/handshaker-application/src/runtime.rs:1326-1361`
@@ -642,6 +657,8 @@ next page request:   {session_id, snapshot_id, cursor, limit}
 
 ## P1-3：Swift JSON contract 检查接受未来破坏性版本，版本防线方向错误
 
+> **修复状态**：✅ 已修复（8160b24）：Swift 改用精确相等检查 `json_contract == 1`。
+
 ### 位置
 
 - `crates/handshaker-application/src/lib.rs:73-81`
@@ -690,6 +707,8 @@ guard contract.jsonContract == Self.supportedJSONContract else {
 ---
 
 ## P1-4：EventStream 的同步 poll 仍可能占用 Swift Actor/cooperative executor
+
+> **修复状态**：✅ 已修复（8160b24）：EventStream poll 移到专用 DispatchQueue + continuation，不再占用 Actor/cooperative executor。
 
 ### 位置
 
@@ -740,6 +759,8 @@ poller 可以是 `Task.detached`，但真正的阻塞调用仍放 DispatchQueue�
 ---
 
 ## P1-5：Swift `shutdown()` 吞掉所有 native 错误，调用方无法确认确定性关闭是否成功
+
+> **修复状态**：✅ 已修复（8160b24）：`shutdown() async throws`，native 错误不再吞掉。
 
 ### 位置
 
@@ -802,6 +823,8 @@ func shutdownBestEffort() async // internal/deinit only
 
 ## P1-6：Swift Package 仍硬编码 Homebrew libusb，与“静态自包含 XCFramework”目标冲突
 
+> **修复状态**：✅ 已修复（8160b24）：Package.swift 与 smoke 移除 `-lusb-1.0`/Homebrew flags；smoke 通过即自包含证明。
+
 ### 位置
 
 - `platform/macos/Package.swift:13-20`
@@ -842,6 +865,8 @@ otool -L dist/apple/libhandshaker_ffi.dylib
 
 ## P2-1：FFI request JSON 大多会静默忽略未知字段
 
+> **修复状态**：✅ 已修复（8160b24）：16 个 request struct 全部 `deny_unknown_fields` + 13 个 rejection 测试。
+
 除少数媒体请求外，大部分 `Ffi*Request` 没有：
 
 ```rust
@@ -859,6 +884,8 @@ otool -L dist/apple/libhandshaker_ffi.dylib
 ---
 
 ## P2-2：订阅计数在 Tokio runtime 创建失败时可能泄漏一个配额
+
+> **修复状态**：✅ 已修复（8160b24）：订阅配额 RAII reservation，失败路径释放。
 
 ### 位置
 
@@ -880,6 +907,8 @@ impl Drop for SubscriptionReservation { /* fetch_sub */ }
 ---
 
 ## P2-3：`sync_ledger_status(device_uuid)` 的模型与多 Profile 设计不匹配，并依赖当前工作目录
+
+> **修复状态**：✅ 已修复（93d3353）：ledger 按 scope 定位；`list_sync_ledgers(device)` 列出全部 profile；不再依赖 CWD。
 
 ### 位置
 
@@ -908,6 +937,8 @@ validation 应拆成针对 device UUID 和 scope 的纯函数，不要伪造 Pro
 
 ## P2-4：稳定版本注释与实现状态矛盾
 
+> **修复状态**：✅ 已修复（327bc97）：过期注释清理（订阅 P2-5 引用归位）。
+
 `crates/handshaker-application/src/lib.rs:58-63` 仍说 preview、允许 breaking changes，紧接着 `65-71` 又声明已冻结 1.0.0。
 
 `EventStream.swift:14-15` 仍描述 `.bufferingNewest(1)`，实际是 256。
@@ -921,6 +952,8 @@ validation 应拆成针对 device UUID 和 scope 的纯函数，不要伪造 Pro
 ---
 
 ## P2-5：CI 目前无法证明最终 Swift Artifact 的“无 Homebrew 依赖”
+
+> **修复状态**：✅ 已修复（327bc97）：CI 新增 clean-consumer step（otool 断言无 libusb/Homebrew 路径）。
 
 虽然 CI 已增加 universal 构建和 Swift tests，但它先安装 libusb，且 Package/Smoke test 都显式链接 Homebrew。这只能证明“安装 Homebrew 的 CI 能构建”，不能证明用户拿到的 XCFramework 自包含。
 
