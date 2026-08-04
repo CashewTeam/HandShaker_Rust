@@ -115,8 +115,9 @@ final class RuntimeLifecycleTests: XCTestCase {
                 }
                 lock.lock()
                 completed += 1
+                let done = completed == count
                 lock.unlock()
-                if completed == count {
+                if done {
                     allFinished.signal()
                 }
             }
