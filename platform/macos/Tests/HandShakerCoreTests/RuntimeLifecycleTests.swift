@@ -126,8 +126,14 @@ final class RuntimeLifecycleTests: XCTestCase {
             entered.wait()
         }
         // All four calls are inside withRuntime now; destroy must block
-        // until they drain.
+        // until they drain (the bodies are still sleeping in-flight).
         runtime.destroy()
+        // destroy() drains the leases, but the Swift-side counter
+        // increments after lease release on the queue threads — wait for
+        // the completion signal so the assertion below has a
+        // happens-before edge (review fix; the signal was previously dead
+        // code).
+        allFinished.wait()
         XCTAssertEqual(completed, count, "destroy must wait for in-flight calls")
         XCTAssertThrowsError(try runtime.withRuntime { _ in 0 }) { error in
             guard case .runtimeClosed = error as? HandShakerError else {
