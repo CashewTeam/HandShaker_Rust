@@ -2522,6 +2522,8 @@ fn sync_dto_json_fixtures_are_stable() {
         monitoring: false,
         last_run_at_ms: Some(123),
         last_error: None,
+        reconciliation_required: false,
+        last_sequence_gap: None,
     };
     let value = serde_json::to_value(&status).expect("serialize status");
     assert_eq!(value["profile_id"], "photos");
@@ -2529,8 +2531,21 @@ fn sync_dto_json_fixtures_are_stable() {
     assert_eq!(value["monitoring"], false);
     assert_eq!(value["last_run_at_ms"], 123);
     assert!(value.get("last_error").unwrap().is_null());
+    // P1-2 fields: present with defaults, and legacy JSON without them
+    // still decodes (serde default).
     let back: SyncStatusDto = serde_json::from_value(value).expect("deserialize status");
+    assert!(!back.reconciliation_required);
     assert_eq!(back, status);
+    let legacy = serde_json::json!({
+        "profile_id": "photos",
+        "running": false,
+        "monitoring": false,
+        "last_run_at_ms": null,
+        "last_error": null,
+    });
+    let legacy_back: SyncStatusDto = serde_json::from_value(legacy).expect("legacy status decodes");
+    assert!(!legacy_back.reconciliation_required);
+    assert_eq!(legacy_back.last_sequence_gap, None);
 }
 
 #[test]
@@ -2870,15 +2885,20 @@ fn sync_watch_applied_event_json_is_stable() {
         failures: Vec::new(),
         conflicts: Vec::new(),
     };
-    let json = serde_json::to_value(crate::event::BackendEvent::SyncWatchApplied(result.clone()))
-        .expect("serialize");
+    // P1-2: SyncWatchApplied is a struct payload carrying profile_id and
+    // session_id for routing; the result nests under "result".
+    let event = crate::event::BackendEvent::SyncWatchApplied {
+        profile_id: "photos".to_string(),
+        session_id: SessionId(3),
+        result: Box::new(result.clone()),
+    };
+    let json = serde_json::to_value(&event).expect("serialize");
     assert_eq!(json["kind"], "sync_watch_applied");
-    assert_eq!(json["downloaded"][0], "/a.jpg");
+    assert_eq!(json["profile_id"], "photos");
+    assert_eq!(json["session_id"], 3);
+    assert_eq!(json["result"]["downloaded"][0], "/a.jpg");
     let decoded: crate::event::BackendEvent = serde_json::from_value(json).expect("deserialize");
-    assert_eq!(
-        decoded,
-        crate::event::BackendEvent::SyncWatchApplied(result)
-    );
+    assert_eq!(decoded, event);
 }
 
 #[tokio::test]

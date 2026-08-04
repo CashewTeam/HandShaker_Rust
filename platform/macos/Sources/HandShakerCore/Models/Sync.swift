@@ -82,6 +82,10 @@ public struct SyncStatus: Codable, Sendable, Equatable {
     public let monitoring: Bool
     public let lastRunAtMs: UInt64?
     public let lastError: HandShakerNativeError?
+    /// P1-2: a lag/apply failure requires a full sync before watching
+    /// again; decodes with a default so older payloads still work.
+    public let reconciliationRequired: Bool
+    public let lastSequenceGap: UInt64?
 
     private enum CodingKeys: String, CodingKey {
         case profileID = "profile_id"
@@ -89,6 +93,22 @@ public struct SyncStatus: Codable, Sendable, Equatable {
         case monitoring
         case lastRunAtMs = "last_run_at_ms"
         case lastError = "last_error"
+        case reconciliationRequired = "reconciliation_required"
+        case lastSequenceGap = "last_sequence_gap"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        profileID = try container.decode(String.self, forKey: .profileID)
+        running = try container.decode(Bool.self, forKey: .running)
+        monitoring = try container.decode(Bool.self, forKey: .monitoring)
+        lastRunAtMs = try container.decodeIfPresent(UInt64.self, forKey: .lastRunAtMs)
+        lastError = try container.decodeIfPresent(HandShakerNativeError.self, forKey: .lastError)
+        // Newer Rust fields with safe defaults for older payloads.
+        reconciliationRequired =
+            try container.decodeIfPresent(Bool.self, forKey: .reconciliationRequired) ?? false
+        lastSequenceGap =
+            try container.decodeIfPresent(UInt64.self, forKey: .lastSequenceGap)
     }
 }
 

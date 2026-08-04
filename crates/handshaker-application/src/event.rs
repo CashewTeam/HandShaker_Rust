@@ -57,7 +57,14 @@ pub enum BackendEvent {
     /// One debounced sync-watch batch was applied incrementally (Phase D /
     /// D6): carries the batch result so GUIs and the CLI can render progress
     /// without polling. `Warning` follows when the batch hit failures.
-    SyncWatchApplied(crate::sync::SyncRunResultDto),
+    /// A sync watch batch was applied incrementally (P1-2: carries
+    /// `profile_id` and `session_id` so multi-profile/multi-device UIs can
+    /// route the result; the batch result itself is nested under `result`).
+    SyncWatchApplied {
+        profile_id: String,
+        session_id: SessionId,
+        result: Box<crate::sync::SyncRunResultDto>,
+    },
     Warning(crate::error::PublicError),
 }
 

@@ -78,6 +78,15 @@ pub struct SyncStatusDto {
     pub monitoring: bool,
     pub last_run_at_ms: Option<u64>,
     pub last_error: Option<PublicError>,
+    /// P1-2: set when the watch observed a sequence gap (Lagged) or a
+    /// batch apply/commit failure — the incremental ledger can no longer
+    /// be proven complete. `start_sync_watch` refuses to restart until a
+    /// full sync succeeds (which clears the flag).
+    #[serde(default)]
+    pub reconciliation_required: bool,
+    /// Most recently observed sequence gap (missed event count), if any.
+    #[serde(default)]
+    pub last_sequence_gap: Option<u64>,
 }
 
 /// Result of one executed sync run. Field names mirror the CLI `sync run`
@@ -137,6 +146,8 @@ impl SyncJob {
                 monitoring: false,
                 last_run_at_ms: None,
                 last_error: None,
+                reconciliation_required: false,
+                last_sequence_gap: None,
             }),
             last_result: std::sync::RwLock::new(None),
         }

@@ -2103,7 +2103,9 @@ async fn sync_command(
                 tokio::select! {
                 event = events.recv() => match event {
                     Ok(envelope) => match envelope.event {
-                        BackendEvent::SyncWatchApplied(ref result) => {
+                        // P1-2: struct payload — profile_id/session_id for
+                        // routing, result nested.
+                        BackendEvent::SyncWatchApplied { ref result, .. } => {
                             let applied = result.downloaded.len() + result.deleted.len();
                             let failures = result.failures.len();
                             if format == OutputFormat::Jsonl {

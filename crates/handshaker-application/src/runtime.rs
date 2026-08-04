@@ -2186,6 +2186,11 @@ impl HandShakerRuntime {
                             status.running = false;
                             status.last_run_at_ms = Some(now_ms());
                             status.last_error = None;
+                            // P1-2: a successful full sync restores the
+                            // ledger's completeness proof — watching may
+                            // start again.
+                            status.reconciliation_required = false;
+                            status.last_sequence_gap = None;
                         });
                     }
                     Err(error) => {
@@ -2414,10 +2419,24 @@ impl HandShakerRuntime {
             )
             .operation("sync.watch.start"));
         }
+        // P1-2: after a lag or apply failure the incremental ledger can no
+        // longer be proven complete — refuse to watch again until a full
+        // sync succeeds (which clears reconciliation_required).
+        if job.status().reconciliation_required {
+            return Err(PublicError::new(
+                PublicErrorCode::InvalidState,
+                "sync watch requires reconciliation: run a full sync first",
+            )
+            .operation("sync.watch.start"));
+        }
         // Check + flag flip happen inside the registry lock (TOCTOU fix).
         self.reserve_sync_watch(&job).await?;
         let session = self.session_handle(job.profile.session_id).await?;
         let client = session.client.clone();
+        // P1-2: subscribe BEFORE enabling the phone-side monitor, so no
+        // FILE_CHANGE event can fall into the gap between monitor-on and
+        // subscription.
+        let subscription = client.subscribe_events(EventFilter::only([EventKind::FileChanged]));
         let accepted = match client.sync_monitor(true).await {
             Ok(accepted) => accepted,
             Err(error) => {
@@ -2434,7 +2453,6 @@ impl HandShakerRuntime {
             .operation("sync.watch.start"));
         }
         session.record_activity();
-        let subscription = client.subscribe_events(EventFilter::only([EventKind::FileChanged]));
         // P0-4 launch gate (same pattern as start_sync): the watch task must
         // not run business logic before its JoinHandle is published; a
         // concurrent stop/shutdown then either joins it (polled take) or the
@@ -2488,23 +2506,51 @@ impl HandShakerRuntime {
     }
 
     /// Surface a lagged file-change event: the missed changes are not
-    /// applied, so the incremental ledger would silently diverge — record it
-    /// in the job status and publish a warning telling the user to run a
-    /// full sync to reconcile (review fix: never swallow the gap).
+    /// applied, so the incremental ledger would silently diverge — record
+    /// `reconciliation_required`, try to disable the phone-side monitor,
+    /// publish a warning, and end the watch (P1-2: the watch must not keep
+    /// building on a ledger that can no longer be proven complete).
     async fn report_sync_watch_lag(&self, job: &Arc<SyncJob>, missed: u64) {
         let error = PublicError::new(
             PublicErrorCode::SyncError,
             format!("sync watch lagged; missed {missed} file-change event(s) — run a full sync to reconcile"),
         )
         .operation("sync.watch");
-        job.set_status(|status| status.last_error = Some(error.clone()));
+        job.set_status(|status| {
+            status.reconciliation_required = true;
+            status.last_sequence_gap = Some(missed);
+            status.monitoring = false;
+            status.last_error = Some(error.clone());
+        });
+        // Best-effort: turn the phone-side monitor off (the session may
+        // already be gone; that is fine — the watch is ending either way).
+        if let Ok(session) = self.session_handle(job.profile.session_id).await {
+            let _ = session.client.sync_monitor(false).await;
+        }
+        self.inner.event_hub.publish(BackendEvent::Warning(error));
+    }
+
+    /// Same end state as a lag, for a batch apply/commit failure (P1-2):
+    /// the incremental ledger is no longer proven complete, so the watch
+    /// stops and a full sync is required before watching again.
+    async fn reconcile_required_from_error(&self, job: &Arc<SyncJob>, error: PublicError) {
+        job.set_status(|status| {
+            status.reconciliation_required = true;
+            status.monitoring = false;
+            status.last_error = Some(error.clone());
+        });
+        if let Ok(session) = self.session_handle(job.profile.session_id).await {
+            let _ = session.client.sync_monitor(false).await;
+        }
         self.inner.event_hub.publish(BackendEvent::Warning(error));
     }
 
     /// Watch loop: wait for a file-change event, keep collecting during the
     /// debounce window, apply the batch incrementally, repeat. Exits when
     /// the session's event stream closes (monitoring=false,
-    /// last_error=ConnectionLost) or the task is aborted.
+    /// last_error=ConnectionLost), the task is aborted, or a sequence gap /
+    /// apply failure forces reconciliation (P1-2: the watch then stops and
+    /// `start_sync_watch` refuses to restart until a full sync succeeds).
     async fn run_sync_watch(&self, job: Arc<SyncJob>, mut subscription: EventSubscription) {
         'watch: loop {
             // Wait for the first event of a batch.
@@ -2517,10 +2563,10 @@ impl HandShakerRuntime {
                     }
                     Ok(_) => continue,
                     Err(EventStreamError::Lagged { missed }) => {
-                        // Review fix: lagged events are never applied; the
-                        // incremental ledger would silently diverge. Surface
-                        // it and ask for a full sync instead of hiding it.
+                        // P1-2: lagged events are never applied; the watch
+                        // stops and a full sync is required to reconcile.
                         self.report_sync_watch_lag(&job, missed).await;
+                        break 'watch;
                     }
                     Err(EventStreamError::Closed) => break 'watch,
                 }
@@ -2531,6 +2577,7 @@ impl HandShakerRuntime {
                     Ok(Ok(ClientEvent::FileChanged(changes))) => batch.extend(changes),
                     Ok(Err(EventStreamError::Lagged { missed })) => {
                         self.report_sync_watch_lag(&job, missed).await;
+                        break 'watch;
                     }
                     Ok(Err(EventStreamError::Closed)) => break 'watch,
                     Ok(Ok(_)) => {}
@@ -2545,26 +2592,37 @@ impl HandShakerRuntime {
                         status.last_error = None;
                     });
                     // Let GUI/CLI render progress without polling (Phase D /
-                    // D6): the batch result travels as a backend event.
+                    // D6): the batch result travels as a backend event,
+                    // routed by profile_id/session_id (P1-2).
                     self.inner
                         .event_hub
-                        .publish(BackendEvent::SyncWatchApplied(result));
+                        .publish(BackendEvent::SyncWatchApplied {
+                            profile_id: job.profile.id.clone(),
+                            session_id: job.profile.session_id,
+                            result: Box::new(result),
+                        });
                 }
                 Err(error) => {
-                    job.set_status(|status| status.last_error = Some(error));
+                    // P1-2: an apply/commit failure ends the incremental
+                    // watch; the ledger may no longer be complete.
+                    self.reconcile_required_from_error(&job, error).await;
+                    break 'watch;
                 }
             }
         }
-        // The session's event stream closed: connection lost, watch over.
+        // Normal exit (event stream closed) or reconcile stop: clear the
+        // watch slot so the job can be re-watched after a full sync.
         job.set_status(|status| {
-            status.monitoring = false;
-            status.last_error = Some(
-                PublicError::new(
-                    PublicErrorCode::ConnectionLost,
-                    "sync watch stopped: session event stream closed",
-                )
-                .operation("sync.watch"),
-            );
+            if !status.reconciliation_required {
+                status.monitoring = false;
+                status.last_error = Some(
+                    PublicError::new(
+                        PublicErrorCode::ConnectionLost,
+                        "sync watch stopped: session event stream closed",
+                    )
+                    .operation("sync.watch"),
+                );
+            }
         });
         *job.watch_task.lock().await = None;
     }

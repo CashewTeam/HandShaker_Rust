@@ -33,8 +33,9 @@ public enum BackendEvent: Codable, Sendable, Equatable {
     case clipboardChanged(sessionID: UInt64, entries: [ClipboardEntry])
     case mediaChanged(sessionID: UInt64, change: MediaChange)
     case remoteFileChanged(sessionID: UInt64, change: RemoteFileChange)
-    /// Newtype payload inlined: SyncRunResult fields.
-    case syncWatchApplied(SyncRunResult)
+    /// Struct payload (P1-2): profile_id/session_id route the batch to
+    /// the right profile/device; the result nests under `result`.
+    case syncWatchApplied(profileID: String, sessionID: UInt64, result: SyncRunResult)
     /// Newtype payload inlined: PublicError fields.
     case warning(HandShakerNativeError)
     /// Forward compatibility: raw `kind` token of an unknown event.
@@ -44,7 +45,9 @@ public enum BackendEvent: Codable, Sendable, Equatable {
         case kind
         case sessionID = "session_id"
         case deviceID = "device_id"
+        case profileID = "profile_id"
         case device
+        case result
         case entries
         case change
     }
@@ -89,7 +92,11 @@ public enum BackendEvent: Codable, Sendable, Equatable {
                 change: try container.decode(RemoteFileChange.self, forKey: .change)
             )
         case "sync_watch_applied":
-            self = .syncWatchApplied(try SyncRunResult(from: decoder))
+            self = .syncWatchApplied(
+                profileID: try container.decode(String.self, forKey: .profileID),
+                sessionID: try container.decode(UInt64.self, forKey: .sessionID),
+                result: try container.decode(SyncRunResult.self, forKey: .result)
+            )
         case "warning":
             self = .warning(try HandShakerNativeError(from: decoder))
         default:
@@ -135,9 +142,11 @@ public enum BackendEvent: Codable, Sendable, Equatable {
             try container.encode("remote_file_changed", forKey: .kind)
             try container.encode(sessionID, forKey: .sessionID)
             try container.encode(change, forKey: .change)
-        case .syncWatchApplied(let result):
+        case .syncWatchApplied(let profileID, let sessionID, let result):
             try container.encode("sync_watch_applied", forKey: .kind)
-            try result.encode(to: encoder)
+            try container.encode(profileID, forKey: .profileID)
+            try container.encode(sessionID, forKey: .sessionID)
+            try container.encode(result, forKey: .result)
         case .warning(let error):
             try container.encode("warning", forKey: .kind)
             try error.encode(to: encoder)
