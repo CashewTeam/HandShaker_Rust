@@ -1843,6 +1843,20 @@ impl HandShakerRuntime {
             )
             .operation("sync.status"));
         }
+        // P0-2: same identity rules as plan/start — a direct Application
+        // caller gets the same validation as the FFI parser.
+        let profile = SyncProfileDto {
+            id: "status".to_string(),
+            session_id: SessionId(0),
+            device_uuid: device_uuid.to_string(),
+            remote_root: "/".to_string(),
+            local_root: std::env::current_dir()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            enabled: true,
+        };
+        Self::validate_sync_profile_format(&profile)?;
         let store = handshaker_core::SyncStore::discover(&self.sync_config_dir()?, device_uuid);
         let snapshot = store
             .load()
@@ -1880,6 +1894,34 @@ impl HandShakerRuntime {
         cancel: Option<&handshaker_core::CancellationToken>,
     ) -> AppResult<SyncPipeline> {
         let session = self.session_handle(profile.session_id).await?;
+        // P0-2: the profile's device identity must match the phone the
+        // session actually talks to. Fail closed when the identity is not
+        // available yet instead of assuming it matches.
+        {
+            let phone_id = session
+                .device_info
+                .read()
+                .map(|info| info.phone_id.clone())
+                .unwrap_or_default();
+            match phone_id {
+                Some(phone) => {
+                    if !device_uuid_matches_phone(&profile.device_uuid, &phone) {
+                        return Err(PublicError::new(
+                            PublicErrorCode::InvalidArgument,
+                            "device_uuid does not match the session's phone identity",
+                        )
+                        .operation("sync.profile"));
+                    }
+                }
+                None => {
+                    return Err(PublicError::new(
+                        PublicErrorCode::InvalidState,
+                        "phone identity unavailable; reconnect the device first",
+                    )
+                    .operation("sync.profile"));
+                }
+            }
+        }
         let store = self.sync_store_for(profile)?;
         let snapshot = store
             .load()
@@ -1959,6 +2001,7 @@ impl HandShakerRuntime {
     /// the plan onto the public DTO. No files are touched.
     pub async fn plan_sync(&self, profile: SyncProfileDto) -> AppResult<SyncPlanDto> {
         self.ensure_open()?;
+        Self::validate_sync_profile_format(&profile)?;
         if !profile.enabled {
             return Err(PublicError::new(
                 PublicErrorCode::InvalidState,
@@ -1975,6 +2018,53 @@ impl HandShakerRuntime {
             &pipeline.phone_files,
             &pipeline.snapshot,
         )
+    }
+    /// P0-2: canonical profile validation shared by every sync entry point
+    /// (plan/start/status). Format checks only — the phone-identity check
+    /// additionally needs a live session and runs in `sync_pipeline`.
+    /// The rules mirror the FFI parser exactly (same length cap, same
+    /// `[A-Za-z0-9_-]` whitelist), so direct Rust callers and FFI callers
+    /// get identical validation; Application is an independent public layer
+    /// and must not rely on FFI input constraints.
+    pub(crate) fn validate_sync_profile_format(profile: &SyncProfileDto) -> AppResult<()> {
+        const MAX_ID_LEN: usize = 128;
+        let invalid = |field: &str, why: &str| {
+            PublicError::new(PublicErrorCode::InvalidArgument, format!("{field} {why}"))
+                .operation("sync.profile")
+        };
+        for (field, value) in [("id", &profile.id), ("device_uuid", &profile.device_uuid)] {
+            if value.is_empty() || value.len() > MAX_ID_LEN {
+                return Err(invalid(field, "must be 1..=128 chars"));
+            }
+            if value
+                .chars()
+                .any(|character| character.is_control() || character == '\0')
+            {
+                return Err(invalid(field, "must not contain control characters"));
+            }
+        }
+        if !profile.device_uuid.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        }) {
+            return Err(invalid("device_uuid", "must match [A-Za-z0-9_-]"));
+        }
+        if !std::path::Path::new(&profile.local_root).is_absolute() {
+            return Err(invalid("local_root", "must be an absolute path"));
+        }
+        if !profile.remote_root.starts_with('/') {
+            return Err(invalid("remote_root", "must be an absolute phone path"));
+        }
+        if profile
+            .remote_root
+            .chars()
+            .any(|character| character.is_control() || character == '\0')
+        {
+            return Err(invalid(
+                "remote_root",
+                "must not contain control characters",
+            ));
+        }
+        Ok(())
     }
 
     /// Register a fresh job for a profile under the sync_jobs lock. A job
@@ -2023,6 +2113,7 @@ impl HandShakerRuntime {
     /// untouched and reports through [`Self::get_sync_status`].
     pub async fn start_sync(&self, profile: SyncProfileDto) -> AppResult<String> {
         self.ensure_open()?;
+        Self::validate_sync_profile_format(&profile)?;
         // No pre-flight `plan_sync` here: the phone rejects a second
         // PHOTO_SYNC_REQUEST while it is still in SYNCING state, so a
         // start_sync that planned first would fail on every real device
@@ -2842,6 +2933,14 @@ pub fn normalize_remote_path(path: &str) -> String {
     let mut result = String::from("/");
     result.push_str(&parts.join("/"));
     result
+}
+
+/// P0-2: identity comparison between a profile's `device_uuid` and the
+/// phone_id reported by the session. An optional `phone:` prefix on either
+/// side is normalized away; everything else must match exactly.
+pub(crate) fn device_uuid_matches_phone(device_uuid: &str, phone_id: &str) -> bool {
+    device_uuid.strip_prefix("phone:").unwrap_or(device_uuid)
+        == phone_id.strip_prefix("phone:").unwrap_or(phone_id)
 }
 
 fn connection_target_for(device: &DeviceDescriptor) -> AppResult<ConnectionTarget> {

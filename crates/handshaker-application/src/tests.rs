@@ -2418,6 +2418,68 @@ fn sync_profile(id: &str, session: u64) -> SyncProfileDto {
 }
 
 #[test]
+fn validate_sync_profile_format_rejects_bad_input() {
+    let valid = sync_profile("photos", 1);
+    assert!(HandShakerRuntime::validate_sync_profile_format(&valid).is_ok());
+
+    type Case = (&'static str, fn(&mut SyncProfileDto));
+    let cases: Vec<Case> = vec![
+        ("empty id", |profile| profile.id = "".to_string()),
+        ("id too long", |profile| profile.id = "x".repeat(129)),
+        ("id with NUL", |profile| profile.id = "a\0b".to_string()),
+        ("empty device_uuid", |profile| {
+            profile.device_uuid = "".to_string()
+        }),
+        ("device_uuid too long", |profile| {
+            profile.device_uuid = "x".repeat(129)
+        }),
+        ("device_uuid with slash", |profile| {
+            profile.device_uuid = "a/b".to_string()
+        }),
+        ("device_uuid with colon", |profile| {
+            profile.device_uuid = "a:b".to_string()
+        }),
+        ("device_uuid with NUL", |profile| {
+            profile.device_uuid = "a\0b".to_string()
+        }),
+        ("relative local_root", |profile| {
+            profile.local_root = "photos".to_string()
+        }),
+        ("relative remote_root", |profile| {
+            profile.remote_root = "DCIM/Camera".to_string()
+        }),
+        ("remote_root with control char", |profile| {
+            profile.remote_root = "/a\nb".to_string()
+        }),
+    ];
+    for (name, mutate) in cases {
+        let mut profile = valid.clone();
+        mutate(&mut profile);
+        let error = HandShakerRuntime::validate_sync_profile_format(&profile)
+            .expect_err(&format!("{name} must be rejected"));
+        assert_eq!(
+            error.code,
+            PublicErrorCode::InvalidArgument,
+            "{name}: {error}"
+        );
+    }
+}
+
+#[test]
+fn device_uuid_matches_phone_normalizes_prefix() {
+    use crate::runtime::device_uuid_matches_phone;
+    assert!(device_uuid_matches_phone("9a3f-77ee", "9a3f-77ee"));
+    assert!(device_uuid_matches_phone("phone:9a3f-77ee", "9a3f-77ee"));
+    assert!(device_uuid_matches_phone("9a3f-77ee", "phone:9a3f-77ee"));
+    assert!(device_uuid_matches_phone(
+        "phone:9a3f-77ee",
+        "phone:9a3f-77ee"
+    ));
+    assert!(!device_uuid_matches_phone("9a3f-77ee", "other"));
+    assert!(!device_uuid_matches_phone("", "9a3f-77ee"));
+}
+
+#[test]
 fn sync_dto_json_fixtures_are_stable() {
     let profile = sync_profile("photos", 7);
     let value = serde_json::to_value(&profile).expect("serialize profile");
@@ -2693,9 +2755,22 @@ async fn sync_store_for_uses_configured_state_dir() {
     let profile = sync_profile("photos", 1);
     let store = runtime.sync_store_for(&profile).expect("store");
     store.save(&SyncSnapshot::default()).expect("save");
+    // P0-2: the ledger filename is the lossless SHA-256 key of the device
+    // uuid, still under <state_dir>/sync/.
+    let sync_dir = temp.path().join("sync");
+    let files: Vec<_> = std::fs::read_dir(&sync_dir)
+        .expect("sync dir")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(files.len(), 1, "exactly one ledger file");
     assert!(
-        temp.path().join("sync/dev-1.json").exists(),
-        "ledger must live under <state_dir>/sync/<device_uuid>.json"
+        files[0].ends_with(".json") && files[0].len() == 69, // 64 hex + ".json"
+        "ledger must be a 64-hex hash filename, got {files:?}"
+    );
+    assert!(
+        store.path().starts_with(&sync_dir),
+        "ledger must live under <state_dir>/sync/"
     );
     runtime.shutdown().await.expect("shutdown");
 }
