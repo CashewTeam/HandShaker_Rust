@@ -906,6 +906,7 @@ fn runtime_config(cli: &Cli) -> RuntimeConfig {
         heartbeat_interval: Duration::from_secs(10),
         state_dir: cli.state_dir.clone(),
         wire_log: cli.wire_log.clone(),
+        wire_log_payload: false,
         event_capacity: 1024,
         transfer_history_capacity: 64,
         transfer_history_ttl: None,

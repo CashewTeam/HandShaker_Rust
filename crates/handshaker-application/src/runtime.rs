@@ -313,6 +313,7 @@ impl HandShakerRuntime {
             timeout: self.inner.config.default_timeout,
             heartbeat_interval: self.inner.config.heartbeat_interval,
             wire_log: self.inner.config.wire_log.clone(),
+            wire_log_payload: self.inner.config.wire_log_payload,
             adb_path: self.inner.config.adb_path.clone(),
         }
     }

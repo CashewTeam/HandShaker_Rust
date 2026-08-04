@@ -189,6 +189,10 @@ pub struct RuntimeConfig {
     pub heartbeat_interval: Duration,
     pub state_dir: Option<PathBuf>,
     pub wire_log: Option<PathBuf>,
+    /// P2-4: dump payload bytes into the wire log (default false). The
+    /// log itself is already sensitive; payloads may add clipboard text,
+    /// paths and media bytes.
+    pub wire_log_payload: bool,
     pub event_capacity: usize,
     /// Bounded transfer history (M8.1 Phase C / C4): keep at most this many
     /// finished transfers (oldest evicted first; live transfers are never
@@ -207,6 +211,7 @@ impl Default for RuntimeConfig {
             heartbeat_interval: Duration::from_secs(10),
             state_dir: None,
             wire_log: None,
+            wire_log_payload: false,
             event_capacity: 1024,
             transfer_history_capacity: 64,
             transfer_history_ttl: None,

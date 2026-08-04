@@ -31,6 +31,7 @@ fn test_config() -> RuntimeConfig {
         heartbeat_interval: Duration::from_secs(10),
         state_dir: None,
         wire_log: None,
+        wire_log_payload: false,
         event_capacity: 16,
         transfer_history_capacity: 8,
         transfer_history_ttl: None,

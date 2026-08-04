@@ -85,6 +85,11 @@ pub struct ClientOptions {
     pub heartbeat_interval: Duration,
     /// Optional path for an explicit, sensitive wire log.
     pub wire_log: Option<PathBuf>,
+    /// P2-4: dump payload bytes into the wire log. Default false: the log
+    /// records header/type/length only. Payloads may contain clipboard
+    /// text, paths and media bytes — enabling this is an explicit
+    /// sensitive-data opt-in.
+    pub wire_log_payload: bool,
     /// Path to the adb executable.
     pub adb_path: PathBuf,
 }
@@ -108,6 +113,7 @@ impl Default for ClientOptions {
             timeout: Duration::from_secs(30),
             heartbeat_interval: Duration::from_secs(10),
             wire_log: None,
+            wire_log_payload: false,
             adb_path: PathBuf::from("adb"),
         }
     }
@@ -240,7 +246,7 @@ impl HandShakerClient {
         let wire_log = options
             .wire_log
             .as_deref()
-            .map(WireLog::open)
+            .map(|path| WireLog::open(path, options.wire_log_payload))
             .transpose()?
             .map(Arc::new);
         let connected = WifiConnector::new(address, options.timeout)
@@ -304,7 +310,7 @@ impl HandShakerClient {
         let wire_log = options
             .wire_log
             .as_deref()
-            .map(WireLog::open)
+            .map(|path| WireLog::open(path, options.wire_log_payload))
             .transpose()?
             .map(Arc::new);
         let (serial, connected) = match &target {
@@ -2218,6 +2224,7 @@ mod tests {
                 heartbeat_interval: Duration::from_secs(60),
                 adb_path: PathBuf::from("adb"),
                 wire_log: None,
+                wire_log_payload: false,
             }
         }
 

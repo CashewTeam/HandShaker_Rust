@@ -14,8 +14,12 @@ public struct RuntimeConfig: Codable, Sendable, Equatable {
     public var heartbeatIntervalMs: UInt64?
     /// State directory (thumbnails cache, trust records, sync ledger...).
     public var stateDirUTF8: String?
-    /// Optional wire-log path.
+    /// Optional wire-log path (header-only unless wireLogPayload is set).
     public var wireLogUTF8: String?
+    /// P2-4: dump payload bytes into the wire log (default false). The
+    /// log itself is sensitive; payloads add clipboard text, paths and
+    /// media bytes — opt in explicitly.
+    public var wireLogPayload: Bool?
     /// Event broadcast capacity (default 1024).
     public var eventCapacity: UInt32?
     /// Bounded finished-transfer history (default 64).
@@ -29,6 +33,7 @@ public struct RuntimeConfig: Codable, Sendable, Equatable {
         heartbeatIntervalMs: UInt64? = nil,
         stateDirUTF8: String? = nil,
         wireLogUTF8: String? = nil,
+        wireLogPayload: Bool? = nil,
         eventCapacity: UInt32? = nil,
         transferHistoryCapacity: Int? = nil,
         transferHistoryTTLMs: UInt64? = nil
@@ -38,6 +43,7 @@ public struct RuntimeConfig: Codable, Sendable, Equatable {
         self.heartbeatIntervalMs = heartbeatIntervalMs
         self.stateDirUTF8 = stateDirUTF8
         self.wireLogUTF8 = wireLogUTF8
+        self.wireLogPayload = wireLogPayload
         self.eventCapacity = eventCapacity
         self.transferHistoryCapacity = transferHistoryCapacity
         self.transferHistoryTTLMs = transferHistoryTTLMs
@@ -71,6 +77,7 @@ public struct RuntimeConfig: Codable, Sendable, Equatable {
         case heartbeatIntervalMs = "heartbeat_interval_ms"
         case stateDirUTF8 = "state_dir_utf8"
         case wireLogUTF8 = "wire_log_utf8"
+        case wireLogPayload = "wire_log_payload"
         case eventCapacity = "event_capacity"
         case transferHistoryCapacity = "transfer_history_capacity"
         case transferHistoryTTLMs = "transfer_history_ttl_ms"
@@ -83,6 +90,7 @@ public struct RuntimeConfig: Codable, Sendable, Equatable {
         try container.encodeIfPresent(heartbeatIntervalMs, forKey: .heartbeatIntervalMs)
         try container.encodeIfPresent(stateDirUTF8, forKey: .stateDirUTF8)
         try container.encodeIfPresent(wireLogUTF8, forKey: .wireLogUTF8)
+        try container.encodeIfPresent(wireLogPayload, forKey: .wireLogPayload)
         try container.encodeIfPresent(eventCapacity, forKey: .eventCapacity)
         try container.encodeIfPresent(transferHistoryCapacity, forKey: .transferHistoryCapacity)
         try container.encodeIfPresent(transferHistoryTTLMs, forKey: .transferHistoryTTLMs)

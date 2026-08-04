@@ -1,6 +1,6 @@
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -17,14 +17,41 @@ pub(crate) enum WireDirection {
     In,
 }
 
+/// Wire log bounds (P2-4): the log may contain clipboard text, paths and
+/// media bytes, so it stays opt-in, defaults to header-only (lengths and
+/// frame types, no payload bytes), and rotates at a fixed size instead of
+/// growing unbounded.
+pub(crate) const MAX_WIRE_LOG_BYTES: u64 = 64 * 1024 * 1024;
+
 pub(crate) struct WireLog {
+    path: PathBuf,
+    /// When false only the header line (direction, note, byte length) is
+    /// written — payload hex dump requires an explicit opt-in.
+    payload: bool,
+    /// Rotation threshold; tests use a small value via `open_with_max`.
+    max_bytes: u64,
     file: Mutex<std::fs::File>,
 }
 
 impl WireLog {
-    pub fn open(path: &Path) -> Result<Self> {
+    pub fn open(path: &Path, payload: bool) -> Result<Self> {
+        Self::open_with_max(path, payload, MAX_WIRE_LOG_BYTES)
+    }
+
+    /// `open` with an explicit rotation threshold (tests).
+    pub fn open_with_max(path: &Path, payload: bool, max_bytes: u64) -> Result<Self> {
+        let file = Self::open_file(path)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            payload,
+            max_bytes,
+            file: Mutex::new(file),
+        })
+    }
+
+    fn open_file(path: &Path) -> Result<std::fs::File> {
         let mut options = OpenOptions::new();
-        options.create(true).truncate(true).write(true);
+        options.create(true).append(true).write(true);
         set_mode(&mut options);
         let file = options.open(path).map_err(|error| {
             Error::LocalIo(i18n::format(
@@ -33,9 +60,31 @@ impl WireLog {
             ))
         })?;
         set_file_permissions(&file, path)?;
-        Ok(Self {
-            file: Mutex::new(file),
-        })
+        Ok(file)
+    }
+
+    /// Rotate when the log exceeds `max_bytes`: rename the current file to
+    /// `<path>.1` (one generation kept) and start a fresh file. Caller
+    /// must hold the file lock.
+    fn maybe_rotate(&self, file: &mut std::fs::File) {
+        let over_limit = file
+            .metadata()
+            .map(|meta| meta.len() >= self.max_bytes)
+            .unwrap_or(false);
+        if !over_limit {
+            return;
+        }
+        let rotated = self.path.with_extension(format!(
+            "{}.1",
+            self.path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("log")
+        ));
+        let _ = fs::rename(&self.path, &rotated);
+        if let Ok(new_file) = Self::open_file(&self.path) {
+            *file = new_file;
+        }
     }
 
     pub fn record(&self, direction: WireDirection, note: &str, data: &[u8]) {
@@ -44,6 +93,7 @@ impl WireLog {
             WireDirection::In => "<<",
         };
         if let Ok(mut file) = self.file.lock() {
+            self.maybe_rotate(&mut file);
             let _ = writeln!(
                 file,
                 "{}",
@@ -52,11 +102,15 @@ impl WireLog {
                     &[direction, note, &data.len().to_string()],
                 )
             );
-            for chunk in data.chunks(32) {
-                for byte in chunk {
-                    let _ = write!(file, "{byte:02x} ");
+            // P2-4: payload bytes are only dumped when explicitly opted
+            // in; the default header-only mode never touches payload.
+            if self.payload {
+                for chunk in data.chunks(32) {
+                    for byte in chunk {
+                        let _ = write!(file, "{byte:02x} ");
+                    }
+                    let _ = writeln!(file);
                 }
-                let _ = writeln!(file);
             }
             let _ = file.flush();
         }
@@ -210,10 +264,80 @@ mod tests {
         let path = temp.path().join("wire.log");
         std::fs::write(&path, b"old").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let _log = WireLog::open(&path).unwrap();
+        let _log = WireLog::open(&path, false).unwrap();
         assert_eq!(
             std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+    }
+
+    #[test]
+    fn wire_log_header_only_mode_never_dumps_payload() {
+        // P2-4: the default mode records direction/note/length but no
+        // payload bytes.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("wire.log");
+        let log = WireLog::open(&path, false).unwrap();
+        log.record(WireDirection::Out, "test", b"\x00\x01secret\xff");
+        drop(log);
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains(">> test"), "header line: {contents}");
+        assert!(
+            contents.contains("9"),
+            "header carries the byte length: {contents}"
+        );
+        assert!(
+            !contents.contains("00 01"),
+            "no payload hex allowed in header-only mode"
+        );
+        assert!(
+            !contents.contains("secret"),
+            "payload bytes must never appear"
+        );
+    }
+
+    #[test]
+    fn wire_log_payload_mode_dumps_hex() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("wire.log");
+        let log = WireLog::open(&path, true).unwrap();
+        log.record(WireDirection::In, "test", b"\x00\x01secret\xff");
+        drop(log);
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("<< test"), "header line: {contents}");
+        assert!(
+            contents.contains("00 01"),
+            "payload hex must be present in payload mode"
+        );
+        assert!(contents.contains("ff"), "trailing byte hex present");
+    }
+
+    #[test]
+    fn wire_log_rotates_at_size_cap() {
+        // P2-4: bounded growth — past the cap the log renames to
+        // <path>.1 and starts a fresh file (small cap for the test).
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("wire.log");
+        let log = WireLog::open_with_max(&path, true, 1024).unwrap();
+        let big = vec![0xabu8; 4096];
+        log.record(WireDirection::Out, "big", &big);
+        // Rotation is checked before each record: the second write sees
+        // the file past the cap and rotates first. Keep the second record
+        // small so the fresh file stays under the cap.
+        log.record(WireDirection::Out, "after", b"small");
+        drop(log);
+
+        assert!(
+            path.with_extension("log.1").exists(),
+            "rotated generation must exist"
+        );
+        assert!(
+            std::fs::metadata(&path)
+                .map(|meta| meta.len() < 1024)
+                .unwrap_or(false),
+            "fresh log must be under the cap"
         );
     }
 }

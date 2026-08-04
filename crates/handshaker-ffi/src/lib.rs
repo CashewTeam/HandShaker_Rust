@@ -128,6 +128,9 @@ struct FfiRuntimeConfig {
     heartbeat_interval_ms: Option<u64>,
     state_dir_utf8: Option<String>,
     wire_log_utf8: Option<String>,
+    /// P2-4: header-only by default; `true` opts into payload hex dumps
+    /// (clipboard text, paths, media bytes).
+    wire_log_payload: Option<bool>,
     event_capacity: Option<u32>,
     transfer_history_capacity: Option<usize>,
     transfer_history_ttl_ms: Option<u64>,
@@ -149,6 +152,7 @@ fn config_from_json(json: &str) -> Result<RuntimeConfig, HsCallResult> {
         heartbeat_interval: Duration::from_millis(ffi.heartbeat_interval_ms.unwrap_or(10_000)),
         state_dir: ffi.state_dir_utf8.map(PathBuf::from),
         wire_log: ffi.wire_log_utf8.map(PathBuf::from),
+        wire_log_payload: ffi.wire_log_payload.unwrap_or(false),
         event_capacity: ffi
             .event_capacity
             .map(|value| value as usize)

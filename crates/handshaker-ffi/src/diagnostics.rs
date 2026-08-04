@@ -47,6 +47,7 @@ pub unsafe extern "C" fn hs_runtime_diagnostics(runtime: *mut c_void) -> HsCallR
             .as_ref()
             .map(|dir| dir.display().to_string());
         let wire_log_enabled = config.wire_log.is_some();
+        let wire_log_payload = config.wire_log_payload;
         let active_sessions = runtime
             ._tokio
             .block_on(async { runtime.app.session_count().await });
@@ -81,6 +82,8 @@ pub unsafe extern "C" fn hs_runtime_diagnostics(runtime: *mut c_void) -> HsCallR
             "adb_version": adb_version,
             "state_dir": state_dir,
             "wire_log_enabled": wire_log_enabled,
+            // P2-4: payload hex dump opt-in (header-only by default).
+            "wire_log_payload": wire_log_payload,
             "active_sessions": active_sessions,
             "active_transfers": active_transfers,
             // P2-5: live event subscriptions (bounded by MAX_SUBSCRIPTIONS).
