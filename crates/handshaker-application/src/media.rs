@@ -154,10 +154,12 @@ pub const MEDIA_PAGE_MAX_LIMIT: usize = 1000;
 ///
 /// Defensive properties (P1-9 review):
 /// - `limit == 0` returns an empty page instead of panicking;
-/// - a trailing item without a media_id does not truncate pagination:
-///   `next_cursor` falls back to the last id-bearing item on the page
-///   (a page whose items all lack ids returns `None` — such a library
-///   cannot be keyed, which callers should treat as one-shot);
+/// - an id-less page tail never truncates pagination: `next_cursor` falls
+///   back to the last id-bearing item on the page; a page that is
+///   entirely id-less pulls the first id-bearing item of the remainder
+///   into itself (replacing its last slot) so the cursor always keys an
+///   item that was actually returned — `None` only when the remainder
+///   has no ids either (such a library cannot be keyed at all);
 /// - keyset semantics assume ids are unique within a page; duplicate
 ///   ids would skip same-value boundary items (documented precondition).
 pub fn slice_page<T: Clone>(
