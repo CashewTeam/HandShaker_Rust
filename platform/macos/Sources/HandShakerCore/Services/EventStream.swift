@@ -28,10 +28,14 @@ extension HandShakerRuntime {
     public func eventStream() throws -> AsyncThrowingStream<EventEnvelope, Error> {
         let subscription = try handle.subscribe()
         let stream: AsyncThrowingStream<EventEnvelope, Error> = AsyncThrowingStream(
-            bufferingPolicy: .bufferingNewest(1)
+            // P1-5: buffer 256 instead of 1 — a slow UI consumer used to
+            // silently drop lifecycle/terminal/warning events, not just
+            // progress ticks.
+            bufferingPolicy: .bufferingNewest(256)
         ) { continuation in
             let poller = Task {
                 defer { subscription.destroy() }
+                var lastSequence: UInt64?
                 while !Task.isCancelled {
                     do {
                         // P1-4: .closed finishes unconditionally — no local
@@ -44,7 +48,36 @@ extension HandShakerRuntime {
                                 EventEnvelope.self,
                                 from: data
                             )
-                            continuation.yield(envelope)
+                            // P1-5: sequence continuity — a gap means
+                            // events were lost (broadcast lag or buffer
+                            // drop); the stream can no longer be trusted,
+                            // so it ends with an explicit gap error and the
+                            // consumer re-subscribes / re-pulls state.
+                            if let last = lastSequence,
+                                envelope.sequence != last + 1
+                            {
+                                continuation.finish(throwing: HandShakerError.eventSequenceGap(
+                                    "expected sequence \(last + 1), got \(envelope.sequence)"
+                                ))
+                                return
+                            }
+                            lastSequence = envelope.sequence
+                            switch continuation.yield(envelope) {
+                            case .enqueued:
+                                break
+                            case .dropped(let dropped):
+                                // Consumer is slower than 256 events per
+                                // poll cycle: surface the loss instead of
+                                // pretending the stream is complete.
+                                continuation.finish(throwing: HandShakerError.eventSequenceGap(
+                                    "consumer dropped \(dropped) event(s) at sequence \(envelope.sequence)"
+                                ))
+                                return
+                            case .terminated:
+                                return // consumer cancelled the stream
+                            @unknown default:
+                                break
+                            }
                         case .timeout:
                             continue // plain poll timeout — keep waiting
                         case .closed:

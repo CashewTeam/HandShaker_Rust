@@ -74,6 +74,11 @@ public enum HandShakerError: Error, Sendable, Equatable {
     // 5000–5199 protocol
     case protocolError(String)
     case decodeError(String)
+    /// P1-5: the Swift-side event stream detected a sequence gap (events
+    /// lost to broadcast lag or a dropped buffer). Not a Rust error — the
+    /// stream ended because its contents can no longer be trusted; the
+    /// consumer should re-subscribe and re-pull authoritative state.
+    case eventSequenceGap(String)
     // 6000–6299 transport backends
     case adbUnavailable(String)
     case adbUnauthorized(String)
