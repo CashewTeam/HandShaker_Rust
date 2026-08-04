@@ -217,11 +217,42 @@ impl TransferRegistry {
     /// Drop finished entries while over capacity (oldest first) and any
     /// finished entries older than the TTL. Caller must hold the registry
     /// lock.
+    ///
+    /// P0-5: an entry is only evictable when BOTH the business snapshot is
+    /// terminal (finished_at_ms set — UI semantics) AND the background task
+    /// has actually finished (JoinHandle is_finished, or no handle ever
+    /// existed). `cancel()` flips the snapshot to terminal immediately, but
+    /// the task may still be unwinding (returning from core, cleaning temp
+    /// files, releasing the client Arc); evicting it then drops the only
+    /// JoinHandle and disconnect/shutdown can no longer join the task.
     fn reap_locked(&self, guard: &mut HashMap<TransferId, Arc<ActiveTransfer>>) {
         let now = now_ms();
+        // Business terminal + execution finished is evaluated on both the
+        // TTL path and the capacity path.
+        let can_evict = |entry: &Arc<ActiveTransfer>| -> bool {
+            let terminal = entry
+                .snapshot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .finished_at_ms
+                .is_some();
+            if !terminal {
+                return false;
+            }
+            let execution_finished = entry
+                .join
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .map_or(true, |handle| handle.is_finished());
+            execution_finished
+        };
         if let Some(ttl) = self.history_ttl {
             let ttl_ms = ttl.as_millis() as u64;
             guard.retain(|_, entry| {
+                if !can_evict(entry) {
+                    return true;
+                }
                 let finished_at = entry
                     .snapshot
                     .lock()
@@ -237,6 +268,9 @@ impl TransferRegistry {
             let oldest_finished = guard
                 .iter()
                 .filter_map(|(id, entry)| {
+                    if !can_evict(entry) {
+                        return None;
+                    }
                     let finished_at = entry
                         .snapshot
                         .lock()
@@ -247,6 +281,16 @@ impl TransferRegistry {
                 .min_by_key(|(_, finished_at)| *finished_at);
             match oldest_finished {
                 Some((id, _)) => {
+                    // Reap the finished handle with the entry (a finished
+                    // handle must never be left dangling outside the
+                    // registry; dropping it detaches a completed task).
+                    if let Some(entry) = guard.get(&id) {
+                        let _ = entry
+                            .join
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .take();
+                    }
                     guard.remove(&id);
                 }
                 None => {
@@ -743,5 +787,71 @@ mod tests {
         join.abort();
         let _ = join.await;
         assert!(registry.cancel_for_session(SessionId(1)).is_empty());
+    }
+
+    #[tokio::test]
+    async fn reap_keeps_terminal_entry_until_task_has_finished() {
+        // P0-5: history capacity 1. The first transfer is cancelled (its
+        // snapshot becomes terminal immediately) but its task is still
+        // running behind a barrier. Registering the second transfer must not
+        // evict the first — that would drop the only JoinHandle while the
+        // task is still unwinding. After the barrier is released and the
+        // task finishes, the next reap does evict it.
+        let registry = TransferRegistry::new(EventHub::new(8), 1, None);
+        let first = registry.register(registry.snapshot_for(
+            SessionId(1),
+            TransferDirectionDto::Download,
+            "/a".to_string(),
+            "/b".to_string(),
+        ));
+        let first_id = first.snapshot.lock().unwrap().id;
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            // Task still owns the "client" while it waits (like cleaning
+            // temp files after a cancel).
+            let _ = release_rx.await;
+        });
+        *first
+            .join
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(handle);
+
+        registry.cancel(first_id).expect("cancel");
+        assert_eq!(
+            registry.get(first_id).unwrap().state,
+            TransferState::Cancelled
+        );
+        assert!(
+            !registry.get(first_id).unwrap().finished_at_ms.is_none(),
+            "business snapshot is terminal"
+        );
+
+        // Second registration triggers reap: the first entry is terminal
+        // but its task is still running — it must NOT be evicted.
+        let second = registry.register(registry.snapshot_for(
+            SessionId(1),
+            TransferDirectionDto::Download,
+            "/c".to_string(),
+            "/d".to_string(),
+        ));
+        assert!(
+            registry.get(first_id).is_ok(),
+            "live task must not be evicted"
+        );
+        let _ = second.snapshot.lock().unwrap().id;
+
+        // Release the task; give it a beat to finish, then reap again.
+        let _ = release_tx.send(());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let _ = registry.register(registry.snapshot_for(
+            SessionId(1),
+            TransferDirectionDto::Download,
+            "/e".to_string(),
+            "/f".to_string(),
+        ));
+        assert!(
+            registry.get(first_id).is_err(),
+            "finished task's entry may now be evicted"
+        );
     }
 }
