@@ -62,3 +62,13 @@ mod tests;
 /// treat preview versions as stable. The freeze will drop the
 /// `-preview.N` suffix (see `docs/application-api-v1.md`).
 pub const APPLICATION_API_VERSION: &str = "1.0.0-preview.1";
+
+/// P1-7: version of the **JSON wire contract** (requests, responses,
+/// events, DTO shapes) exposed over the FFI, independent of the C ABI
+/// version and the Application API string. Bump on any breaking JSON
+/// change (renamed field, changed nesting, new required field, enum token
+/// change); Swift verifies this at runtime-creation time via
+/// `hs_runtime_diagnostics`. v1 = the contract as of ABI 1.5.0 (nested
+/// `device_updated.device`, struct `sync_watch_applied` with
+/// profile_id/session_id, SyncStatusDto reconciliation fields).
+pub const JSON_CONTRACT_VERSION: u32 = 1;

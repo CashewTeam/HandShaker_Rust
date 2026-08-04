@@ -273,9 +273,10 @@ final class ModelTests: XCTestCase {
     }
 
     func testRuntimeDiagnosticsDecodes() throws {
-        // ffi/src/diagnostics.rs result JSON.
+        // ffi/src/diagnostics.rs result JSON (P1-7: json_contract field).
         let json = """
-        {"abi":"1.5.0","application_api":"1.0.0-preview.1","crate_version":"0.6.0",\
+        {"abi":"1.5.0","application_api":"1.0.0-preview.1","json_contract":1,\
+        "crate_version":"0.6.0",\
         "platform":"macos","arch":"aarch64","adb_path":"adb","adb_available":false,\
         "adb_version":null,"state_dir":null,"wire_log_enabled":false,\
         "active_sessions":0,"active_transfers":0,\
@@ -284,12 +285,22 @@ final class ModelTests: XCTestCase {
         """
         let diagnostics = try decoder.decode(RuntimeDiagnostics.self, from: Data(json.utf8))
         XCTAssertEqual(diagnostics.abi, "1.5.0")
+        XCTAssertEqual(diagnostics.jsonContract, 1)
         XCTAssertEqual(diagnostics.platform, "macos")
         XCTAssertFalse(diagnostics.adbAvailable)
         XCTAssertNil(diagnostics.adbVersion)
         XCTAssertNil(diagnostics.stateDir)
         XCTAssertEqual(diagnostics.activeSessions, 0)
         XCTAssertTrue(diagnostics.capabilities.contains("sync"))
+        // An older library without json_contract decodes as 0 (the
+        // runtime-creation check then refuses it with .unsupported).
+        let legacy = json.replacingOccurrences(
+            of: #""json_contract":1,"#, with: ""
+        )
+        let legacyDiagnostics = try decoder.decode(
+            RuntimeDiagnostics.self, from: Data(legacy.utf8)
+        )
+        XCTAssertEqual(legacyDiagnostics.jsonContract, 0)
         XCTAssertTrue(diagnostics.capabilities.contains("media_merge"))
     }
 

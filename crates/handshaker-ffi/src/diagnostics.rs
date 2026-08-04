@@ -70,6 +70,9 @@ pub unsafe extern "C" fn hs_runtime_diagnostics(runtime: *mut c_void) -> HsCallR
                 crate::ABI_VERSION_PATCH
             ),
             "application_api": handshaker_application::APPLICATION_API_VERSION,
+            // P1-7: the JSON wire contract version (independent of ABI);
+            // Swift refuses to create a runtime when it does not match.
+            "json_contract": handshaker_application::JSON_CONTRACT_VERSION,
             "crate_version": env!("CARGO_PKG_VERSION"),
             "platform": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
@@ -177,6 +180,10 @@ mod tests {
         let decoded: serde_json::Value = serde_json::from_slice(&bytes).expect("value json");
         unsafe { free_result(Default::default()) };
         assert_eq!(decoded["abi"], "1.5.0");
+        assert_eq!(
+            decoded["json_contract"], 1,
+            "JSON contract version must be present and stable"
+        );
         assert_eq!(decoded["application_api"], "1.0.0-preview.1");
         assert!(decoded["crate_version"].is_string());
         assert!(decoded["platform"].is_string());

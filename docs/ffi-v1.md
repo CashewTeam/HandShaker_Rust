@@ -1,5 +1,4 @@
 # handshaker-ffi v1.5(C ABI 契约)
-
 > ABI 版本:1.5.0(与 Rust crate 版本独立;major=签名破坏、minor=增函数/可选字段、patch=实现修复)
 > 1.5 追加 update file info(`hs_update_file_info`)与媒体增量合并(`hs_media_merge_change`);
 > 1.4 追加照片同步面(`hs_sync_plan/start/status/stop/start_watch/stop_watch`);
@@ -59,6 +58,12 @@ typedef struct HsSubscription HsSubscription;
   **调用方必须在后台线程调用**(Swift 主线程禁止);
 - 长任务(传输)用 ID + `get_transfer`/事件轮询,不在 v1 引入跨语言回调;
 - 事件订阅为队列拉取,固定缓冲,`Lagged` 显式上报;
+- **JSON 契约独立版本(P1-7)**:ABI 版本只保证符号/签名;请求、响应、事件、
+  DTO 的 JSON 形状由 `hs_runtime_diagnostics` 的 `json_contract` 字段版本化
+  (当前 `= 1`,定义于 `handshaker_application::JSON_CONTRACT_VERSION`)。Swift
+  在创建 Runtime 时校验 `json_contract >= 1`;JSON breaking change 必须递增
+  该版本并同步 Swift 模型(`RuntimeDiagnostics.minimumJSONContract`),而不是
+  只动 ABI 版本。
 - **单租户信任模型**:ABI 是进程内契约,调用方与库同权限。Session/Transfer 的
   `u64` id 是顺序计数器(非不透明随机句柄),同进程调用方可枚举/猜测 id;库不
   做调用方鉴权。多租户隔离需要宿主进程自行分区(或引入随机 id,破坏 v1 稳定性)。

@@ -163,13 +163,29 @@ public actor HandShakerRuntime {
     }
 
     /// Create the runtime: verifies the loaded ABI (≥ 1.5.0) via
-    /// `checkABI()`, then calls `hs_runtime_create` with the config JSON.
+    /// `checkABI()`, then calls `hs_runtime_create` with the config JSON,
+    /// then verifies the JSON wire contract version (P1-7) from
+    /// `hs_runtime_diagnostics` — an older library with a different JSON
+    /// shape is refused before any request or event is exchanged.
     ///
     /// - Parameter config: creation configuration; defaults match
     ///   `RuntimeConfig.defaults` (Rust-side `RuntimeConfig::default()`).
     public init(config: RuntimeConfig = .defaults) throws {
         try checkABI()
-        self.handle = try RuntimeHandle(configJson: config.jsonBody())
+        let handle = try RuntimeHandle(configJson: config.jsonBody())
+        let contract = try handle.withRuntime { runtime in
+            try hsCall(as: RuntimeDiagnostics.self) {
+                hs_runtime_diagnostics(runtime)
+            }
+        }
+        guard contract.jsonContract >= RuntimeDiagnostics.minimumJSONContract else {
+            handle.destroy()
+            throw HandShakerError.unsupported(
+                "incompatible JSON contract \(contract.jsonContract): this SDK requires "
+                    + "json_contract >= \(RuntimeDiagnostics.minimumJSONContract)"
+            )
+        }
+        self.handle = handle
     }
 
     deinit {
