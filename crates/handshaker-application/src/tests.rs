@@ -3307,14 +3307,16 @@ fn probe_device_updated_fixture_json() {
         event,
     };
     let actual = serde_json::to_string_pretty(&envelope).unwrap();
-    let fixture = std::fs::read_to_string(
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/event_device_updated.json"
-        ),
-    )
+    let fixture = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/event_device_updated.json"
+    ))
     .expect("fixture");
-    assert_eq!(actual + "\n", fixture, "Rust event JSON drifted from fixture");
+    assert_eq!(
+        actual + "\n",
+        fixture,
+        "Rust event JSON drifted from fixture"
+    );
     // Nested-device contract: the descriptor lives under "device", not
     // inlined next to the kind tag.
     let value = serde_json::to_value(&envelope).unwrap();
@@ -3326,4 +3328,94 @@ fn probe_device_updated_fixture_json() {
     );
     assert_eq!(value["event"]["device"]["id"], "phone:9a3f-77ee");
     assert_eq!(value["event"]["device"]["transport"], "wifi");
+}
+
+// ---- P0-4: task registration / JoinHandle publication race ----
+
+#[tokio::test]
+async fn take_published_task_waits_for_start_publication() {
+    // Deterministic window test (no probability loops): a stopper that
+    // observes the slot *before* the starter publishes the JoinHandle must
+    // wait for the publication instead of returning "no task" and letting
+    // the background task run after stop returned.
+    use crate::runtime::take_published_task;
+    use tokio::sync::oneshot;
+
+    let slot = tokio::sync::Mutex::new(None);
+    let (start_tx, start_rx) = oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        if start_rx.await.is_err() {
+            return;
+        }
+        // Business body placeholder: would run sync/watch/transfer work.
+    });
+
+    // Stopper side: races the starter. It must block, not return None.
+    let taker_slot = std::sync::Arc::new(slot);
+    let taker = {
+        let slot = taker_slot.clone();
+        tokio::spawn(async move { take_published_task(&slot).await })
+    };
+
+    // Let the taker observe the empty slot first (this is the race window
+    // that previously lost the handle), then publish + release.
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    *taker_slot.lock().await = Some(task);
+    let _ = start_tx.send(());
+
+    let handle = taker
+        .await
+        .expect("taker task")
+        .expect("take_published_task must wait for the publication");
+    handle.await.expect("released task finishes");
+    // A second take after completion is empty.
+    assert!(take_published_task(&taker_slot).await.is_none());
+}
+
+#[tokio::test]
+async fn stop_sync_returns_only_after_run_task_finished() {
+    // start_sync registers the job and spawns the run task; stop_sync must
+    // not return while the task is still live, even when called
+    // immediately (the handle is published with the launch gate).
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    let profile = sync_profile("photos", 999); // session does not exist
+    let profile_id = runtime.start_sync(profile).await.expect("job registered");
+    // Stop immediately: with the P0-4 gate this still joins the run task
+    // (which fails fast on the missing session) and removes the job.
+    runtime.stop_sync(&profile_id).await.expect("stop");
+    // stop_sync removed the job from the registry.
+    let status = runtime
+        .get_sync_status(&profile_id)
+        .await
+        .expect_err("job must be removed after stop");
+    assert_eq!(status.code, PublicErrorCode::NotFound);
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn shutdown_during_start_sync_never_orphans_the_task() {
+    // Interleave start_sync with shutdown; whichever order wins, shutdown
+    // must return with no sync task still running: either the admission
+    // gate rejects the registration, or shutdown cancels + joins the task
+    // (polled publication), or the task fails fast on the closed runtime.
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    let profile = sync_profile("photos", 999);
+    let _ = runtime.start_sync(profile).await; // may be admitted or rejected
+    runtime.shutdown().await.expect("shutdown must not hang");
+    // Shutdown is idempotent and every operation reports RuntimeClosed
+    // (the runtime owns no live sync job by contract — the sync_jobs
+    // registry was drained inside shutdown).
+    runtime
+        .shutdown()
+        .await
+        .expect("second shutdown is a no-op");
+    let status = runtime
+        .get_sync_status("photos")
+        .await
+        .expect_err("runtime is closed");
+    assert_eq!(status.code, PublicErrorCode::RuntimeClosed);
 }

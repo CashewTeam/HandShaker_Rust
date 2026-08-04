@@ -248,10 +248,12 @@ impl HandShakerRuntime {
         let mut sync_joins = Vec::new();
         for job in sync_jobs {
             job.cancel.cancel();
-            if let Some(task) = job.task.lock().await.take() {
+            // P0-4: poll for the start-side publication instead of taking
+            // `None` and letting the task run after shutdown returned.
+            if let Some(task) = take_published_task(&job.task).await {
                 sync_joins.push(task);
             }
-            if let Some(task) = job.watch_task.lock().await.take() {
+            if let Some(task) = take_published_task(&job.watch_task).await {
                 sync_joins.push(task);
             }
         }
@@ -2078,6 +2080,16 @@ impl HandShakerRuntime {
         profile: SyncProfileDto,
     ) -> AppResult<Arc<SyncJob>> {
         let mut guard = self.inner.sync_jobs.lock().await;
+        // P0-4 admission gate: shutdown may have started between
+        // ensure_open() and here; a job registered after shutdown began
+        // would spawn a task that outlives the runtime teardown.
+        if self.inner.shutting_down.load(Ordering::Acquire) {
+            return Err(PublicError::new(
+                PublicErrorCode::RuntimeClosed,
+                "runtime is shutting down",
+            )
+            .operation("sync.start"));
+        }
         if let Some(existing) = guard.get(&profile.id) {
             let status = existing.status();
             if status.running {
@@ -2121,12 +2133,26 @@ impl HandShakerRuntime {
         // computed once inside the job; conflicted entries are skipped and
         // reported in the result, matching the legacy behavior.
         let job = self.register_sync_job(profile).await?;
+        // P0-4 launch gate: the spawned task waits for start_tx before
+        // touching any business logic. The stopper side (stop_sync,
+        // shutdown) cancels the job token and polls the slot with
+        // `take_published_task`; even if it observed `None` before this
+        // publication, the task never runs network/file work while the
+        // gate is closed, and once released it exits immediately because
+        // the token is already cancelled.
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
         let this = self.clone();
         let task_job = job.clone();
         let task = tokio::spawn(async move {
+            if start_rx.await.is_err() {
+                // Never released: treat as cancelled, never run.
+                task_job.set_status(|status| status.running = false);
+                return;
+            }
             this.run_sync_job(task_job).await;
         });
         *job.task.lock().await = Some(task);
+        let _ = start_tx.send(());
         Ok(job.profile.id.clone())
     }
 
@@ -2259,8 +2285,10 @@ impl HandShakerRuntime {
         // Bounded join: core `execute_plan` has no cooperative cancellation,
         // so a run that ignores the token is aborted after the deadline
         // (same pattern as `close_session` — a deadline is not proof of
-        // completion; abort + await is).
-        let task = job.task.lock().await.take();
+        // completion; abort + await is). P0-4: poll the slot for the
+        // start-side publication instead of taking `None` and returning
+        // while the task is about to run.
+        let task = take_published_task(&job.task).await;
         if let Some(mut task) = task {
             match tokio::time::timeout(SYNC_STOP_DEADLINE, &mut task).await {
                 Ok(Ok(())) => {}
@@ -2292,7 +2320,7 @@ impl HandShakerRuntime {
         // Defensive: a watch can only be active here if it was started after
         // this run job was registered and never stopped; never leave a task
         // running against a job that is about to be removed from the map.
-        let watch_task = job.watch_task.lock().await.take();
+        let watch_task = take_published_task(&job.watch_task).await;
         if let Some(task) = watch_task {
             task.abort();
             let _ = task.await;
@@ -2407,12 +2435,21 @@ impl HandShakerRuntime {
         }
         session.record_activity();
         let subscription = client.subscribe_events(EventFilter::only([EventKind::FileChanged]));
+        // P0-4 launch gate (same pattern as start_sync): the watch task must
+        // not run business logic before its JoinHandle is published; a
+        // concurrent stop/shutdown then either joins it (polled take) or the
+        // task observes the cancelled token and exits.
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
         let this = self.clone();
         let watch_job = job.clone();
         let watch_task = tokio::spawn(async move {
+            if start_rx.await.is_err() {
+                return;
+            }
             this.run_sync_watch(watch_job, subscription).await;
         });
         *job.watch_task.lock().await = Some(watch_task);
+        let _ = start_tx.send(());
         Ok(())
     }
 
@@ -2428,7 +2465,7 @@ impl HandShakerRuntime {
             .sync_job_for(profile_id)
             .await
             .ok_or_else(|| Self::sync_job_not_found("sync.watch.stop"))?;
-        let watch_task = job.watch_task.lock().await.take();
+        let watch_task = take_published_task(&job.watch_task).await;
         if let Some(task) = watch_task {
             // The watch task blocks on the event stream with no cooperative
             // cancellation point; abort it and await the cancellation.
@@ -2933,6 +2970,28 @@ pub fn normalize_remote_path(path: &str) -> String {
     let mut result = String::from("/");
     result.push_str(&parts.join("/"));
     result
+}
+
+/// P0-4: take a background task handle with a bounded wait for the
+/// start-side publication. `start_sync`/`start_sync_watch` publish the
+/// JoinHandle into this slot right after `tokio::spawn` (microseconds),
+/// but publishing itself awaits the slot mutex — a concurrent stopper
+/// (stop_sync, stop_sync_watch, shutdown) can observe `None` in that
+/// window and must wait instead of returning "stopped" while the task is
+/// about to run. Callers must trigger cancellation (job.cancel.cancel())
+/// *before* calling this; a task that is never observed still exits on
+/// its own, this only closes the handle-ownership gap.
+pub(crate) async fn take_published_task(
+    slot: &tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    const POLL_ATTEMPTS: u32 = 200; // 200 × 2ms = 400ms bounded
+    for _ in 0..POLL_ATTEMPTS {
+        if let Some(handle) = slot.lock().await.take() {
+            return Some(handle);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    slot.lock().await.take()
 }
 
 /// P0-2: identity comparison between a profile's `device_uuid` and the
