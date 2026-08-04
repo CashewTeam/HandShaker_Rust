@@ -58,6 +58,12 @@ typedef struct HsSubscription HsSubscription;
   **调用方必须在后台线程调用**(Swift 主线程禁止);
 - 长任务(传输)用 ID + `get_transfer`/事件轮询,不在 v1 引入跨语言回调;
 - 事件订阅为队列拉取,固定缓冲,`Lagged` 显式上报;
+- **destroy 并发契约(P1-8)**:`hs_runtime_destroy` 不得与同一 handle 的
+  任何调用并发;`hs_subscription_destroy` 不得与同一 subscription 的
+  `next` 并发——宿主负责同步,违反即 use-after-free(UB)。普通调用可并发
+  (库内部串行 + 共享引用)。Swift SDK 用生命周期 lease 满足该契约
+  (in-flight 计数,destroy 先排空再释放),是其他绑定(GTK/.NET)的参考实现;
+  已销毁 handle 的后续调用返回稳定 RuntimeClosed,destroy 两次是调用方错误。
 - **JSON 契约独立版本(P1-7)**:ABI 版本只保证符号/签名;请求、响应、事件、
   DTO 的 JSON 形状由 `hs_runtime_diagnostics` 的 `json_contract` 字段版本化
   (当前 `= 1`,定义于 `handshaker_application::JSON_CONTRACT_VERSION`)。Swift

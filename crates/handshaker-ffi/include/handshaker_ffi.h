@@ -23,6 +23,21 @@
  *    them from a background thread, never from a UI main thread.
  *  - hs_subscription_next blocks up to timeout_ms.
  *  - No unwind ever crosses the ABI: internal panics map to status != 0.
+ *
+ * Concurrency contract (P1-8):
+ *  - hs_runtime_destroy MUST NOT run concurrently with any other call on
+ *    the same runtime handle, and hs_subscription_destroy MUST NOT run
+ *    concurrently with hs_subscription_next on the same subscription
+ *    handle. The host is responsible for that synchronization; violating
+ *    it is use-after-free and undefined behavior.
+ *  - Ordinary calls (anything except destroy) MAY run concurrently on the
+ *    same handle: the runtime serializes internally and every call takes
+ *    a shared reference. The bundled Swift SDK satisfies the destroy
+ *    rule with a lifecycle lease (in-flight counter; destroy drains and
+ *    then frees), which is the reference pattern for other bindings.
+ *  - A handle destroyed once is invalid for all further calls: call
+ *    functions return a stable RuntimeClosed error. Destroying twice is
+ *    a caller error (double-free).
  */
 #ifndef HANDSHAKER_FFI_H
 #define HANDSHAKER_FFI_H
