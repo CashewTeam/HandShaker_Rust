@@ -7,6 +7,7 @@
 //! `crate::runtime`.
 
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use handshaker_core::{
     FileChange, FileChangeStatus, RemoteFile, SyncConfig, SyncDiff, SyncSnapshot,
@@ -108,6 +109,13 @@ pub struct SyncRunResultDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncLedgerStatusDto {
     pub device_uuid: String,
+    /// Normalized remote root of the ledger scope (round-2 P0-1; `None`
+    /// only for legacy callers that never send it).
+    #[serde(default)]
+    pub remote_root: Option<String>,
+    /// Normalized local root of the ledger scope (round-2 P0-1).
+    #[serde(default)]
+    pub local_root: Option<String>,
     pub files: u64,
     pub bytes: u64,
 }
@@ -123,6 +131,11 @@ pub struct SyncLedgerStatusDto {
 pub(crate) struct SyncJob {
     pub profile: SyncProfileDto,
     pub cancel: handshaker_core::CancellationToken,
+    /// Per-ledger write mutex for this job's scope (round-2 P0-1): held
+    /// for the whole run/watch lifetime so two profiles that resolve to
+    /// the same ledger serialize, and so the ledger is never written by
+    /// an aborted task's tail.
+    pub ledger_lock: Arc<tokio::sync::Mutex<()>>,
     /// Live run task (cleared by the task itself when it finishes).
     pub task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Live watch task (taken by `stop_sync_watch` / shutdown).
@@ -133,11 +146,12 @@ pub(crate) struct SyncJob {
 }
 
 impl SyncJob {
-    pub(crate) fn new(profile: SyncProfileDto) -> Self {
+    pub(crate) fn new(profile: SyncProfileDto, ledger_lock: Arc<tokio::sync::Mutex<()>>) -> Self {
         let profile_id = profile.id.clone();
         Self {
             profile,
             cancel: handshaker_core::CancellationToken::new(),
+            ledger_lock,
             task: tokio::sync::Mutex::new(None),
             watch_task: tokio::sync::Mutex::new(None),
             status: std::sync::RwLock::new(SyncStatusDto {

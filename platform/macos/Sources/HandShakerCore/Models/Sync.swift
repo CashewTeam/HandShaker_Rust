@@ -122,14 +122,20 @@ public struct SyncRunResult: Codable, Sendable, Equatable {
 }
 
 /// Ledger summary for the `sync status` command (sync.rs
-/// `SyncLedgerStatusDto`).
+/// `SyncLedgerStatusDto`; round-2 P0-1 added the scope roots).
 public struct SyncLedgerStatus: Codable, Sendable, Equatable {
     public let deviceUUID: String
+    /// Normalized remote root of the ledger scope (absent in legacy JSON).
+    public let remoteRoot: String?
+    /// Normalized local root of the ledger scope (absent in legacy JSON).
+    public let localRoot: String?
     public let files: UInt64
     public let bytes: UInt64
 
     private enum CodingKeys: String, CodingKey {
         case deviceUUID = "device_uuid"
+        case remoteRoot = "remote_root"
+        case localRoot = "local_root"
         case files
         case bytes
     }

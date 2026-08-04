@@ -50,4 +50,7 @@ pub use state::{State, StateStore};
 pub use sync::{
     SyncRunResult, apply_file_change, check_conflicts, execute_plan, local_destination, plan_diff,
 };
-pub use sync_store::{SyncStore, default_config_dir, pc_id_from_host_uuid, sync_config};
+pub use sync_store::{
+    SyncLedgerIdentity, SyncStore, default_config_dir, ledger_scope_key, normalize_root,
+    pc_id_from_host_uuid, sync_config,
+};

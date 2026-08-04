@@ -2024,20 +2024,42 @@ async fn sync_command(
     let device_uuid = sync_device_uuid_from_info(&snapshot.device_info)?;
     match command {
         SyncCommand::Status => {
-            let status = app
+            // Round-2 P0-1: ledgers are scoped per profile, so one device
+            // may have several. `sync status` lists them all (schema
+            // change: data is now {"ledgers":[...]} instead of a single
+            // {device_uuid,files,bytes} object — recorded in
+            // docs/m8-migration.md §13).
+            let ledgers = app
                 .runtime
-                .sync_ledger_status(&device_uuid)
+                .list_sync_ledgers(Some(&device_uuid))
                 .await
                 .map_err(app_error)?;
             let data = serde_json::json!({
-                "device_uuid": status.device_uuid,
-                "files": status.files,
-                "bytes": status.bytes,
+                "ledgers": ledgers
+                    .iter()
+                    .map(|ledger| serde_json::json!({
+                        "device_uuid": ledger.device_uuid,
+                        "remote_root": ledger.remote_root,
+                        "local_root": ledger.local_root,
+                        "files": ledger.files,
+                        "bytes": ledger.bytes,
+                    }))
+                    .collect::<Vec<_>>(),
             });
-            let human = i18n::format(
-                "sync.status_line",
-                &[&status.files.to_string(), &status.bytes.to_string()],
-            );
+            let human = if ledgers.is_empty() {
+                i18n::text("sync.status_none").to_string()
+            } else {
+                ledgers
+                    .iter()
+                    .map(|ledger| {
+                        i18n::format(
+                            "sync.status_line",
+                            &[&ledger.files.to_string(), &ledger.bytes.to_string()],
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
             Outcome::new("sync.status", data, human)
         }
         SyncCommand::Plan { root, output_dir } => {

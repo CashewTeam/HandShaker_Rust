@@ -144,6 +144,16 @@ fn session_state_from_u8(value: u8) -> SessionState {
     }
 }
 
+/// Minimal v3 ledger envelope for `list_sync_ledgers` (round-2 P0-1):
+/// only the identity and the tracked file count/bytes are needed for
+/// listing, so the full record map is decoded but not kept.
+#[derive(serde::Deserialize)]
+struct LedgerListEntry {
+    schema_version: u32,
+    identity: handshaker_core::SyncLedgerIdentity,
+    snapshot: handshaker_core::SyncSnapshot,
+}
+
 struct RuntimeInner {
     config: RuntimeConfig,
     sessions: Mutex<HashMap<SessionId, Arc<ActiveSession>>>,
@@ -155,6 +165,11 @@ struct RuntimeInner {
     /// by `start_sync`/`register_sync_job`, queried by `get_sync_status`,
     /// and removed by `stop_sync` / shutdown.
     sync_jobs: Mutex<HashMap<String, Arc<SyncJob>>>,
+    /// Per-ledger write mutexes keyed by `ledger_scope_key` (round-2
+    /// P0-1): two profiles that share one ledger (same device + same
+    /// normalized roots) serialize their runs/commits; distinct scopes
+    /// never contend.
+    sync_ledger_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// Everything the plan mapping and the executor need, in core types. Never
@@ -203,6 +218,7 @@ impl HandShakerRuntime {
                 next_session_id: AtomicU64::new(1),
                 shutting_down: AtomicBool::new(false),
                 sync_jobs: Mutex::new(HashMap::new()),
+                sync_ledger_locks: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -1920,43 +1936,73 @@ impl HandShakerRuntime {
         }
     }
 
+    /// Normalized ledger scope for a profile (round-2 P0-1): the local
+    /// root is canonicalized when it exists (real path — symlink aliases
+    /// cannot split or merge a ledger); a missing directory falls back to
+    /// the absolute path normalized (the run itself will fail with a
+    /// clear local-io error). The remote root is expected absolute
+    /// (validated by `validate_sync_profile_format`).
+    pub(crate) fn sync_identity_for(
+        &self,
+        profile: &SyncProfileDto,
+    ) -> AppResult<handshaker_core::SyncLedgerIdentity> {
+        let local_root = std::fs::canonicalize(&profile.local_root)
+            .unwrap_or_else(|_| std::path::PathBuf::from(&profile.local_root));
+        Ok(handshaker_core::SyncLedgerIdentity {
+            device_uuid: profile.device_uuid.clone(),
+            remote_root: handshaker_core::normalize_root(&profile.remote_root),
+            local_root: local_root.to_string_lossy().into_owned(),
+        })
+    }
+
+    /// Sync ledger store for a profile, bound to the full scope
+    /// (device_uuid + remote_root + local_root). Distinct scopes never
+    /// share a ledger file (round-2 P0-1).
     pub(crate) fn sync_store_for(
         &self,
         profile: &SyncProfileDto,
     ) -> AppResult<handshaker_core::SyncStore> {
+        let identity = self.sync_identity_for(profile)?;
         Ok(handshaker_core::SyncStore::discover(
             &self.sync_config_dir()?,
-            &profile.device_uuid,
+            &identity,
         ))
     }
 
-    /// Ledger summary for `sync status` (Phase D / D6): files/bytes the
-    /// local ledger tracks for one device. No session required — the ledger
-    /// is local state rooted at the configured `state_dir`.
-    pub async fn sync_ledger_status(&self, device_uuid: &str) -> AppResult<SyncLedgerStatusDto> {
+    /// Per-ledger write mutex, keyed by the same scope hash as the ledger
+    /// filename: two profiles that resolve to the same ledger (same
+    /// device + same normalized roots) serialize their writes; profiles
+    /// with distinct scopes never contend. The Arc lives in the map while
+    /// any job holds it, so the lock is not recreated mid-run.
+    pub(crate) async fn ledger_lock_for(
+        &self,
+        identity: &handshaker_core::SyncLedgerIdentity,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        let key = handshaker_core::ledger_scope_key(identity);
+        let mut guard = self.inner.sync_ledger_locks.lock().await;
+        guard
+            .entry(key)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    /// Ledger summary for one exact scope (round-2 P0-1/P2-3): files/bytes
+    /// the local ledger tracks for this profile's sync directory. No
+    /// session and no process CWD required — the ledger is local state
+    /// rooted at the configured `state_dir`.
+    pub async fn sync_ledger_status(
+        &self,
+        identity: &handshaker_core::SyncLedgerIdentity,
+    ) -> AppResult<SyncLedgerStatusDto> {
         self.ensure_open()?;
-        if device_uuid.trim().is_empty() {
+        if identity.device_uuid.trim().is_empty() {
             return Err(PublicError::new(
                 PublicErrorCode::InvalidArgument,
                 "device_uuid must not be empty",
             )
             .operation("sync.status"));
         }
-        // P0-2: same identity rules as plan/start — a direct Application
-        // caller gets the same validation as the FFI parser.
-        let profile = SyncProfileDto {
-            id: "status".to_string(),
-            session_id: SessionId(0),
-            device_uuid: device_uuid.to_string(),
-            remote_root: "/".to_string(),
-            local_root: std::env::current_dir()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned(),
-            enabled: true,
-        };
-        Self::validate_sync_profile_format(&profile)?;
-        let store = handshaker_core::SyncStore::discover(&self.sync_config_dir()?, device_uuid);
+        let store = handshaker_core::SyncStore::discover(&self.sync_config_dir()?, identity);
         let snapshot = store
             .load()
             .map_err(|error| from_core_error(error, "sync.status"))?
@@ -1964,10 +2010,74 @@ impl HandShakerRuntime {
         let files = snapshot.files.len() as u64;
         let bytes: u64 = snapshot.files.values().map(|record| record.size).sum();
         Ok(SyncLedgerStatusDto {
-            device_uuid: device_uuid.to_string(),
+            device_uuid: identity.device_uuid.clone(),
+            remote_root: Some(identity.remote_root.clone()),
+            local_root: Some(identity.local_root.clone()),
             files,
             bytes,
         })
+    }
+
+    /// List every v3 ledger for a device (optionally filtered) — the
+    /// multi-profile view for `sync status` (round-2 P0-1/P2-3). Scans
+    /// `<state_dir>/sync/*.json`, decodes v3 envelopes, and reports the
+    /// identity plus tracked file/byte counts. Files that fail to parse
+    /// are skipped with a Warning event (a corrupt ledger must not block
+    /// listing the rest).
+    pub async fn list_sync_ledgers(
+        &self,
+        device_uuid: Option<&str>,
+    ) -> AppResult<Vec<SyncLedgerStatusDto>> {
+        self.ensure_open()?;
+        let sync_dir = self.sync_config_dir()?.join("sync");
+        let entries = match std::fs::read_dir(&sync_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(PublicError::new(
+                    PublicErrorCode::LocalPathNotFound,
+                    "cannot read sync ledger directory",
+                )
+                .with_detail(error.to_string())
+                .operation("sync.status"));
+            }
+        };
+        let mut ledgers = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let Ok(file) = serde_json::from_slice::<LedgerListEntry>(&bytes) else {
+                continue;
+            };
+            if file.schema_version != 3 {
+                continue;
+            }
+            if let Some(filter) = device_uuid
+                && file.identity.device_uuid != filter
+            {
+                continue;
+            }
+            let files = file.snapshot.files.len() as u64;
+            let bytes: u64 = file.snapshot.files.values().map(|record| record.size).sum();
+            ledgers.push(SyncLedgerStatusDto {
+                device_uuid: file.identity.device_uuid,
+                remote_root: Some(file.identity.remote_root),
+                local_root: Some(file.identity.local_root),
+                files,
+                bytes,
+            });
+        }
+        ledgers.sort_by(|a, b| {
+            a.remote_root
+                .cmp(&b.remote_root)
+                .then_with(|| a.local_root.cmp(&b.local_root))
+        });
+        Ok(ledgers)
     }
 
     /// Short critical section: clone the job Arc, then drop the registry
@@ -2176,6 +2286,10 @@ impl HandShakerRuntime {
         &self,
         profile: SyncProfileDto,
     ) -> AppResult<Arc<SyncJob>> {
+        // Resolve scope + ledger mutex before taking the registry lock:
+        // the canonicalize call and the ledger-lock map are memory-only,
+        // but keeping the registry critical section minimal.
+        let identity = self.sync_identity_for(&profile)?;
         let mut guard = self.inner.sync_jobs.lock().await;
         // P0-4 admission gate: shutdown may have started between
         // ensure_open() and here; a job registered after shutdown began
@@ -2204,7 +2318,8 @@ impl HandShakerRuntime {
                 .operation("sync.start"));
             }
         }
-        let job = Arc::new(SyncJob::new(profile));
+        let ledger_lock = self.ledger_lock_for(&identity).await;
+        let job = Arc::new(SyncJob::new(profile, ledger_lock));
         job.set_status(|status| status.running = true);
         guard.insert(job.profile.id.clone(), job.clone());
         Ok(job)
@@ -2268,6 +2383,10 @@ impl HandShakerRuntime {
     /// always stops before exit, so a library caller must stop a panicked
     /// job before re-starting it.
     async fn run_sync_job(&self, job: Arc<SyncJob>) {
+        // Round-2 P0-1: hold the per-ledger mutex for the whole run so a
+        // second profile resolving to the same ledger serializes behind
+        // this one, and so no aborted-task tail can write the ledger.
+        let _ledger_guard = job.ledger_lock.lock().await;
         let outcome = self.run_sync_once(&job).await;
         match outcome {
             Ok(Some((result, updated))) => {
@@ -2649,6 +2768,9 @@ impl HandShakerRuntime {
     /// apply failure forces reconciliation (P1-2: the watch then stops and
     /// `start_sync_watch` refuses to restart until a full sync succeeds).
     async fn run_sync_watch(&self, job: Arc<SyncJob>, mut subscription: EventSubscription) {
+        // Round-2 P0-1: hold the per-ledger mutex for the whole watch so
+        // concurrent runs of the same ledger serialize their commits.
+        let _ledger_guard = job.ledger_lock.lock().await;
         'watch: loop {
             // Wait for the first event of a batch.
             let mut batch: Vec<FileChange> = Vec::new();

@@ -2855,26 +2855,47 @@ async fn sync_ledger_status_reads_configured_state_dir() {
     );
     store.save(&snapshot).expect("save");
 
-    let status = runtime
-        .sync_ledger_status(&profile.device_uuid)
-        .await
-        .expect("status");
+    // Round-2 P0-1: status takes the full scope identity — the same
+    // canonicalized identity the store was discovered with.
+    let identity = runtime.sync_identity_for(&profile).expect("identity");
+    let status = runtime.sync_ledger_status(&identity).await.expect("status");
     assert_eq!(status.device_uuid, "dev-1");
+    assert_eq!(
+        status.remote_root.as_deref(),
+        Some("/storage/emulated/0/DCIM/Camera")
+    );
+    assert_eq!(
+        status.local_root.as_deref(),
+        Some(identity.local_root.as_str())
+    );
     assert_eq!(status.files, 2);
     assert_eq!(status.bytes, 150);
 
-    // An empty uuid is refused; a missing ledger reports zero, never an error.
-    let error = runtime
-        .sync_ledger_status("")
-        .await
-        .expect_err("empty uuid");
-    assert_eq!(error.code, PublicErrorCode::InvalidArgument);
+    // A ledger for a different scope reads as zero, never another
+    // profile's data (P0-1: no cross-profile sharing).
+    let other_scope = handshaker_core::SyncLedgerIdentity {
+        device_uuid: "dev-1".to_string(),
+        remote_root: "/storage/emulated/0/Pictures/Screenshots".to_string(),
+        local_root: "/tmp/screenshots".to_string(),
+    };
     let status = runtime
-        .sync_ledger_status("no-such-device")
+        .sync_ledger_status(&other_scope)
         .await
         .expect("missing ledger is zero");
     assert_eq!(status.files, 0);
     assert_eq!(status.bytes, 0);
+
+    // Empty identity fields are refused.
+    let empty_scope = handshaker_core::SyncLedgerIdentity {
+        device_uuid: String::new(),
+        remote_root: "/".to_string(),
+        local_root: "/tmp".to_string(),
+    };
+    let error = runtime
+        .sync_ledger_status(&empty_scope)
+        .await
+        .expect_err("empty uuid");
+    assert_eq!(error.code, PublicErrorCode::InvalidArgument);
     runtime.shutdown().await.expect("shutdown");
 }
 
@@ -3681,4 +3702,87 @@ fn all_event_fixtures_round_trip_and_preserve_kind() {
             "{name}: re-serialization must match the committed fixture (rerun examples/gen_event_fixtures)"
         );
     }
+}
+
+#[tokio::test]
+async fn sync_scope_isolation_keeps_profiles_apart() {
+    // Round-2 P0-1: two profiles on the same phone with different local
+    // roots must resolve to different ledger stores, and records written
+    // through one must never be visible through the other (a delete plan
+    // for profile B can therefore never touch profile A's directory).
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = test_config();
+    config.state_dir = Some(temp.path().to_path_buf());
+    let runtime = HandShakerRuntime::create(config).await.expect("create");
+
+    let mut profile_a = sync_profile("photos", 1);
+    profile_a.local_root = "/tmp/scope-a".to_string();
+    let mut profile_b = sync_profile("screenshots", 1);
+    profile_b.local_root = "/tmp/scope-b".to_string();
+
+    let store_a = runtime.sync_store_for(&profile_a).expect("store a");
+    let store_b = runtime.sync_store_for(&profile_b).expect("store b");
+    assert_ne!(
+        store_a.path(),
+        store_b.path(),
+        "distinct scopes must not share a ledger file"
+    );
+
+    let mut snapshot = SyncSnapshot::default();
+    snapshot.files.insert(
+        "/a.jpg".to_string(),
+        handshaker_core::SyncFileRecord {
+            size: 1,
+            checksum: None,
+            ext_data: None,
+            modified_at: None,
+            local_path: "/tmp/scope-a/a.jpg".to_string(),
+            local_sha256: None,
+        },
+    );
+    store_a.save(&snapshot).expect("save a");
+    assert!(
+        store_b.load().expect("b").is_none(),
+        "profile B must not see profile A's records"
+    );
+
+    // The same profile spelling with a trailing slash resolves to the
+    // same store (normalization), not a second ledger.
+    let mut profile_a2 = profile_a.clone();
+    profile_a2.local_root = "/tmp/scope-a/".to_string();
+    let store_a2 = runtime.sync_store_for(&profile_a2).expect("store a2");
+    assert_eq!(
+        store_a.path(),
+        store_a2.path(),
+        "normalized roots are one scope"
+    );
+    runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn ledger_lock_serializes_same_scope_only() {
+    // Round-2 P0-1: profiles resolving to the same ledger get the same
+    // mutex (writes serialize); distinct scopes get distinct mutexes.
+    let runtime = HandShakerRuntime::create(test_config())
+        .await
+        .expect("create");
+    let mut profile_a = sync_profile("photos", 1);
+    profile_a.local_root = "/tmp/scope-a".to_string();
+    let mut profile_b = sync_profile("photos2", 1);
+    profile_b.local_root = "/tmp/scope-a".to_string();
+    let mut profile_c = sync_profile("screens", 1);
+    profile_c.local_root = "/tmp/scope-c".to_string();
+
+    let identity_a = runtime.sync_identity_for(&profile_a).expect("id a");
+    let identity_b = runtime.sync_identity_for(&profile_b).expect("id b");
+    let identity_c = runtime.sync_identity_for(&profile_c).expect("id c");
+    let lock_a1 = runtime.ledger_lock_for(&identity_a).await;
+    let lock_a2 = runtime.ledger_lock_for(&identity_b).await;
+    let lock_c = runtime.ledger_lock_for(&identity_c).await;
+    assert!(Arc::ptr_eq(&lock_a1, &lock_a2), "same scope -> same mutex");
+    assert!(
+        !Arc::ptr_eq(&lock_a1, &lock_c),
+        "distinct scope -> distinct mutex"
+    );
+    runtime.shutdown().await.expect("shutdown");
 }
