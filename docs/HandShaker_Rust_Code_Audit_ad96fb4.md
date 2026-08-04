@@ -1295,16 +1295,17 @@ APPLICATION_API_VERSION = 1.0.0-preview.1
 # 8. 稳定发布 Definition of Done
 
 以下全部满足后，才建议宣称 Application/FFI/Swift SDK 稳定。
-> 更新于 2026-08-04（审计收尾后）：15/16 已完成，剩余 1 项部分完成。
+> 更新于 2026-08-04（审计收尾后）：16/16 已完成。
 
 - [x] P0-1 至 P0-5 全部关闭，并有确定性回归测试。
 - [x] Application 对 SyncProfile 进行权威校验，不依赖 FFI/Swift。
 - [x] Ledger 文件名无碰撞，文件内验证设备身份。
 - [x] 所有后台任务有明确 owner、JoinHandle 和执行终态。
 - [x] shutdown 返回时没有后台网络/文件任务。
-- [ ] Rust 生成 JSON fixtures，Swift 全量消费通过。
-      （部分：`event_device_updated` 已双向锁死；其余 BackendEvent 变体与
-      DTO fixture 尚待补齐为文件级 fixture 并让 Swift 全量消费）
+- [x] Rust 生成 JSON fixtures，Swift 全量消费通过。
+      （完成于 2026-08-04，commit `bc7c6b9`：13 个 BackendEvent 变体全部有
+      权威 fixture——`examples/gen_event_fixtures.rs` 生成，Rust 锁定测试
+      + Swift 全量解码/re-encode 消费）
 - [x] EventStream 能区分 timeout/closed、检测 sequence gap。
 - [x] 生命周期事件和终态事件不会被静默丢弃。
 - [x] Swift 公共 API 不在 actor/main executor 上执行阻塞 FFI。
