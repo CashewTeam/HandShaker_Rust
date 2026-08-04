@@ -21,6 +21,13 @@ if [ -n "${HS_X86_CARGO:-}" ]; then
     # shellcheck disable=SC2086
     $HS_X86_CARGO build -p handshaker-ffi --release --target x86_64-apple-darwin
 else
+    # Ensure the x86_64 std exists (CI runners need this; local rustup
+    # installs usually have it). A failure here only warns — the build
+    # below then fails with the rustc "can't find crate for core" hint.
+    if command -v rustup >/dev/null 2>&1; then
+        rustup target add x86_64-apple-darwin >/dev/null 2>&1 \
+            || echo "warning: could not add x86_64-apple-darwin target via rustup (HS_X86_CARGO escape hatch available)" >&2
+    fi
     LIBUSB_STATIC=1 cargo build -p handshaker-ffi --release --target x86_64-apple-darwin
 fi
 

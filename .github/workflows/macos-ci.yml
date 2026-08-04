@@ -56,7 +56,11 @@ jobs:
         run: bash scripts/run-ffi-smoke-tests.sh
 
       - name: Stage Apple artifacts and build static XCFramework
-        run: bash scripts/build-ffi-macos.sh
+        # x86_64 std is required by build-ffi-macos.sh (universal build);
+        # rustup target add writes into ~/.rustup, which is writable on CI.
+        run: |
+          rustup target add x86_64-apple-darwin
+          bash scripts/build-ffi-macos.sh
 
       - name: Swift Package tests
         working-directory: platform/macos
