@@ -171,6 +171,13 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
   验证：Rust 9 套件（390+ 项）、Swift 47 测试（2 真机 skip）、C/Swift
   smoke、clippy/fmt 全绿；媒体分页支持按单张照片按需加载（库列表
   metadata-only + `hs_media_thumbnail` 磁盘缓存，回看零网络）。
+- **同步崩溃恢复复审（0.7.4）**：journal 恢复路径绑定当前 profile 的
+  `local_root`，拒绝相对路径和其他同步目录的绝对路径；恢复 ledger 后
+  重新计算 diff 与本地冲突，避免继续执行恢复前的过期计划而重复下载或
+  删除；Swift 媒体分页请求改用 Codable，修复 raw string 把 `limit/cursor`
+  作为字面量发送的问题；Apple 构建固定 macOS 13 最低部署目标，避免
+  vendored libusb 对象继承构建机 SDK 版本。Cargo Workspace 版本递增，
+  Application API 1.0.0、FFI ABI 1.5.0 与 CLI JSON schema 1 均未改变。
 - **Application API v1 正式冻结（1.0.0，2026-08-04）**：审计 DoD 16/16
   全部满足（含全量事件 fixture 双向锁定，commit `bc7c6b9`）；
   `APPLICATION_API_VERSION` 移除 `-preview.1` 后缀；此后破坏性变更须

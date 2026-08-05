@@ -30,6 +30,13 @@ private struct ExifRequest: Encodable {
     let path: String
 }
 
+/// Shared paged media request. Encoding through `JSONEncoder` avoids raw
+/// string interpolation mistakes and omits absent optional fields.
+struct MediaPageRequest: Encodable {
+    let limit: Int?
+    let cursor: UInt64?
+}
+
 // MARK: - Media service
 
 extension HandShakerRuntime {
@@ -45,19 +52,10 @@ extension HandShakerRuntime {
         limit: Int? = nil,
         cursor: UInt64? = nil
     ) async throws -> PhotoLibrary {
-        try await callNative {
+        let body = try ServicesJSON.encode(MediaPageRequest(limit: limit, cursor: cursor))
+        return try await callNative {
             try self.handle.withRuntime { runtime in
-                let request: String
-                if let limit, let cursor {
-                    request = #"{"limit":\(limit),"cursor":\(cursor)}"#
-                } else if let limit {
-                    request = #"{"limit":\(limit)}"#
-                } else if let cursor {
-                    request = #"{"cursor":\(cursor)}"#
-                } else {
-                    request = "{}"
-                }
-                return try withHsRequestThrowing(request) { ptr, len in
+                try withHsRequestThrowing(body) { ptr, len in
                     try hsCall(as: PhotoLibrary.self) {
                         hs_media_photo_library(runtime, sessionID, ptr, len)
                     }
@@ -74,19 +72,10 @@ extension HandShakerRuntime {
         limit: Int? = nil,
         cursor: UInt64? = nil
     ) async throws -> VideoLibrary {
-        try await callNative {
+        let body = try ServicesJSON.encode(MediaPageRequest(limit: limit, cursor: cursor))
+        return try await callNative {
             try self.handle.withRuntime { runtime in
-                let request: String
-                if let limit, let cursor {
-                    request = #"{"limit":\(limit),"cursor":\(cursor)}"#
-                } else if let limit {
-                    request = #"{"limit":\(limit)}"#
-                } else if let cursor {
-                    request = #"{"cursor":\(cursor)}"#
-                } else {
-                    request = "{}"
-                }
-                return try withHsRequestThrowing(request) { ptr, len in
+                try withHsRequestThrowing(body) { ptr, len in
                     try hsCall(as: VideoLibrary.self) {
                         hs_media_video_library(runtime, sessionID, ptr, len)
                     }
@@ -103,19 +92,10 @@ extension HandShakerRuntime {
         limit: Int? = nil,
         cursor: UInt64? = nil
     ) async throws -> AudioLibrary {
-        try await callNative {
+        let body = try ServicesJSON.encode(MediaPageRequest(limit: limit, cursor: cursor))
+        return try await callNative {
             try self.handle.withRuntime { runtime in
-                let request: String
-                if let limit, let cursor {
-                    request = #"{"limit":\(limit),"cursor":\(cursor)}"#
-                } else if let limit {
-                    request = #"{"limit":\(limit)}"#
-                } else if let cursor {
-                    request = #"{"cursor":\(cursor)}"#
-                } else {
-                    request = "{}"
-                }
-                return try withHsRequestThrowing(request) { ptr, len in
+                try withHsRequestThrowing(body) { ptr, len in
                     try hsCall(as: AudioLibrary.self) {
                         hs_media_audio_library(runtime, sessionID, ptr, len)
                     }

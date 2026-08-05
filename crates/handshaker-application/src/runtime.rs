@@ -235,6 +235,19 @@ struct SyncPipeline {
     conflicts: Vec<String>,
 }
 
+/// Compute the executable sync view from one internally consistent ledger
+/// snapshot. Keeping diff and conflict derivation together matters after
+/// journal recovery: neither value may remain based on the pre-recovery
+/// snapshot.
+pub(crate) fn sync_diff_and_conflicts(
+    phone_files: &[RemoteFile],
+    snapshot: &handshaker_core::SyncSnapshot,
+) -> (handshaker_core::SyncDiff, Vec<String>) {
+    let diff = handshaker_core::plan_diff(phone_files, snapshot);
+    let conflicts = handshaker_core::check_conflicts(&diff, snapshot);
+    (diff, conflicts)
+}
+
 /// The application service root. `create` is async by contract; callers
 /// provide their own tokio runtime.
 #[derive(Clone)]
@@ -2365,7 +2378,8 @@ impl HandShakerRuntime {
                 }
             }
         }
-        let store = self.sync_store_for(profile)?;
+        let identity = self.sync_identity_for(profile)?;
+        let store = handshaker_core::SyncStore::discover(&self.sync_config_dir()?, &identity);
         let snapshot = store
             .load()
             .map_err(|error| from_core_error(error, "sync.plan"))?
@@ -2378,7 +2392,7 @@ impl HandShakerRuntime {
         let config = handshaker_core::sync_config(
             &profile.device_uuid,
             &profile.remote_root,
-            &profile.local_root,
+            &identity.local_root,
             &host_uuid,
         );
         let pc_id = handshaker_core::pc_id_from_host_uuid(&host_uuid);
@@ -2428,8 +2442,7 @@ impl HandShakerRuntime {
                     .is_ok()
             })
             .collect();
-        let diff = handshaker_core::plan_diff(&phone_files, &snapshot);
-        let conflicts = handshaker_core::check_conflicts(&diff, &snapshot);
+        let (diff, conflicts) = sync_diff_and_conflicts(&phone_files, &snapshot);
         Ok(SyncPipeline {
             client: session.client.clone(),
             config,
@@ -2691,15 +2704,26 @@ impl HandShakerRuntime {
         if job.cancel.is_cancelled() {
             return Ok(None);
         }
-        let pipeline = self.sync_pipeline(&job.profile, Some(&job.cancel)).await?;
+        let mut pipeline = self.sync_pipeline(&job.profile, Some(&job.cancel)).await?;
         if job.cancel.is_cancelled() {
             return Ok(None);
         }
         let store = self.sync_store_for(&job.profile)?;
         let journal = handshaker_core::SyncJournal::for_ledger(store.path());
         let snapshot = journal
-            .recover(&pipeline.snapshot, |updated| store.save(updated))
+            .recover_in_root(
+                &pipeline.snapshot,
+                std::path::Path::new(&pipeline.config.local_root),
+                |updated| store.save(updated),
+            )
             .map_err(|error| from_core_error(error, "sync.recover"))?;
+        // Recovery can add or remove a ledger row. The phone snapshot is
+        // still current, but the diff and local-conflict set computed by
+        // `sync_pipeline` were based on the pre-recovery ledger. Rebase both
+        // before executing so a recovered download/delete is not repeated
+        // and a stale conflict cannot suppress a now-valid action.
+        (pipeline.diff, pipeline.conflicts) =
+            sync_diff_and_conflicts(&pipeline.phone_files, &snapshot);
         let (result, updated) = handshaker_core::execute_plan_with_checkpoint(
             &pipeline.client,
             &pipeline.config,
@@ -3121,7 +3145,8 @@ impl HandShakerRuntime {
     ) -> AppResult<SyncRunResultDto> {
         let session = self.session_handle(profile.session_id).await?;
         session.record_activity();
-        let store = self.sync_store_for(profile)?;
+        let identity = self.sync_identity_for(profile)?;
+        let store = handshaker_core::SyncStore::discover(&self.sync_config_dir()?, &identity);
         let journal = handshaker_core::SyncJournal::for_ledger(store.path());
         let mut snapshot = store
             .load()
@@ -3130,7 +3155,11 @@ impl HandShakerRuntime {
         // Round-2 P0-2: recover a pending journal action from a previous
         // crashed/aborted run before applying new changes.
         snapshot = journal
-            .recover(&snapshot, |updated| store.save(updated))
+            .recover_in_root(
+                &snapshot,
+                std::path::Path::new(&identity.local_root),
+                |updated| store.save(updated),
+            )
             .map_err(|error| from_core_error(error, "sync.recover"))?;
         let state = self
             .state_store()?
@@ -3140,7 +3169,7 @@ impl HandShakerRuntime {
         let config = handshaker_core::sync_config(
             &profile.device_uuid,
             &profile.remote_root,
-            &profile.local_root,
+            &identity.local_root,
             &host_uuid,
         );
         let mut run = handshaker_core::SyncRunResult::default();

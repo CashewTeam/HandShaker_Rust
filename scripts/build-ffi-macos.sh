@@ -15,6 +15,13 @@
 set -eu
 cd "$(dirname "$0")/.."
 
+# Match Package.swift's declared minimum. Without an explicit deployment
+# target, C objects built by libusb's vendored build inherit the host SDK
+# version (for example macOS 27) and make the XCFramework warn or fail when
+# linked by a macOS 13/14 consumer. Callers may raise this deliberately.
+: "${MACOSX_DEPLOYMENT_TARGET:=13.0}"
+export MACOSX_DEPLOYMENT_TARGET
+
 LIBUSB_STATIC=1 cargo build -p handshaker-ffi --release
 
 if [ -n "${HS_X86_CARGO:-}" ]; then

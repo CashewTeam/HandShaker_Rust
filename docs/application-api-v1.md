@@ -78,9 +78,9 @@ FFI、UniFFI 或任何 UI 框架。
 | `RemoteFileChangeDto` | change_kind/paths + 可选 files/statuses 完整元数据(Phase D/D2 扩展,旧 JSON 反序列化兼容) |
 | `BackendEvent::SyncWatchApplied` | 增量 watch 批次结果事件(Phase D/D6;`kind=sync_watch_applied`) |
 
-## 4. Runtime 接口(preview,未冻结)
+## 4. Runtime 接口（正式冻结）
 
-当前为最小冻结面;M8.1 收口后将更新为完整列表。
+以下为 v1 冻结面；新增兼容接口评估 minor，破坏性修改必须升 major。
 
 ```rust
 impl HandShakerRuntime {
@@ -103,8 +103,8 @@ impl HandShakerRuntime {
     pub async fn plan_download(&self, request: PlanDownloadRequest) -> AppResult<FileOperationPlan>;
     pub async fn plan_upload(&self, request: PlanUploadRequest) -> AppResult<FileOperationPlan>;
     pub async fn execute_file_plan(&self, request: ExecuteFilePlanRequest) -> AppResult<TransferId>;
-    // 同步（Phase D/D6）:profile id = 调用方稳定标识(CLI 用 phone UUID);
-    // ledger 账本在 <state_dir>/sync/<device_uuid>.json(与旧 CLI 路径兼容)
+    // 同步（Phase D/D6）:profile id = 调用方稳定标识；ledger 以
+    // device_uuid + normalized remote_root + canonical local_root 的 scope hash 隔离
     pub async fn plan_sync(&self, profile: SyncProfileDto) -> AppResult<SyncPlanDto>;
     pub async fn start_sync(&self, profile: SyncProfileDto) -> AppResult<String>;
     pub async fn get_sync_status(&self, profile_id: &str) -> AppResult<SyncStatusDto>;
@@ -112,7 +112,7 @@ impl HandShakerRuntime {
     pub async fn stop_sync(&self, profile_id: &str) -> AppResult<()>;
     pub async fn start_sync_watch(&self, profile_id: &str) -> AppResult<()>;
     pub async fn stop_sync_watch(&self, profile_id: &str) -> AppResult<()>;
-    pub async fn sync_ledger_status(&self, device_uuid: &str) -> AppResult<SyncLedgerStatusDto>;   // 无需 session
+    pub async fn sync_ledger_status(&self, identity: &handshaker_core::SyncLedgerIdentity) -> AppResult<SyncLedgerStatusDto>;   // 无需 session；v1 遗留 Core 类型泄漏，待下个 major 收口
 }
 ```
 

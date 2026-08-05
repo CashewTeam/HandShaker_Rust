@@ -46,6 +46,17 @@ final class ServiceTests: XCTestCase {
         try await runtime.shutdown()
     }
 
+    func testMediaPageRequestJSONUsesNumericValuesAndOmitsNil() throws {
+        XCTAssertEqual(
+            try ServicesJSON.encode(MediaPageRequest(limit: 25, cursor: 7)),
+            #"{"cursor":7,"limit":25}"#
+        )
+        XCTAssertEqual(
+            try ServicesJSON.encode(MediaPageRequest(limit: nil, cursor: nil)),
+            "{}"
+        )
+    }
+
     func testEventStreamCancelStopsPoller() async throws {
         let runtime = try HandShakerRuntime()
         let stream = try await runtime.eventStream()
