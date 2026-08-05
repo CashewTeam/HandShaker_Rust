@@ -54,6 +54,9 @@ pub(crate) struct WifiHandshakeInfo {
 /// dialog). Do not reuse the ADB raw public-key exchange.
 pub(crate) struct WifiTrustHandshake {
     host_uuid: String,
+    /// Computer name reported to the phone; `None` falls back to the host
+    /// OS name (env `HOSTNAME`, then `gethostname`).
+    host_name: Option<String>,
     /// Trust records indexed by device_uuid, consulted for the derived key.
     trust: BTreeMap<String, TrustRecord>,
     /// When set, REQUEST_02 carries TRUST_REMOVE to clear the phone record.
@@ -67,6 +70,7 @@ impl WifiTrustHandshake {
     pub fn new(host_uuid: String, trust: BTreeMap<String, TrustRecord>) -> Self {
         Self {
             host_uuid,
+            host_name: None,
             trust,
             trust_remove: false,
             trust_store: None,
@@ -77,6 +81,7 @@ impl WifiTrustHandshake {
     pub fn new_with_trust_remove(host_uuid: String) -> Self {
         Self {
             host_uuid,
+            host_name: None,
             trust: BTreeMap::new(),
             trust_remove: true,
             trust_store: None,
@@ -86,6 +91,12 @@ impl WifiTrustHandshake {
     /// Attach the state store so a revoked trust clears the stale record.
     pub fn with_trust_store(mut self, store: StateStore) -> Self {
         self.trust_store = Some(store);
+        self
+    }
+
+    /// Override the computer name shown on the phone during REQUEST_01.
+    pub fn with_host_name(mut self, host_name: Option<String>) -> Self {
+        self.host_name = host_name;
         self
     }
 }
@@ -109,7 +120,11 @@ where
         let request01 = SspHandShakeRequest01 {
             r#type: Some(SspRequestType::HandshakeRequest01 as i32),
             host_uuid: Some(self.host_uuid.clone()),
-            host_name: Some(host_name()),
+            host_name: Some(
+                self.host_name
+                    .clone()
+                    .unwrap_or_else(host_name),
+            ),
             host_timestamp: Some(unix_seconds()),
             host_smart_sync_protocol_version: Some(HOST_PROTOCOL_VERSION.to_string()),
             host_app_version: Some(HOST_APP_VERSION.to_string()),
@@ -344,10 +359,31 @@ async fn send_unsigned<M: Message, W: AsyncWrite + Unpin>(
 }
 
 fn host_name() -> String {
-    // Protocol field; not user-facing text.
+    // Protocol field; not user-facing text. Prefer the OS host name so the
+    // phone shows the real computer name instead of a user-handshaker
+    // composite (GUI launches usually have no HOSTNAME env var).
     std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("USER").map(|user| format!("{user}-handshaker")))
-        .unwrap_or_else(|_| "handshaker-rust".to_string())
+        .ok()
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            let mut buffer = [0i8; 256];
+            // SAFETY: gethostname writes at most `buffer.len()` bytes into
+            // `buffer` and NUL-terminates the result on success.
+            if unsafe { libc::gethostname(buffer.as_mut_ptr(), buffer.len()) } == 0 {
+                let raw = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) };
+                let name = raw.to_string_lossy().trim_end_matches(".local").to_string();
+                if !name.is_empty() {
+                    return Some(name);
+                }
+            }
+            None
+        })
+        .unwrap_or_else(|| {
+            std::env::var("USER")
+                .ok()
+                .filter(|user| !user.is_empty())
+                .unwrap_or_else(|| "handshaker-rust".to_string())
+        })
 }
 
 fn unix_seconds() -> u64 {

@@ -20,6 +20,7 @@ clap = { version = "4", features = ["derive"] }
 directories = "6"
 flate2 = "1"
 kamadak-exif = "0.6"
+libc = "0.2"
 futures-util = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 md-5 = "0.10"
 mdns-sd = "0.20"

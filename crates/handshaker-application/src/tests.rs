@@ -29,6 +29,7 @@ fn test_config() -> RuntimeConfig {
         adb_path: std::path::PathBuf::from("adb-missing-for-tests"),
         default_timeout: Duration::from_secs(1),
         heartbeat_interval: Duration::from_secs(10),
+        host_name: None,
         state_dir: None,
         wire_log: None,
         wire_log_payload: false,

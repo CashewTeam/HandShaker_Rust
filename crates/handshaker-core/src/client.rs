@@ -83,6 +83,9 @@ pub struct ClientOptions {
     pub timeout: Duration,
     /// Interval between keep-alive heartbeat requests.
     pub heartbeat_interval: Duration,
+    /// Computer name reported to the phone during the Wi-Fi handshake;
+    /// `None` falls back to the host OS name.
+    pub host_name: Option<String>,
     /// Optional path for an explicit, sensitive wire log.
     pub wire_log: Option<PathBuf>,
     /// P2-4: dump payload bytes into the wire log. Default false: the log
@@ -112,6 +115,7 @@ impl Default for ClientOptions {
         Self {
             timeout: Duration::from_secs(30),
             heartbeat_interval: Duration::from_secs(10),
+            host_name: None,
             wire_log: None,
             wire_log_payload: false,
             adb_path: PathBuf::from("adb"),
@@ -253,6 +257,7 @@ impl HandShakerClient {
             .connect()
             .await?;
         let handshake = WifiTrustHandshake::new_with_trust_remove(state.host_uuid.to_string());
+            .with_host_name(options.host_name.clone());
         let session = Session::establish(
             connected.stream,
             options.timeout,
@@ -384,6 +389,7 @@ impl HandShakerClient {
             ConnectionTarget::Wifi { .. } => {
                 let handshake =
                     WifiTrustHandshake::new(state.host_uuid.to_string(), state.trust.clone())
+                        .with_host_name(options.host_name.clone())
                         .with_trust_store(state_store.clone());
                 Session::establish(
                     connected.stream,
@@ -2222,6 +2228,7 @@ mod tests {
             ClientOptions {
                 timeout: Duration::from_secs(5),
                 heartbeat_interval: Duration::from_secs(60),
+                host_name: None,
                 adb_path: PathBuf::from("adb"),
                 wire_log: None,
                 wire_log_payload: false,

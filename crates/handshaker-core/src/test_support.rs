@@ -110,6 +110,7 @@ impl FakeSsp {
             ClientOptions {
                 timeout: Duration::from_secs(3),
                 heartbeat_interval: Duration::from_secs(60),
+                host_name: None,
                 adb_path: self.adb_path.clone(),
                 wire_log: None,
                 wire_log_payload: false,
@@ -207,6 +208,7 @@ impl FakeWifiSsp {
             ClientOptions {
                 timeout: Duration::from_secs(5),
                 heartbeat_interval: Duration::from_secs(60),
+                host_name: None,
                 adb_path: PathBuf::from("adb"),
                 wire_log: None,
                 wire_log_payload: false,
