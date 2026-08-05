@@ -17,7 +17,7 @@ HandShaker_Rust 是兼容原版 Smartisan HandShaker 的跨平台 Rust 后端，
 - 面向 Swift、.NET 等语言的稳定 C ABI；
 - 协议逆向资料、真实设备抓包证据和验证工具。
 
-当前 Workspace 版本为 `0.7.4`，使用 Rust 2024 edition，包含：
+当前 Workspace 版本为 `0.7.5`，使用 Rust 2024 edition，包含：
 
 ```text
 crates/handshaker-core

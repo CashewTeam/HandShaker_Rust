@@ -178,6 +178,12 @@ HandShaker 是 Smartisan（锤子科技）已经停止维护的 Android 文件�
   作为字面量发送的问题；Apple 构建固定 macOS 13 最低部署目标，避免
   vendored libusb 对象继承构建机 SDK 版本。Cargo Workspace 版本递增，
   Application API 1.0.0、FFI ABI 1.5.0 与 CLI JSON schema 1 均未改变。
+- **缩略图按需流式加载修复（0.7.5）**：混合缓存批次只回源缺失项，拒绝
+  把零字节/非普通文件当作命中，并用设备身份 + 媒体 metadata revision
+  避免同路径内容更新后继续显示旧图；FFI 逐项返回稳定失败原因。Swift SDK
+  新增 `thumbnailStream`，以可配置小批次和有界并发逐批产出本地缓存路径，
+  便于 GUI 滚动网格渐进更新。Application API 1.0.0、FFI ABI 1.5.0 与
+  CLI JSON schema 1 均未改变。
 - **Application API v1 正式冻结（1.0.0，2026-08-04）**：审计 DoD 16/16
   全部满足（含全量事件 fixture 双向锁定，commit `bc7c6b9`）；
   `APPLICATION_API_VERSION` 移除 `-preview.1` 后缀；此后破坏性变更须

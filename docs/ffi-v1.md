@@ -134,5 +134,16 @@ typedef struct HsSubscription HsSubscription;
 - 未导出(按需追加,minor):无(MVP 功能面已齐);
 - 大文件字节**不**经过 JSON/FFI(Rust 直接写文件,任务 ID + 进度事件);
 - 缩略图 bytes 经 FFI 写入 `<state_dir>/thumbnails/` 磁盘缓存并返回
-  `cache_path`(不经过 JSON 数字数组;缓存文件按设备+路径 hash 命名,
-  已存在则复用——全命中时跳过设备往返;无 TTL,幂等覆盖 + 原子写)。
+  `cache_path`，不经过 JSON 数字数组。缓存按稳定设备身份 + 路径 + 可用
+  metadata revision（media/album id、size、modified_at、mini_thumb_magic 等）
+  命名：同路径内容更新不会继续命中旧图；仅有 path 的旧请求保持原缓存键。
+  混合命中/缺失批次只向手机发送缺失项，非空普通文件才算命中，零字节或
+  非普通文件会回源修复。结果除 `images/videos/audio_albums` 成功数组外，
+  还包含兼容新增的 `failed_images/failed_videos/failed_audio_albums`，逐项
+  `reason` 为 `thumbnail_error`/`missing_data`/`missing_path`/
+  `missing_response`，GUI 可据此结束占位状态或决定重试。缓存无 TTL，写入
+  使用临时文件 + rename 原子提交。
+- Swift SDK 的 `thumbnailStream(...)` 将可见媒体拆为小批次（默认 8）并以
+  有界并发（默认 2）逐批 yield `ThumbnailResult`，适用于滚动列表/网格的
+  按需渐进加载。取消会停止调度后续批次；已进入同步 C ABI 的批次仍会完成
+  并留下可复用缓存（ABI 1.5 没有中途取消句柄）。
