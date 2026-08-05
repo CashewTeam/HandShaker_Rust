@@ -349,9 +349,9 @@ handshaker device discover --browse-timeout 15s
 mDNS 响应为准。用 `--wifi` 直接指定地址连接（与 `--serial` 互斥），后续命令与 ADB 通道完全一致：
 
 ```sh
-handshaker --wifi 192.168.2.47:45656 device info
-handshaker --wifi 192.168.2.47:45656 fs ls
-handshaker --wifi '192.168.2.47:45656' shell
+handshaker --wifi 192.0.2.47:45656 device info
+handshaker --wifi 192.0.2.47:45656 fs ls
+handshaker --wifi '192.0.2.47:45656' shell
 ```
 
 首次连接时手机会弹出信任对话框，请在手机上确认；确认后主机保存信任记录，重连无需再次确认：

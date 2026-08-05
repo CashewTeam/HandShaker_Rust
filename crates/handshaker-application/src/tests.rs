@@ -451,8 +451,8 @@ fn device_info_maps_to_dto_without_core_leak() {
 fn reconcile_phone_id_becomes_stable_device_id() {
     let discovered = crate::discovery::wifi_device_to_descriptor(handshaker_core::WifiDevice {
         instance: "handshaker_ssp_".to_string(),
-        host: "Android-2.local".to_string(),
-        addresses: vec!["192.168.2.47".to_string()],
+        host: "fixture-phone.local".to_string(),
+        addresses: vec!["192.0.2.47".to_string()],
         port: 45656,
         txt: Default::default(),
     });
@@ -715,12 +715,12 @@ async fn discover_devices_after_shutdown_returns_runtime_closed() {
 fn discovery_result_json_contract_is_stable() {
     let result = crate::discovery::DeviceDiscoveryResult {
         devices: vec![DeviceDescriptor {
-            id: DeviceId("wifi-endpoint:handshaker_ssp_:192.168.2.47:45656".into()),
+            id: DeviceId("wifi-endpoint:handshaker_ssp_:192.0.2.47:45656".into()),
             stable_id: None,
-            display_name: Some("Android-2.local".into()),
+            display_name: Some("fixture-phone.local".into()),
             model: None,
             transport: TransportKind::Wifi,
-            transport_address: "192.168.2.47:45656".into(),
+            transport_address: "192.0.2.47:45656".into(),
             available: true,
             adb: None,
             usb: None,
@@ -739,7 +739,7 @@ fn discovery_result_json_contract_is_stable() {
     assert_eq!(json["devices"][0]["transport"], "wifi");
     assert_eq!(
         json["devices"][0]["id"],
-        "wifi-endpoint:handshaker_ssp_:192.168.2.47:45656"
+        "wifi-endpoint:handshaker_ssp_:192.0.2.47:45656"
     );
     assert_eq!(json["warnings"][0]["transport"], "adb");
     assert_eq!(json["warnings"][0]["error"]["code"], "adb_unavailable");
@@ -874,7 +874,7 @@ async fn trust_api_after_shutdown_returns_runtime_closed() {
     assert_eq!(error.code, PublicErrorCode::RuntimeClosed);
     let error = runtime
         .reset_wifi_trust(crate::trust::ResetWifiTrustRequest {
-            endpoint: "192.168.2.47:45656".to_string(),
+            endpoint: "192.0.2.47:45656".to_string(),
             expected_device_id: DeviceId("phone:uuid-1".to_string()),
         })
         .await

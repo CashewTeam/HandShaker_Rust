@@ -13,7 +13,7 @@ Run this in a terminal WITHOUT proxy/sandbox restrictions (a normal Terminal wor
 
 Usage:
   python3 ssp_wifi.py                # auto mDNS discovery
-  python3 ssp_wifi.py --ip 192.168.2.47 --port 55954
+  python3 ssp_wifi.py --ip <phone_ip> --port <dynamic_port>
   python3 ssp_wifi.py --no-autotap   # you tap "信任" on the phone yourself
 """
 import argparse

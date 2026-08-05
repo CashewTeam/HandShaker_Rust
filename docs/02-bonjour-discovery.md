@@ -88,9 +88,9 @@ if (!mVar.h.get() && serverSocketA != null) {
   | 类型 | 记录 |
   |---|---|
   | PTR | `handshaker_ssp_._handshaker_ssp._tcp.local.` |
-  | SRV | priority=0 weight=0 **port=45656** target=`Android-2.local` |
+  | SRV | priority=0 weight=0 **port=45656** target=`fixture-phone.local` |
   | TXT | 空 |
-  | A | `Android-2.local` → 192.168.2.47 |
+  | A | `fixture-phone.local` → 192.0.2.47 |
   | AAAA | fe80:: / 240e::…（3 条） |
 
 - **SRV 端口与手机实际监听端口一致**；端口会周期性变化（WiFi 服务器注册/注销循环），

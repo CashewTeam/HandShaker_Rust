@@ -61,7 +61,7 @@ pub struct AdbDevice {
 pub struct WifiDevice {
     /// Service instance name, e.g. `handshaker_ssp_`.
     pub instance: String,
-    /// Host name from the SRV record, e.g. `Android-2.local`.
+    /// Host name from the SRV record, e.g. `fixture-phone.local`.
     pub host: String,
     /// Resolved addresses (IPv4 first when present, then IPv6).
     pub addresses: Vec<String>,

@@ -116,21 +116,21 @@ mod tests {
     fn resolved_service_maps_to_public_model() {
         let service = resolved(
             "handshaker_ssp_._handshaker_ssp._tcp.local.",
-            "Android-2.local.",
+            "fixture-phone.local.",
             45656,
             vec![
                 IpAddr::V6(Ipv6Addr::LOCALHOST),
-                IpAddr::V4(Ipv4Addr::new(192, 168, 2, 47)),
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 47)),
             ],
         );
         let device = resolved_to_device(&service);
         assert_eq!(device.instance, "handshaker_ssp_");
-        assert_eq!(device.host, "Android-2.local");
+        assert_eq!(device.host, "fixture-phone.local");
         assert_eq!(device.port, 45656);
         // IPv4 first, then IPv6.
         assert_eq!(
             device.addresses,
-            vec!["192.168.2.47".to_string(), "::1".to_string()]
+            vec!["192.0.2.47".to_string(), "::1".to_string()]
         );
         assert_eq!(device.txt.get("note").map(String::as_str), Some("ssp"));
     }
@@ -150,21 +150,21 @@ mod tests {
         // the earlier one, while distinct hosts (multiple phones) each stay.
         let early = resolved(
             "handshaker_ssp_._handshaker_ssp._tcp.local.",
-            "Android-2.local.",
+            "fixture-phone.local.",
             1000,
-            vec![IpAddr::V4(Ipv4Addr::new(192, 168, 2, 47))],
+            vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 47))],
         );
         let late = resolved(
             "handshaker_ssp_._handshaker_ssp._tcp.local.",
-            "Android-2.local.",
+            "fixture-phone.local.",
             2000,
-            vec![IpAddr::V4(Ipv4Addr::new(192, 168, 2, 47))],
+            vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 47))],
         );
         let other = resolved(
             "handshaker_ssp_._handshaker_ssp._tcp.local.",
-            "Android-3.local.",
+            "fixture-phone-b.local.",
             3000,
-            vec![IpAddr::V4(Ipv4Addr::new(192, 168, 2, 48))],
+            vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 48))],
         );
         let mut devices = BTreeMap::new();
         devices.insert(
@@ -180,11 +180,14 @@ mod tests {
             resolved_to_device(&other),
         );
         assert_eq!(devices.len(), 2, "two distinct phones must both appear");
-        assert_eq!(devices.values().next().expect("device").port, 2000);
+        assert_eq!(
+            devices.get("fixture-phone.local").expect("device").port,
+            2000
+        );
         assert!(
             devices
                 .values()
-                .any(|device| device.host == "Android-3.local")
+                .any(|device| device.host == "fixture-phone-b.local")
         );
     }
 }

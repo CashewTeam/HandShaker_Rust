@@ -74,7 +74,7 @@ fn wifi_flag_parses_and_conflicts_with_serial() {
             "--serial",
             "ABC123",
             "--wifi",
-            "192.168.2.47:45656",
+            "192.0.2.47:45656",
             "device",
             "info",
         ])

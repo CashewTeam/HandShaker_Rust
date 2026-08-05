@@ -1057,17 +1057,16 @@ async fn write_raw(stream: &mut TcpStream, sid: u32, body: &[u8]) {
     }
 }
 
-/// Minimal JPEG with a hand-built APP1 EXIF block: orientation 6, make
-/// "Smartisan", model "U2 Pro", DateTimeOriginal 2023:06:03 01:53:20, focal
-/// 4.28, FNumber 1.8, ISO 100 and GPS 30°16'45.62"N 120°9'55.73"W.
+/// Minimal JPEG with a hand-built APP1 EXIF block containing synthetic
+/// camera metadata and non-user GPS fixture values.
 pub(crate) fn exif_jpeg_fixture() -> Vec<u8> {
-    let make = b"Smartisan\0";
-    let model = b"U2 Pro\0";
-    let datetime = b"2023:06:03 01:53:20\0";
+    let make = b"Fixture\0";
+    let model = b"TestCam\0";
+    let datetime = b"2020:01:02 03:04:05\0";
     let fnum = rational_bytes(18, 10); // 1.8
     let focal = rational_bytes(428, 100); // 4.28
-    let lat = rational_bytes3(&[(30, 1), (16, 1), (4562, 100)]);
-    let lng = rational_bytes3(&[(120, 1), (9, 1), (5573, 100)]);
+    let lat = rational_bytes3(&[(1, 1), (2, 1), (3, 1)]);
+    let lng = rational_bytes3(&[(4, 1), (5, 1), (6, 1)]);
 
     let ifd0_len = 2 + 5 * 12 + 4;
     let exif_len = 2 + 4 * 12 + 4;
@@ -1114,7 +1113,7 @@ pub(crate) fn exif_jpeg_fixture() -> Vec<u8> {
     tiff.extend_from_slice(&4_u16.to_le_bytes());
     tiff.extend_from_slice(&entry_inline(0x0001, 2, 1, ascii_inline(b"N")));
     tiff.extend_from_slice(&entry(0x0002, 5, 3, lat_off));
-    tiff.extend_from_slice(&entry_inline(0x0003, 2, 1, ascii_inline(b"W")));
+    tiff.extend_from_slice(&entry_inline(0x0003, 2, 1, ascii_inline(b"E")));
     tiff.extend_from_slice(&entry(0x0004, 5, 3, lng_off));
     tiff.extend_from_slice(&0_u32.to_le_bytes());
 

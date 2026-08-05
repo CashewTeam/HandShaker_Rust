@@ -108,7 +108,7 @@ handshaker [--wifi IP:PORT | --serial SN] watch [--path DIR]... [--output human|
 
 ### 6.1 真机验收（2026-08，Smartisan OD103，Android 7.1.1）
 
-> 环境：Mac 与手机（192.168.2.47）同一局域网；隔离 HOME（全新 host_uuid）；手机端
+> 环境：Mac 与手机（地址已脱敏）同一局域网；隔离 HOME（全新 host_uuid）；手机端
 > 首次连接弹信任对话框，点击"信任"（TRUST_ALWAYS）后注册监控。
 
 | 验收项 | 结果 |

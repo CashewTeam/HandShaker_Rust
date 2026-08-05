@@ -256,7 +256,7 @@ impl HandShakerClient {
         let connected = WifiConnector::new(address, options.timeout)
             .connect()
             .await?;
-        let handshake = WifiTrustHandshake::new_with_trust_remove(state.host_uuid.to_string());
+        let handshake = WifiTrustHandshake::new_with_trust_remove(state.host_uuid.to_string())
             .with_host_name(options.host_name.clone());
         let session = Session::establish(
             connected.stream,
@@ -2667,9 +2667,9 @@ mod tests {
             .await
             .expect("exif fetch");
         assert_eq!(data.orientation, Some(6));
-        assert_eq!(data.make.as_deref(), Some("Smartisan"));
-        assert_eq!(data.model.as_deref(), Some("U2 Pro"));
-        assert_eq!(data.latitude.as_deref(), Some("30.279339"));
+        assert_eq!(data.make.as_deref(), Some("Fixture"));
+        assert_eq!(data.model.as_deref(), Some("TestCam"));
+        assert_eq!(data.latitude.as_deref(), Some("1.034167"));
         client.close().await.expect("close");
         fake.finish().await;
     }

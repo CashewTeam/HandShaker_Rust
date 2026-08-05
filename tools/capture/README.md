@@ -35,12 +35,12 @@ adb forward --remove tcp:10086
 
 ```bash
 # 一键（sudo）：mDNS 发现 → 自动检测端口 → 完整验证（首次会弹信任框）
-sudo ./run_lan.sh 192.168.2.47
+sudo ./run_lan.sh <phone_ip>
 
 # 或分步：
-sudo python3 ssp_mdns.py 6 --ip 192.168.2.47                     # mDNS 发现（unicast+多播）
-sudo python3 ssp_wifi.py --ip 192.168.2.47 --port 45656 --reset-trust  # 重置信任+重新信任
-sudo python3 ssp_wifi.py --ip 192.168.2.47 --port 45656                  # derived_key 重连（无弹窗）
+sudo python3 ssp_mdns.py 6 --ip <phone_ip>                              # mDNS 发现（unicast+多播）
+sudo python3 ssp_wifi.py --ip <phone_ip> --port <dynamic_port> --reset-trust  # 重置信任+重新信任
+sudo python3 ssp_wifi.py --ip <phone_ip> --port <dynamic_port>          # derived_key 重连（无弹窗）
 ```
 
 - 端口以 mDNS SRV 记录为准（WiFi 服务器端口会周期性变化；`run_lan.sh` 从手机
