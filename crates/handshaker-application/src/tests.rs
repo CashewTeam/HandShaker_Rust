@@ -14,7 +14,7 @@ use crate::dto::{
     DeviceDescriptor, DeviceId, FileEntryDto, RuntimeConfig, SessionId, TransportKind,
 };
 use crate::error::{PublicErrorCode, from_core_error};
-use crate::runtime::normalize_remote_path;
+use crate::runtime::{normalize_remote_path, sync_diff_and_conflicts};
 use crate::sync::{
     SyncActionDto, SyncPlanDto, SyncProfileDto, SyncRunResultDto, SyncStatusDto, one_entry_diff,
     snapshot_to_remote_files, sync_plan_to_dto, sync_run_result_to_dto,
@@ -36,6 +36,46 @@ fn test_config() -> RuntimeConfig {
         transfer_history_capacity: 8,
         transfer_history_ttl: None,
     }
+}
+
+#[test]
+fn journal_recovery_snapshot_rebases_sync_diff() {
+    let phone_file = RemoteFile {
+        path: "/DCIM/a.jpg".to_string(),
+        size: 4,
+        created_at: None,
+        modified_at: Some(10),
+        is_directory: false,
+        checksum: Some("same".to_string()),
+        is_trash: None,
+        id: None,
+        ext_data: None,
+    };
+    let phone_files = vec![phone_file];
+
+    let (stale_diff, _) = sync_diff_and_conflicts(&phone_files, &SyncSnapshot::default());
+    assert_eq!(stale_diff.added, vec!["/DCIM/a.jpg"]);
+
+    // This is the snapshot produced when a pending download journal is
+    // recovered: the file is now represented in the ledger, so executing
+    // the pre-recovery diff would download it a second time.
+    let mut recovered = SyncSnapshot::default();
+    recovered.files.insert(
+        "/DCIM/a.jpg".to_string(),
+        SyncFileRecord {
+            size: 4,
+            checksum: Some("same".to_string()),
+            ext_data: None,
+            modified_at: Some(10),
+            local_path: "/tmp/a.jpg".to_string(),
+            local_sha256: None,
+        },
+    );
+    let (rebased_diff, conflicts) = sync_diff_and_conflicts(&phone_files, &recovered);
+    assert!(rebased_diff.added.is_empty());
+    assert!(rebased_diff.deleted.is_empty());
+    assert!(rebased_diff.info_modified.is_empty());
+    assert!(conflicts.is_empty());
 }
 
 fn fake_device() -> DeviceDescriptor {

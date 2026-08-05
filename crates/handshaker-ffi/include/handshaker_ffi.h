@@ -198,13 +198,16 @@ HsCallResult hs_transfer_start_batch_upload(HsRuntime *runtime,
                                             const uint8_t *request_json,
                                             size_t request_len);
 
-/* Media (ABI 1.3). Library calls take request_json "{}" (reserved for
- * future paging); results are the PhotoLibraryDto/VideoLibraryDto/
- * AudioLibraryDto JSON. Thumbnail request_json:
- * {"images":[{"path":"/a.jpg"}],"videos":[...],"audio_albums":[...]}
- * (all optional); thumbnail bytes are cached on disk under
- * <state_dir>/thumbnails/ and the result carries cache paths:
- * {"images":[{"path":"/a.jpg","cache_path":"/abs/path","size":N}],...}
+/* Media (ABI 1.3). Library calls accept "{}" for a full snapshot or
+ * {"limit":N,"cursor":M} for an Application-cached metadata page; results
+ * are PhotoLibraryDto/VideoLibraryDto/AudioLibraryDto JSON. Thumbnail
+ * request_json accepts metadata items from those lists:
+ * {"images":[{"path":"/a.jpg","media_id":1,"modified_at":2}],
+ *  "videos":[...],"audio_albums":[...]}. Bytes are cached on disk under
+ * <state_dir>/thumbnails/. Mixed cache hits/misses only fetch misses. Result:
+ * {"images":[{"path":"/a.jpg","cache_path":"/abs/path","size":N}],
+ *  "failed_images":[{"path":"/b.jpg","reason":"thumbnail_error"}],...}
+ * with analogous video/audio success and failure arrays.
  * EXIF request_json: {"path":"/a.jpg"}; result: ExifDataDto. */
 HsCallResult hs_media_photo_library(HsRuntime *runtime, uint64_t session_id,
                                     const uint8_t *request_json, size_t request_len);

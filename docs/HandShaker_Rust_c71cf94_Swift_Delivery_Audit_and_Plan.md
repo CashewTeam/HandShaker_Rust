@@ -1018,8 +1018,8 @@ delete 含 trash/sync 选项）。`exists` 由 stat 的 optional 结果表达。
 
 `hs_media_photo_library/video_library/audio_library/fetch_exif`；
 `hs_media_thumbnail` 采用方案 1（Rust 磁盘 cache）：bytes 写入
-`<state_dir>/thumbnails/<kind>-<fnv1a64(path)>.thumb` 并返回
-`cache_path`（已存在复用，不经过 JSON 数字数组）。
+`<state_dir>/thumbnails/` 下按设备 + 路径 + 可用 metadata revision
+生成的 `.thumb` 文件并返回 `cache_path`（不经过 JSON 数字数组）。
 
 ### ~~E6. Diagnostics FFI~~（已完成）
 
@@ -1049,8 +1049,10 @@ transfers/capabilities。
   minor 追加。
 - **缩略图缓存**：state_dir 未配置时回退系统默认目录（macOS
   `~/Library/Application Support/handshaker`、Linux XDG/HOME，与 core
-  一致）；沙箱宿主应显式配置 state_dir。缓存无 TTL（幂等覆盖 + 原子
-  写 + 全命中跳过拉取）——有意设计，避免与宿主缓存策略冲突。
+  一致）；沙箱宿主应显式配置 state_dir。缓存无 TTL；完整 metadata 请求
+  以 revision 防止同路径旧图，混合命中批次只回源缺失项，零字节/非普通
+  文件不算命中，写入使用原子提交。Swift `thumbnailStream` 以小批次有界
+  并发逐批返回，宿主可直接驱动滚动网格的渐进加载。
 
 ---
 

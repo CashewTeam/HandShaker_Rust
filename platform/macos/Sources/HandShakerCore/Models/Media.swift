@@ -265,17 +265,60 @@ public struct ThumbnailCacheEntry: Codable, Sendable, Equatable {
     }
 }
 
-/// `hs_media_thumbnail` result: only entries that returned thumbnail data
-/// are listed.
+/// One per-item thumbnail failure. `reason` is a stable machine token:
+/// `thumbnail_error`, `missing_data`, `missing_path`, or `missing_response`.
+public struct ThumbnailFailure: Codable, Sendable, Equatable {
+    public let path: String?
+    public let mediaID: UInt64?
+    public let albumID: UInt64?
+    public let reason: String
+
+    private enum CodingKeys: String, CodingKey {
+        case path
+        case mediaID = "media_id"
+        case albumID = "album_id"
+        case reason
+    }
+}
+
+/// `hs_media_thumbnail` result. Successful entries carry cache paths;
+/// per-item failures are explicit so a GUI can stop loading indicators and
+/// choose whether to retry. Failure arrays decode as empty when an older
+/// compatible 1.5 library omits them.
 public struct ThumbnailResult: Codable, Sendable, Equatable {
     public let images: [ThumbnailCacheEntry]
     public let videos: [ThumbnailCacheEntry]
     public let audioAlbums: [ThumbnailCacheEntry]
+    public let failedImages: [ThumbnailFailure]
+    public let failedVideos: [ThumbnailFailure]
+    public let failedAudioAlbums: [ThumbnailFailure]
 
     private enum CodingKeys: String, CodingKey {
         case images
         case videos
         case audioAlbums = "audio_albums"
+        case failedImages = "failed_images"
+        case failedVideos = "failed_videos"
+        case failedAudioAlbums = "failed_audio_albums"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        images = try container.decode([ThumbnailCacheEntry].self, forKey: .images)
+        videos = try container.decode([ThumbnailCacheEntry].self, forKey: .videos)
+        audioAlbums = try container.decode([ThumbnailCacheEntry].self, forKey: .audioAlbums)
+        failedImages = try container.decodeIfPresent(
+            [ThumbnailFailure].self,
+            forKey: .failedImages
+        ) ?? []
+        failedVideos = try container.decodeIfPresent(
+            [ThumbnailFailure].self,
+            forKey: .failedVideos
+        ) ?? []
+        failedAudioAlbums = try container.decodeIfPresent(
+            [ThumbnailFailure].self,
+            forKey: .failedAudioAlbums
+        ) ?? []
     }
 }
 

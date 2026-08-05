@@ -26,8 +26,8 @@ pub struct SyncProfileDto {
     pub id: String,
     /// Session whose phone provides the files.
     pub session_id: SessionId,
-    /// Stable phone identifier keying the ledger file
-    /// (`<state_dir>/sync/<device_uuid>.json`).
+    /// Stable phone identifier participating in the v3 ledger scope hash
+    /// together with the normalized remote and local roots.
     pub device_uuid: String,
     /// Phone-side root folder to sync.
     pub remote_root: String,

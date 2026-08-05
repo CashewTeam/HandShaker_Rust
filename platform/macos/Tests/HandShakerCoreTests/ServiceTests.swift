@@ -46,6 +46,42 @@ final class ServiceTests: XCTestCase {
         try await runtime.shutdown()
     }
 
+    func testMediaPageRequestJSONUsesNumericValuesAndOmitsNil() throws {
+        XCTAssertEqual(
+            try ServicesJSON.encode(MediaPageRequest(limit: 25, cursor: 7)),
+            #"{"cursor":7,"limit":25}"#
+        )
+        XCTAssertEqual(
+            try ServicesJSON.encode(MediaPageRequest(limit: nil, cursor: nil)),
+            "{}"
+        )
+    }
+
+    func testEmptyThumbnailStreamFinishesWithoutSessionCall() async throws {
+        let runtime = try HandShakerRuntime()
+        let stream = await runtime.thumbnailStream(sessionID: 999)
+        var yielded = 0
+        for try await _ in stream {
+            yielded += 1
+        }
+        XCTAssertEqual(yielded, 0)
+        try await runtime.shutdown()
+    }
+
+    func testThumbnailStreamRejectsInvalidBatchConfiguration() async throws {
+        let runtime = try HandShakerRuntime()
+        let stream = await runtime.thumbnailStream(sessionID: 999, batchSize: 0)
+        do {
+            for try await _ in stream {}
+            XCTFail("expected invalid thumbnail stream configuration")
+        } catch let error as HandShakerError {
+            guard case .invalidArgument = error else {
+                return XCTFail("expected .invalidArgument, got \(error)")
+            }
+        }
+        try await runtime.shutdown()
+    }
+
     func testEventStreamCancelStopsPoller() async throws {
         let runtime = try HandShakerRuntime()
         let stream = try await runtime.eventStream()

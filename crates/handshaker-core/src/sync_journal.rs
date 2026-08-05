@@ -183,24 +183,65 @@ impl SyncJournal {
     /// Returns the possibly-updated snapshot. Never touches files outside
     /// the journaled paths; a failure (rename/remove/save) keeps the
     /// journal so the next run retries.
-    /// Journaled paths must be absolute and contain no `..` — the journal
-    /// lives in the state dir and could be tampered with by anything that
-    /// can write there; `recover` must never touch files outside the
-    /// journaled paths (round-2 hardening).
-    fn path_is_safe(path: &Path) -> bool {
-        path.is_absolute()
-            && !path
-                .components()
-                .any(|component| matches!(component, std::path::Component::ParentDir))
+    /// Journaled paths must be strict descendants of the trusted sync root.
+    /// Merely requiring an absolute path is insufficient: a tampered or
+    /// misplaced journal could otherwise name any file writable by the
+    /// current user. `strip_prefix` is component-aware, so `/photos-old`
+    /// does not match `/photos`; every suffix component must also be normal.
+    fn path_is_safe(path: &Path, trusted_root: &Path) -> bool {
+        if !path.is_absolute() || !trusted_root.is_absolute() {
+            return false;
+        }
+        let Ok(relative) = path.strip_prefix(trusted_root) else {
+            return false;
+        };
+        let mut components = relative.components();
+        components
+            .next()
+            .is_some_and(|component| matches!(component, std::path::Component::Normal(_)))
+            && components.all(|component| matches!(component, std::path::Component::Normal(_)))
     }
 
+    /// Backward-compatible recovery entry point. This retains the original
+    /// absolute/no-`..` validation for Core callers that do not have a
+    /// profile root. Application and other profile-aware callers must use
+    /// [`Self::recover_in_root`] to bind actions to their sync directory.
     pub fn recover(
         &self,
         snapshot: &SyncSnapshot,
         save: impl FnOnce(&SyncSnapshot) -> Result<()>,
     ) -> Result<SyncSnapshot> {
+        self.recover_impl(snapshot, None, save)
+    }
+
+    /// Recover one pending action, rejecting every file path outside
+    /// `trusted_root` before any filesystem mutation.
+    pub fn recover_in_root(
+        &self,
+        snapshot: &SyncSnapshot,
+        trusted_root: &Path,
+        save: impl FnOnce(&SyncSnapshot) -> Result<()>,
+    ) -> Result<SyncSnapshot> {
+        self.recover_impl(snapshot, Some(trusted_root), save)
+    }
+
+    fn recover_impl(
+        &self,
+        snapshot: &SyncSnapshot,
+        trusted_root: Option<&Path>,
+        save: impl FnOnce(&SyncSnapshot) -> Result<()>,
+    ) -> Result<SyncSnapshot> {
         let Some(action) = self.read()? else {
             return Ok(snapshot.clone());
+        };
+        let path_is_safe = |path: &Path| match trusted_root {
+            Some(root) => Self::path_is_safe(path, root),
+            None => {
+                path.is_absolute()
+                    && !path
+                        .components()
+                        .any(|component| matches!(component, std::path::Component::ParentDir))
+            }
         };
         // Reject tampered/foreign journals before touching anything.
         match &action {
@@ -209,7 +250,7 @@ impl SyncJournal {
                 staged_path,
                 ..
             } => {
-                if !Self::path_is_safe(final_path) || !Self::path_is_safe(staged_path) {
+                if !path_is_safe(final_path) || !path_is_safe(staged_path) {
                     return Err(Error::Configuration(
                         i18n::text("sync.journal_unsafe").to_string(),
                     ));
@@ -220,7 +261,7 @@ impl SyncJournal {
                 trash_path,
                 ..
             } => {
-                if !Self::path_is_safe(original_path) || !Self::path_is_safe(trash_path) {
+                if !path_is_safe(original_path) || !path_is_safe(trash_path) {
                     return Err(Error::Configuration(
                         i18n::text("sync.journal_unsafe").to_string(),
                     ));
@@ -377,7 +418,7 @@ mod tests {
         // "Crash": rename + save never ran.
         let snapshot = SyncSnapshot::default();
         let recovered = journal
-            .recover(&snapshot, |updated| store.save(updated))
+            .recover_in_root(&snapshot, temp.path(), |updated| store.save(updated))
             .expect("recover");
         assert!(final_path.exists(), "rename replayed");
         assert!(!staged.exists());
@@ -404,7 +445,9 @@ mod tests {
         };
         journal.write(&action).expect("journal");
         let recovered = journal
-            .recover(&SyncSnapshot::default(), |updated| store.save(updated))
+            .recover_in_root(&SyncSnapshot::default(), temp.path(), |updated| {
+                store.save(updated)
+            })
             .expect("recover");
         assert_eq!(fs::read(&final_path).unwrap(), b"final", "final untouched");
         assert!(recovered.files.contains_key("/a.jpg"));
@@ -426,7 +469,7 @@ mod tests {
         };
         journal.write(&action).expect("journal");
         let recovered = journal
-            .recover(&SyncSnapshot::default(), save_ok)
+            .recover_in_root(&SyncSnapshot::default(), temp.path(), save_ok)
             .expect("recover");
         assert!(recovered.files.is_empty());
         assert!(!temp.path().join("a.jpg").exists());
@@ -449,7 +492,9 @@ mod tests {
         };
         journal.write(&action).expect("journal");
         let snapshot = snapshot_with("/a.jpg", &local.display().to_string());
-        let recovered = journal.recover(&snapshot, save_ok).expect("recover");
+        let recovered = journal
+            .recover_in_root(&snapshot, temp.path(), save_ok)
+            .expect("recover");
         assert!(local.exists(), "file untouched");
         assert!(recovered.files.contains_key("/a.jpg"), "row kept");
         assert!(!journal.path().exists());
@@ -472,7 +517,7 @@ mod tests {
         journal.write(&action).expect("journal");
         let snapshot = snapshot_with("/a.jpg", "/tmp/a.jpg");
         let recovered = journal
-            .recover(&snapshot, |updated| store.save(updated))
+            .recover_in_root(&snapshot, temp.path(), |updated| store.save(updated))
             .expect("recover");
         assert!(!trash.exists(), "trash removed");
         assert!(!recovered.files.contains_key("/a.jpg"));
@@ -494,7 +539,7 @@ mod tests {
         journal.write(&action).expect("journal");
         let snapshot = snapshot_with("/a.jpg", "/tmp/a.jpg");
         let recovered = journal
-            .recover(&snapshot, |updated| store.save(updated))
+            .recover_in_root(&snapshot, temp.path(), |updated| store.save(updated))
             .expect("recover");
         assert!(!recovered.files.contains_key("/a.jpg"));
         assert!(!journal.path().exists());
@@ -512,14 +557,16 @@ mod tests {
         let action = PendingSyncAction::Download {
             remote_path: "/a.jpg".to_string(),
             final_path: final_path.clone(),
-            staged_path: PathBuf::from("gone"),
+            staged_path: temp.path().join("gone"),
             new_record: record("/a.jpg"),
         };
         journal.write(&action).expect("journal");
         // Force save failure: make the ledger path a directory.
         std::fs::create_dir_all(store.path()).expect("dir-as-ledger");
         let error = journal
-            .recover(&SyncSnapshot::default(), |updated| store.save(updated))
+            .recover_in_root(&SyncSnapshot::default(), temp.path(), |updated| {
+                store.save(updated)
+            })
             .expect_err("save must fail");
         assert!(matches!(error, Error::Configuration(_)));
         assert!(journal.path().exists(), "journal retained for retry");
@@ -547,7 +594,7 @@ mod tests {
         };
         journal.write(&action).expect("journal");
         let error = journal
-            .recover(&SyncSnapshot::default(), save_ok)
+            .recover_in_root(&SyncSnapshot::default(), temp.path(), save_ok)
             .expect_err("rename must fail");
         assert!(matches!(error, Error::LocalIo(_)));
         assert!(staged.exists(), "staged must survive a failed replay");
@@ -574,7 +621,9 @@ mod tests {
         };
         journal.write(&action).expect("journal");
         let snapshot = snapshot_with("/a.jpg", &original.display().to_string());
-        let recovered = journal.recover(&snapshot, save_ok).expect("recover");
+        let recovered = journal
+            .recover_in_root(&snapshot, temp.path(), save_ok)
+            .expect("recover");
         assert!(original.exists(), "recreated original untouched");
         assert!(!trash.exists(), "orphan trash removed");
         assert!(recovered.files.contains_key("/a.jpg"), "row kept for retry");
@@ -596,9 +645,37 @@ mod tests {
         };
         journal.write(&action).expect("journal");
         let error = journal
-            .recover(&SyncSnapshot::default(), save_ok)
+            .recover_in_root(&SyncSnapshot::default(), temp.path(), save_ok)
             .expect_err("unsafe path must be rejected");
         assert!(matches!(error, Error::Configuration(_)));
+        assert!(journal.path().exists(), "journal kept for inspection");
+    }
+
+    // An absolute path is not inherently trusted: a journal copied from a
+    // different profile (or tampered in the state directory) must never be
+    // able to delete a file outside this profile's local root.
+    #[test]
+    fn recover_rejects_absolute_path_outside_trusted_root() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let store = store_at(&temp);
+        let journal = SyncJournal::for_ledger(store.path());
+        let original = outside.path().join("keep.jpg");
+        let trash = outside.path().join("keep.jpg.hs-trash.1");
+        fs::write(&original, b"keep").expect("outside file");
+        let action = PendingSyncAction::Delete {
+            remote_path: "/keep.jpg".to_string(),
+            original_path: original.clone(),
+            trash_path: trash,
+        };
+        journal.write(&action).expect("journal");
+
+        let error = journal
+            .recover_in_root(&SyncSnapshot::default(), temp.path(), save_ok)
+            .expect_err("foreign absolute path must be rejected");
+
+        assert!(matches!(error, Error::Configuration(_)));
+        assert_eq!(fs::read(&original).expect("outside file survives"), b"keep");
         assert!(journal.path().exists(), "journal kept for inspection");
     }
 }

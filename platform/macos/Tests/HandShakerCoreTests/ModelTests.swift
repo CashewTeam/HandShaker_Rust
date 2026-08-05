@@ -258,6 +258,26 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(library.cameraAlbumID, 5)
     }
 
+    func testThumbnailResultDecodesFailuresAndOlderShape() throws {
+        let json = """
+        {"images":[{"path":"/a.jpg","cache_path":"/tmp/a.thumb","size":42}],\
+        "videos":[],"audio_albums":[],\
+        "failed_images":[{"path":"/b.jpg","media_id":7,"reason":"thumbnail_error"}],\
+        "failed_videos":[],"failed_audio_albums":[]}
+        """
+        let result = try decoder.decode(ThumbnailResult.self, from: Data(json.utf8))
+        XCTAssertEqual(result.images.first?.path, "/a.jpg")
+        XCTAssertEqual(result.failedImages.first?.path, "/b.jpg")
+        XCTAssertEqual(result.failedImages.first?.mediaID, 7)
+        XCTAssertEqual(result.failedImages.first?.reason, "thumbnail_error")
+
+        let legacy = #"{"images":[],"videos":[],"audio_albums":[]}"#
+        let legacyResult = try decoder.decode(ThumbnailResult.self, from: Data(legacy.utf8))
+        XCTAssertTrue(legacyResult.failedImages.isEmpty)
+        XCTAssertTrue(legacyResult.failedVideos.isEmpty)
+        XCTAssertTrue(legacyResult.failedAudioAlbums.isEmpty)
+    }
+
     func testSyncStatusDecodes() throws {
         // SyncStatusDto shape (sync.rs:75).
         let json = """

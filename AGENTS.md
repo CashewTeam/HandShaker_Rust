@@ -17,7 +17,7 @@ HandShaker_Rust 是兼容原版 Smartisan HandShaker 的跨平台 Rust 后端，
 - 面向 Swift、.NET 等语言的稳定 C ABI；
 - 协议逆向资料、真实设备抓包证据和验证工具。
 
-当前 Workspace 版本为 `0.7.3`，使用 Rust 2024 edition，包含：
+当前 Workspace 版本为 `0.7.5`，使用 Rust 2024 edition，包含：
 
 ```text
 crates/handshaker-core
@@ -275,48 +275,28 @@ Rust GTK 前端可直接依赖 Application；Swift、.NET 和其他语言优先�
 
 ---
 
-## 4. 当前迁移状态与临时边界
+## 4. 当前迁移状态与边界
 
-当前 CLI 的以下能力已经主要通过 Application：
+当前 CLI 的业务命令已经通过 Application，包括：
 
-- `device list`；
+- `device list/info/ping`；
 - 普通命令连接和 Session Registry；
 - `fs ls/stat/exists/mkdir/mv/count/rm`；
 - `fs pull/push` 的批量实际执行；
 - clipboard 全部命令；
-- media photo/video/audio/thumbnail。
+- media photo/video/audio/thumbnail；
+- trust、watch 与 sync plan/run/watch/status。
 
-以下仍包含 Core 直连或 CLI 专属编排：
+以下仍为明确保留的 CLI 边界：
 
-- `device info/ping`；
-- Wi-Fi discover；
-- trust list/remove/reset；
-- pull/push 的部分 stat、exists 和覆盖预检；
-- watch 的回调连接和事件循环；
-- sync plan/run/watch/status；
-- shell/batch 交互循环。
+- `device discover` 的 Wi-Fi 广播发现仍直接调用 Core；
+- shell/batch/TTY/确认/输出循环；
+- Core error 与本地化资源到既有 CLI 退出码和文案的兼容适配。
 
-`shell` 和 `batch` 的终端循环保留在 CLI 是设计决定。
-但循环执行的业务命令应逐步只调用 Application。
-
-`watch` 和 `sync` 当前保留 Core 路径，不代表 GUI 应直接调用 Core。
-GUI 需要这些能力时，应先建立 Application 事件桥接或 SyncService，再扩展 FFI。
-
-Application 当前存在过渡接口：
-
-```rust
-HandShakerRuntime::session_client(...)
-```
-
-它会暴露 Core `HandShakerClient`，仅供迁移期间复用已有连接。
-
-规则：
-
-- 不得新增新的 `session_client()` 调用点；
-- 不得让 FFI 或 GUI 使用该接口；
-- 修改相关命令时优先把所需能力加入 Application；
-- 迁移完成后删除该接口；
-- 删除前检查 CLI 的所有剩余 Core 调用和连接关闭流程。
+`shell` 和 `batch` 的终端循环保留在 CLI 是设计决定；循环执行的业务命令
+必须继续调用 Application。`session_client()` 过渡入口已经删除，不得重新
+引入。修改 `device discover` 时应优先把剩余发现能力迁入 Application，不能
+为新命令增加 Core 业务直连。
 
 ---
 
@@ -520,12 +500,11 @@ Application 公开 API 不得出现：
 当前代码中的：
 
 ```rust
-APPLICATION_API_VERSION = "1.0.0-preview.1"
+APPLICATION_API_VERSION = "1.0.0"
 ```
 
-与 Cargo Workspace 版本独立。当前为 preview 状态：v1 契约收口前允许
-破坏性源码级修改（如移除 `session_client()` 过渡入口），正式冻结后
-才移除 `-preview.N` 后缀并执行 major 递增规则。
+与 Cargo Workspace 版本独立。v1 契约已经冻结；破坏公开 Rust/JSON 契约
+必须执行 major 递增规则。
 
 任何公开契约变化必须判断：
 
@@ -674,7 +653,7 @@ Transfer history 必须有容量或 TTL 策略，不能无限增长。
 Rust 源码当前声明：
 
 ```text
-ABI 1.2.0
+ABI 1.5.0
 ```
 
 FFI ABI 与 Cargo Workspace、Application API 和 CLI schema 独立。
@@ -1398,20 +1377,17 @@ docs/m8-migration.md
 
 ## 21. 当前阶段的高优先级约束
 
-在完成 Swift 正式交付前，优先处理以下事项，不要继续扩大债务：
+在 Swift 正式交付与真机发布验收前，优先处理以下事项，不要继续扩大债务：
 
-1. 统一 FFI Rust 常量、Header、文档和 Swift ABI 检查；
-2. 移除 Session Registry 锁跨网络 await；
-3. 重构 disconnect/shutdown 为确定性关闭；
-4. 让 `state_dir` 和 `wire_log` 配置真实生效；
-5. 桥接 Core typed events 到 Application；
-6. 完成 Transfer total、progress、cancel 和终态事件；
-7. 建立有界 Transfer history；
-8. 删除 `session_client()` 过渡泄漏；
-9. 补齐文件、剪贴板、信任和媒体的 GUI 所需 FFI；
-10. 为大缩略图设计非 JSON 二进制接口；
-11. 建立静态 XCFramework 和 Swift Package；
-12. 将 C/Swift smoke、Linux 和 Windows 验证纳入 CI。
+1. 保持 FFI Rust 常量、Header、文档、ABI snapshot 与 Swift 检查一致；
+2. 完成媒体分页、同步崩溃恢复和断连/取消的真机故障注入验收；
+3. 完成静态 XCFramework/Swift Package 的签名、公证和干净消费者验证；
+4. 评估并实现 discovery watcher 后再发布 `RuntimeStarted`/`DeviceAdded`/
+   `DeviceRemoved`，不得让文档领先运行时；
+5. 为 `sync_ledger_status` 的 v1 Core 类型泄漏设计 Application DTO 替代入口，
+   在兼容版本周期内迁移，不能继续新增类似泄漏；
+6. 迁移 CLI 最后的 `device discover` Core 业务直连；
+7. 继续维持有界队列、任务所有权、确定性 shutdown 和 JSON/事件 fixture。
 
 若任务与上述事项无关，不要顺手大规模重构；但不得引入会让这些问题更难解决的新依赖和新 API。
 

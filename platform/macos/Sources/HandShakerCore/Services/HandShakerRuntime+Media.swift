@@ -3,20 +3,12 @@ import HandShakerFFI
 
 // MARK: - Request DTOs (FFI JSON contracts, handshaker_ffi.h)
 
-/// `hs_media_thumbnail` request entry: minimal identity object
-/// `{"path":"..."}` — only entries with a path are sent. The library DTO
-/// fields beyond the path are not significant for the fetch
-/// (`FfiThumbnailImageItem` in ffi/src/media.rs).
-private struct ThumbnailEntry: Encodable {
-    let path: String
-}
-
 /// `hs_media_thumbnail` request:
 /// `{"images":[...],"videos":[...],"audio_albums":[...]}` (all optional).
 private struct ThumbnailRequest: Encodable {
-    let images: [ThumbnailEntry]
-    let videos: [ThumbnailEntry]
-    let audioAlbums: [ThumbnailEntry]
+    let images: [ImageFile]
+    let videos: [VideoFile]
+    let audioAlbums: [AudioAlbum]
 
     private enum CodingKeys: String, CodingKey {
         case images
@@ -25,9 +17,47 @@ private struct ThumbnailRequest: Encodable {
     }
 }
 
+private func thumbnailBatches(
+    images: [ImageFile],
+    videos: [VideoFile],
+    audioAlbums: [AudioAlbum],
+    batchSize: Int
+) -> [ThumbnailRequest] {
+    var batches: [ThumbnailRequest] = []
+    for start in stride(from: 0, to: images.count, by: batchSize) {
+        batches.append(ThumbnailRequest(
+            images: Array(images[start..<min(start + batchSize, images.count)]),
+            videos: [],
+            audioAlbums: []
+        ))
+    }
+    for start in stride(from: 0, to: videos.count, by: batchSize) {
+        batches.append(ThumbnailRequest(
+            images: [],
+            videos: Array(videos[start..<min(start + batchSize, videos.count)]),
+            audioAlbums: []
+        ))
+    }
+    for start in stride(from: 0, to: audioAlbums.count, by: batchSize) {
+        batches.append(ThumbnailRequest(
+            images: [],
+            videos: [],
+            audioAlbums: Array(audioAlbums[start..<min(start + batchSize, audioAlbums.count)])
+        ))
+    }
+    return batches
+}
+
 /// `hs_media_fetch_exif` request: `{"path":"..."}`.
 private struct ExifRequest: Encodable {
     let path: String
+}
+
+/// Shared paged media request. Encoding through `JSONEncoder` avoids raw
+/// string interpolation mistakes and omits absent optional fields.
+struct MediaPageRequest: Encodable {
+    let limit: Int?
+    let cursor: UInt64?
 }
 
 // MARK: - Media service
@@ -45,19 +75,10 @@ extension HandShakerRuntime {
         limit: Int? = nil,
         cursor: UInt64? = nil
     ) async throws -> PhotoLibrary {
-        try await callNative {
+        let body = try ServicesJSON.encode(MediaPageRequest(limit: limit, cursor: cursor))
+        return try await callNative {
             try self.handle.withRuntime { runtime in
-                let request: String
-                if let limit, let cursor {
-                    request = #"{"limit":\(limit),"cursor":\(cursor)}"#
-                } else if let limit {
-                    request = #"{"limit":\(limit)}"#
-                } else if let cursor {
-                    request = #"{"cursor":\(cursor)}"#
-                } else {
-                    request = "{}"
-                }
-                return try withHsRequestThrowing(request) { ptr, len in
+                try withHsRequestThrowing(body) { ptr, len in
                     try hsCall(as: PhotoLibrary.self) {
                         hs_media_photo_library(runtime, sessionID, ptr, len)
                     }
@@ -74,19 +95,10 @@ extension HandShakerRuntime {
         limit: Int? = nil,
         cursor: UInt64? = nil
     ) async throws -> VideoLibrary {
-        try await callNative {
+        let body = try ServicesJSON.encode(MediaPageRequest(limit: limit, cursor: cursor))
+        return try await callNative {
             try self.handle.withRuntime { runtime in
-                let request: String
-                if let limit, let cursor {
-                    request = #"{"limit":\(limit),"cursor":\(cursor)}"#
-                } else if let limit {
-                    request = #"{"limit":\(limit)}"#
-                } else if let cursor {
-                    request = #"{"cursor":\(cursor)}"#
-                } else {
-                    request = "{}"
-                }
-                return try withHsRequestThrowing(request) { ptr, len in
+                try withHsRequestThrowing(body) { ptr, len in
                     try hsCall(as: VideoLibrary.self) {
                         hs_media_video_library(runtime, sessionID, ptr, len)
                     }
@@ -103,19 +115,10 @@ extension HandShakerRuntime {
         limit: Int? = nil,
         cursor: UInt64? = nil
     ) async throws -> AudioLibrary {
-        try await callNative {
+        let body = try ServicesJSON.encode(MediaPageRequest(limit: limit, cursor: cursor))
+        return try await callNative {
             try self.handle.withRuntime { runtime in
-                let request: String
-                if let limit, let cursor {
-                    request = #"{"limit":\(limit),"cursor":\(cursor)}"#
-                } else if let limit {
-                    request = #"{"limit":\(limit)}"#
-                } else if let cursor {
-                    request = #"{"cursor":\(cursor)}"#
-                } else {
-                    request = "{}"
-                }
-                return try withHsRequestThrowing(request) { ptr, len in
+                try withHsRequestThrowing(body) { ptr, len in
                     try hsCall(as: AudioLibrary.self) {
                         hs_media_audio_library(runtime, sessionID, ptr, len)
                     }
@@ -126,13 +129,14 @@ extension HandShakerRuntime {
 
     /// Fetch thumbnails for the requested media entries and cache them on
     /// disk (`hs_media_thumbnail`). The result carries cache paths, not
-    /// bytes; only entries that returned thumbnail data are listed.
+    /// bytes; per-item phone failures are returned in the matching `failed*`
+    /// arrays instead of disappearing from the result.
     ///
     /// - Parameters:
     ///   - sessionID: open session id.
-    ///   - images: photo entries to thumbnail (identified by `path`).
-    ///   - videos: video entries to thumbnail (identified by `path`).
-    ///   - audioAlbums: audio albums to thumbnail (identified by `path`).
+    ///   - images: photo metadata entries (identified by media id or path).
+    ///   - videos: video metadata entries (identified by media id or path).
+    ///   - audioAlbums: album metadata entries (identified by album id or path).
     public func thumbnail(
         sessionID: UInt64,
         images: [ImageFile] = [],
@@ -140,9 +144,9 @@ extension HandShakerRuntime {
         audioAlbums: [AudioAlbum] = []
     ) async throws -> ThumbnailResult {
         let request = ThumbnailRequest(
-            images: images.compactMap(\.path).map(ThumbnailEntry.init(path:)),
-            videos: videos.compactMap(\.path).map(ThumbnailEntry.init(path:)),
-            audioAlbums: audioAlbums.compactMap(\.path).map(ThumbnailEntry.init(path:))
+            images: images,
+            videos: videos,
+            audioAlbums: audioAlbums
         )
         let body = try ServicesJSON.encode(request)
         return try await callNative {
@@ -153,6 +157,81 @@ extension HandShakerRuntime {
                     }
                 }
             }
+        }
+    }
+
+    /// Lazily fetch thumbnail batches and yield each completed batch as soon
+    /// as it is cached. This is the preferred API for a scrolling grid/list:
+    /// pass only the currently needed entries, update visible cells for every
+    /// yielded result, and cancel the consuming task when the view disappears.
+    ///
+    /// Batches run with bounded concurrency. Cancelling the stream stops new
+    /// batches from being scheduled; an FFI call already executing still runs
+    /// to completion because the synchronous C ABI has no mid-call cancel
+    /// handle. Its result remains safely cached for a later request.
+    public func thumbnailStream(
+        sessionID: UInt64,
+        images: [ImageFile] = [],
+        videos: [VideoFile] = [],
+        audioAlbums: [AudioAlbum] = [],
+        batchSize: Int = 8,
+        maxConcurrentBatches: Int = 2
+    ) -> AsyncThrowingStream<ThumbnailResult, Error> {
+        guard batchSize > 0, maxConcurrentBatches > 0 else {
+            return AsyncThrowingStream { continuation in
+                continuation.finish(throwing: HandShakerError.invalidArgument(
+                    "batchSize and maxConcurrentBatches must be greater than zero"
+                ))
+            }
+        }
+        let batches = thumbnailBatches(
+            images: images,
+            videos: videos,
+            audioAlbums: audioAlbums,
+            batchSize: batchSize
+        )
+        return AsyncThrowingStream { continuation in
+            let producer = Task {
+                do {
+                    try await withThrowingTaskGroup(of: ThumbnailResult.self) { group in
+                        var next = 0
+                        while next < min(maxConcurrentBatches, batches.count) {
+                            let batch = batches[next]
+                            next += 1
+                            group.addTask {
+                                try await self.thumbnail(
+                                    sessionID: sessionID,
+                                    images: batch.images,
+                                    videos: batch.videos,
+                                    audioAlbums: batch.audioAlbums
+                                )
+                            }
+                        }
+                        while let result = try await group.next() {
+                            try Task.checkCancellation()
+                            continuation.yield(result)
+                            if next < batches.count {
+                                let batch = batches[next]
+                                next += 1
+                                group.addTask {
+                                    try await self.thumbnail(
+                                        sessionID: sessionID,
+                                        images: batch.images,
+                                        videos: batch.videos,
+                                        audioAlbums: batch.audioAlbums
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    continuation.finish()
+                } catch is CancellationError {
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in producer.cancel() }
         }
     }
 

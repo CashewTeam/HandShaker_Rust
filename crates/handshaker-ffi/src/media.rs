@@ -1,13 +1,14 @@
 //! FFI: media service (Phase E / E5) — photo/video/audio libraries,
 //! on-disk thumbnail caching, and EXIF metadata.
 //!
-//! Thumbnail design (Phase E priority 1): the thumbnail bytes returned by
-//! the application are written to `<state_dir>/thumbnails/<kind>-<hash>.thumb`
-//! on first request and reused on later requests (no re-fetch), so the
-//! host app can render from local files. `<state_dir>` is the runtime's
-//! configured `state_dir`, or the core default config directory when not
-//! configured; failures to create the cache directory or write a thumbnail
-//! are surfaced as explicit errors.
+//! Thumbnail design (Phase E priority 1): bytes returned by the application
+//! are written to a device/path/revision-keyed file under
+//! `<state_dir>/thumbnails/`, so the host app renders local files without
+//! moving image bytes through JSON. Mixed hit/miss requests only send misses
+//! to the phone; corrupt entries are repaired and per-item failures remain
+//! observable. `<state_dir>` is the runtime's configured value, or the core
+//! default config directory when not configured; cache I/O failures are
+//! surfaced as explicit errors.
 //!
 //! Every exported function follows the crate-wide contract: panic isolation
 //! via `catch`, NULL-safe handles, and stable `InvalidArgument` errors for
@@ -17,6 +18,7 @@
 // them is audited and documented (Safety sections).
 #![allow(unsafe_op_in_unsafe_fn)]
 
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 
@@ -25,7 +27,7 @@ use handshaker_application::{
     PublicErrorCode, SessionId, VideoFileDto, VideoLibraryDto, merge_audio_library,
     merge_photo_library, merge_video_library,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::HsRuntime;
 use crate::ffi_try;
@@ -250,6 +252,12 @@ struct FfiThumbnailImageItem {
     media_id: Option<u64>,
     #[serde(default)]
     album_id: Option<u64>,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
+    modified_at: Option<u64>,
+    #[serde(default)]
+    mini_thumb_magic: Option<String>,
 }
 
 /// Thumbnail request entry for a video (same identity fields).
@@ -261,6 +269,10 @@ struct FfiThumbnailVideoItem {
     media_id: Option<u64>,
     #[serde(default)]
     album_id: Option<u64>,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
+    modified_at: Option<u64>,
 }
 
 /// Thumbnail request entry for an audio album (identified by path/album id;
@@ -297,13 +309,158 @@ struct FfiThumbnailRequest {
     audio_albums: Vec<FfiThumbnailAudioItem>,
 }
 
+#[derive(Debug, Serialize)]
+struct FfiThumbnailCacheEntry {
+    path: String,
+    cache_path: String,
+    size: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FfiThumbnailFailure {
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    media_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    album_id: Option<u64>,
+    reason: &'static str,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct FfiThumbnailResult {
+    images: Vec<FfiThumbnailCacheEntry>,
+    videos: Vec<FfiThumbnailCacheEntry>,
+    audio_albums: Vec<FfiThumbnailCacheEntry>,
+    failed_images: Vec<FfiThumbnailFailure>,
+    failed_videos: Vec<FfiThumbnailFailure>,
+    failed_audio_albums: Vec<FfiThumbnailFailure>,
+}
+
+trait ThumbnailResponseItem {
+    fn path(&self) -> Option<&str>;
+    fn media_id(&self) -> Option<u64>;
+    fn album_id(&self) -> Option<u64>;
+    fn thumbnail(&self) -> Option<&[u8]>;
+    fn thumbnail_error(&self) -> bool;
+}
+
+struct CachedThumbnailResponses {
+    cached: Vec<FfiThumbnailCacheEntry>,
+    failed: Vec<FfiThumbnailFailure>,
+    responded: HashSet<String>,
+}
+
+impl ThumbnailResponseItem for ImageFileDto {
+    fn path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
+    fn media_id(&self) -> Option<u64> {
+        self.media_id
+    }
+    fn album_id(&self) -> Option<u64> {
+        self.album_id
+    }
+    fn thumbnail(&self) -> Option<&[u8]> {
+        self.thumbnail.as_deref()
+    }
+    fn thumbnail_error(&self) -> bool {
+        self.thumbnail_error
+    }
+}
+
+impl ThumbnailResponseItem for VideoFileDto {
+    fn path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
+    fn media_id(&self) -> Option<u64> {
+        self.media_id
+    }
+    fn album_id(&self) -> Option<u64> {
+        self.album_id
+    }
+    fn thumbnail(&self) -> Option<&[u8]> {
+        self.thumbnail.as_deref()
+    }
+    fn thumbnail_error(&self) -> bool {
+        self.thumbnail_error
+    }
+}
+
+impl ThumbnailResponseItem for AudioAlbumDto {
+    fn path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
+    fn media_id(&self) -> Option<u64> {
+        None
+    }
+    fn album_id(&self) -> Option<u64> {
+        self.album_id
+    }
+    fn thumbnail(&self) -> Option<&[u8]> {
+        self.thumbnail.as_deref()
+    }
+    fn thumbnail_error(&self) -> bool {
+        self.thumbnail_error
+    }
+}
+
+fn cache_thumbnail_responses<T: ThumbnailResponseItem>(
+    items: &[T],
+    cache_dir: &Path,
+    kind: &str,
+    device_key: &str,
+    revisions: &HashMap<String, String>,
+    operation: &str,
+) -> Result<CachedThumbnailResponses, HsCallResult> {
+    let mut cached = Vec::new();
+    let mut failed = Vec::new();
+    let mut responded = HashSet::new();
+    for item in items {
+        let identity_id = item.media_id().or_else(|| item.album_id());
+        mark_thumbnail_response(&mut responded, item.path(), identity_id);
+        let failure = |reason| FfiThumbnailFailure {
+            path: item.path().map(str::to_owned),
+            media_id: item.media_id(),
+            album_id: item.album_id(),
+            reason,
+        };
+        if item.thumbnail_error() {
+            failed.push(failure("thumbnail_error"));
+            continue;
+        }
+        let Some(path) = item.path() else {
+            failed.push(failure("missing_path"));
+            continue;
+        };
+        let Some(bytes) = item.thumbnail().filter(|bytes| !bytes.is_empty()) else {
+            failed.push(failure("missing_data"));
+            continue;
+        };
+        let revision = revisions.get(path).map(String::as_str).unwrap_or("");
+        let cache_path = cache_thumbnail(
+            cache_dir, kind, device_key, path, revision, bytes, operation,
+        )?;
+        cached.push(FfiThumbnailCacheEntry {
+            path: path.to_string(),
+            cache_path,
+            size: bytes.len() as u64,
+        });
+    }
+    Ok(CachedThumbnailResponses {
+        cached,
+        failed,
+        responded,
+    })
+}
+
 /// `hs_media_thumbnail` — fetch thumbnails for the requested media entries
 /// and cache them on disk. Result JSON:
 /// `{"images":[{"path":"/remote/path","cache_path":"/abs/cache/file","size":N}, ...],
-///   "videos":[...], "audio_albums":[...]}` — only entries that returned
-/// thumbnail data are listed; each `cache_path` points at
-/// `<state_dir>/thumbnails/<kind>-<hash>.thumb` and is reused across calls
-/// without re-fetching.
+///   "videos":[...], "audio_albums":[...], "failed_images":[...],
+///   "failed_videos":[...], "failed_audio_albums":[...]}`. Successful
+/// entries carry local cache paths; failures carry stable `reason` tokens.
+/// Metadata-rich requests version the cache by media id/size/modification
+/// fields, while path-only legacy requests retain the original stable key.
 ///
 /// # Safety
 /// `runtime` must be a valid handle; `request_ptr`/`request_len` must
@@ -324,43 +481,29 @@ pub unsafe extern "C" fn hs_media_thumbnail(
                     .with_detail(error.to_string()),
             )
         }));
-        let images: Vec<ImageFileDto> = ffi
+        if ffi
             .images
             .iter()
-            .map(|item| ImageFileDto {
-                path: item.path.clone(),
-                media_id: item.media_id,
-                album_id: item.album_id,
-                ..ImageFileDto::default()
-            })
-            .collect();
-        let videos: Vec<VideoFileDto> = ffi
-            .videos
-            .iter()
-            .map(|item| VideoFileDto {
-                path: item.path.clone(),
-                media_id: item.media_id,
-                album_id: item.album_id,
-                ..VideoFileDto::default()
-            })
-            .collect();
-        let audio_albums: Vec<AudioAlbumDto> = ffi
-            .audio_albums
-            .iter()
-            .map(|item| AudioAlbumDto {
-                path: item.path.clone(),
-                album_id: item.album_id,
-                name: item.name.clone(),
-                artist_id: item.artist_id,
-                artist: item.artist.clone(),
-                year: item.year,
-                thumbnail: None,
-                thumbnail_error: false,
-            })
-            .collect();
-        // Cache key is per-device (review fix): two phones sharing the same
-        // remote path must not collide. The phone uuid (stable identity) is
-        // preferred; the session id is the fallback for snapshots without it.
+            .any(|item| item.path.is_none() && item.media_id.is_none())
+            || ffi
+                .videos
+                .iter()
+                .any(|item| item.path.is_none() && item.media_id.is_none())
+            || ffi
+                .audio_albums
+                .iter()
+                .any(|item| item.path.is_none() && item.album_id.is_none())
+        {
+            return err(&PublicError::new(
+                PublicErrorCode::InvalidArgument,
+                "thumbnail entries require a path or category id",
+            )
+            .operation("media_thumbnail"));
+        }
+        // Cache key is per-device: two phones sharing the same remote path
+        // must not collide. Prefer the phone UUID, then the reconciled stable
+        // id, and finally the transport descriptor id. Session ids are only
+        // runtime-local and therefore are not safe cache identities.
         let device_key = match runtime._tokio.block_on(async {
             runtime
                 .app
@@ -371,150 +514,199 @@ pub unsafe extern "C" fn hs_media_thumbnail(
                 .device_info
                 .phone_id
                 .clone()
-                .unwrap_or_else(|| session_id.to_string()),
-            Err(_) => session_id.to_string(),
+                .or_else(|| snapshot.device.stable_id.map(|id| id.0))
+                .unwrap_or(snapshot.device.id.0),
+            Err(error) => return err(&error),
         };
         let cache_dir = ffi_try!(thumbnail_cache_dir(runtime, "media_thumbnail"));
-        // Every requested entry, flattened with its cache kind.
-        let requested: Vec<(String, String)> = images
-            .iter()
-            .filter_map(|image| image.path.clone().map(|path| ("image".to_string(), path)))
-            .chain(
-                videos
-                    .iter()
-                    .filter_map(|video| video.path.clone().map(|path| ("video".to_string(), path))),
-            )
-            .chain(
-                audio_albums
-                    .iter()
-                    .filter_map(|album| album.path.clone().map(|path| ("audio".to_string(), path))),
-            )
-            .collect();
-        // All-hit fast path (review fix): when every requested thumbnail is
-        // already cached, skip the device round-trip entirely — the cache is
-        // a cache, not just a write-skipper.
-        let cached_entries: Vec<(String, String, String, u64)> = if !requested.is_empty()
-            && requested
-                .iter()
-                .all(|(kind, path)| cache_path_for(&cache_dir, kind, &device_key, path).exists())
-        {
-            requested
-                .iter()
-                .map(|(kind, path)| {
-                    let cache_path = cache_path_for(&cache_dir, kind, &device_key, path);
-                    let size = std::fs::metadata(&cache_path)
-                        .map(|meta| meta.len())
-                        .unwrap_or(0);
-                    (
-                        kind.clone(),
-                        path.clone(),
-                        cache_path.display().to_string(),
+        let mut result = FfiThumbnailResult::default();
+        let mut images = Vec::new();
+        let mut videos = Vec::new();
+        let mut audio_albums = Vec::new();
+        let mut image_revisions = HashMap::new();
+        let mut video_revisions = HashMap::new();
+        let mut audio_revisions = HashMap::new();
+        let mut pending_images = Vec::new();
+        let mut pending_videos = Vec::new();
+        let mut pending_audio = Vec::new();
+        let mut scheduled_images = HashSet::new();
+        let mut scheduled_videos = HashSet::new();
+        let mut scheduled_audio = HashSet::new();
+
+        // Partition every category independently. A mixed hit/miss batch now
+        // sends only misses to the phone instead of re-fetching every hit.
+        for item in &ffi.images {
+            let revision = image_cache_revision(item);
+            if let Some(path) = &item.path {
+                image_revisions.insert(path.clone(), revision.clone());
+                let cache_path = cache_path_for(&cache_dir, "image", &device_key, path, &revision);
+                if let Some(size) = valid_cache_file_size(&cache_path) {
+                    result.images.push(FfiThumbnailCacheEntry {
+                        path: path.clone(),
+                        cache_path: ffi_try!(cache_path_string(&cache_path, "media_thumbnail")),
                         size,
-                    )
-                })
-                .collect()
-        } else {
-            let thumbnails = match runtime._tokio.block_on(async {
-                runtime
-                    .app
-                    .get_thumbnails(SessionId(session_id), &images, &videos, &audio_albums)
-                    .await
-            }) {
-                Ok(thumbnails) => thumbnails,
-                Err(error) => return err(&error),
-            };
-            let mut entries = Vec::new();
-            for image in &thumbnails.images {
-                if let (Some(path), Some(bytes)) = (&image.path, &image.thumbnail) {
-                    if bytes.is_empty() {
-                        continue;
-                    }
-                    let cache_path = ffi_try!(cache_thumbnail(
-                        &cache_dir,
-                        "image",
-                        &device_key,
-                        path,
-                        bytes,
-                        "media_thumbnail"
-                    ));
-                    entries.push((
-                        "image".to_string(),
-                        path.clone(),
-                        cache_path,
-                        bytes.len() as u64,
-                    ));
+                    });
+                    continue;
                 }
             }
-            for video in &thumbnails.videos {
-                if let (Some(path), Some(bytes)) = (&video.path, &video.thumbnail) {
-                    if bytes.is_empty() {
-                        continue;
-                    }
-                    let cache_path = ffi_try!(cache_thumbnail(
-                        &cache_dir,
-                        "video",
-                        &device_key,
-                        path,
-                        bytes,
-                        "media_thumbnail"
-                    ));
-                    entries.push((
-                        "video".to_string(),
-                        path.clone(),
-                        cache_path,
-                        bytes.len() as u64,
-                    ));
+            let identity = thumbnail_identity(item.path.as_deref(), item.media_id);
+            if scheduled_images.insert(identity) {
+                images.push(ImageFileDto {
+                    path: item.path.clone(),
+                    size: item.size,
+                    modified_at: item.modified_at,
+                    media_id: item.media_id,
+                    album_id: item.album_id,
+                    mini_thumb_magic: item.mini_thumb_magic.clone(),
+                    ..ImageFileDto::default()
+                });
+                pending_images.push(FfiThumbnailFailure {
+                    path: item.path.clone(),
+                    media_id: item.media_id,
+                    album_id: item.album_id,
+                    reason: "missing_response",
+                });
+            }
+        }
+        for item in &ffi.videos {
+            let revision = video_cache_revision(item);
+            if let Some(path) = &item.path {
+                video_revisions.insert(path.clone(), revision.clone());
+                let cache_path = cache_path_for(&cache_dir, "video", &device_key, path, &revision);
+                if let Some(size) = valid_cache_file_size(&cache_path) {
+                    result.videos.push(FfiThumbnailCacheEntry {
+                        path: path.clone(),
+                        cache_path: ffi_try!(cache_path_string(&cache_path, "media_thumbnail")),
+                        size,
+                    });
+                    continue;
                 }
             }
-            for album in &thumbnails.audio_albums {
-                if let (Some(path), Some(bytes)) = (&album.path, &album.thumbnail) {
-                    if bytes.is_empty() {
-                        continue;
-                    }
-                    let cache_path = ffi_try!(cache_thumbnail(
-                        &cache_dir,
-                        "audio",
-                        &device_key,
-                        path,
-                        bytes,
-                        "media_thumbnail"
-                    ));
-                    entries.push((
-                        "audio".to_string(),
-                        path.clone(),
-                        cache_path,
-                        bytes.len() as u64,
-                    ));
+            let identity = thumbnail_identity(item.path.as_deref(), item.media_id);
+            if scheduled_videos.insert(identity) {
+                videos.push(VideoFileDto {
+                    path: item.path.clone(),
+                    size: item.size,
+                    modified_at: item.modified_at,
+                    media_id: item.media_id,
+                    album_id: item.album_id,
+                    ..VideoFileDto::default()
+                });
+                pending_videos.push(FfiThumbnailFailure {
+                    path: item.path.clone(),
+                    media_id: item.media_id,
+                    album_id: item.album_id,
+                    reason: "missing_response",
+                });
+            }
+        }
+        for item in &ffi.audio_albums {
+            let revision = audio_cache_revision(item);
+            if let Some(path) = &item.path {
+                audio_revisions.insert(path.clone(), revision.clone());
+                let cache_path = cache_path_for(&cache_dir, "audio", &device_key, path, &revision);
+                if let Some(size) = valid_cache_file_size(&cache_path) {
+                    result.audio_albums.push(FfiThumbnailCacheEntry {
+                        path: path.clone(),
+                        cache_path: ffi_try!(cache_path_string(&cache_path, "media_thumbnail")),
+                        size,
+                    });
+                    continue;
                 }
             }
-            entries
+            let identity = thumbnail_identity(item.path.as_deref(), item.album_id);
+            if scheduled_audio.insert(identity) {
+                audio_albums.push(AudioAlbumDto {
+                    path: item.path.clone(),
+                    album_id: item.album_id,
+                    name: item.name.clone(),
+                    artist_id: item.artist_id,
+                    artist: item.artist.clone(),
+                    year: item.year,
+                    thumbnail: None,
+                    thumbnail_error: false,
+                });
+                pending_audio.push(FfiThumbnailFailure {
+                    path: item.path.clone(),
+                    media_id: None,
+                    album_id: item.album_id,
+                    reason: "missing_response",
+                });
+            }
+        }
+
+        if images.is_empty() && videos.is_empty() && audio_albums.is_empty() {
+            return ok(&result);
+        }
+
+        let thumbnails = match runtime._tokio.block_on(async {
+            runtime
+                .app
+                .get_thumbnails(SessionId(session_id), &images, &videos, &audio_albums)
+                .await
+        }) {
+            Ok(thumbnails) => thumbnails,
+            Err(error) => return err(&error),
         };
-        let out_images: Vec<serde_json::Value> = cached_entries
-            .iter()
-            .filter(|(kind, _, _, _)| kind == "image")
-            .map(|(_, path, cache_path, size)| {
-                serde_json::json!({ "path": path, "cache_path": cache_path, "size": size })
-            })
-            .collect();
-        let out_videos: Vec<serde_json::Value> = cached_entries
-            .iter()
-            .filter(|(kind, _, _, _)| kind == "video")
-            .map(|(_, path, cache_path, size)| {
-                serde_json::json!({ "path": path, "cache_path": cache_path, "size": size })
-            })
-            .collect();
-        let out_audio_albums: Vec<serde_json::Value> = cached_entries
-            .iter()
-            .filter(|(kind, _, _, _)| kind == "audio")
-            .map(|(_, path, cache_path, size)| {
-                serde_json::json!({ "path": path, "cache_path": cache_path, "size": size })
-            })
-            .collect();
-        ok(&serde_json::json!({
-            "images": out_images,
-            "videos": out_videos,
-            "audio_albums": out_audio_albums,
-        }))
+        let image_responses = ffi_try!(cache_thumbnail_responses(
+            &thumbnails.images,
+            &cache_dir,
+            "image",
+            &device_key,
+            &image_revisions,
+            "media_thumbnail",
+        ));
+        let video_responses = ffi_try!(cache_thumbnail_responses(
+            &thumbnails.videos,
+            &cache_dir,
+            "video",
+            &device_key,
+            &video_revisions,
+            "media_thumbnail",
+        ));
+        let audio_responses = ffi_try!(cache_thumbnail_responses(
+            &thumbnails.audio_albums,
+            &cache_dir,
+            "audio",
+            &device_key,
+            &audio_revisions,
+            "media_thumbnail",
+        ));
+        result.images.extend(image_responses.cached);
+        result.videos.extend(video_responses.cached);
+        result.audio_albums.extend(audio_responses.cached);
+        result.failed_images.extend(image_responses.failed);
+        result.failed_videos.extend(video_responses.failed);
+        result.failed_audio_albums.extend(audio_responses.failed);
+
+        result
+            .failed_images
+            .extend(pending_images.into_iter().filter(|item| {
+                !thumbnail_response_seen(
+                    &image_responses.responded,
+                    item.path.as_deref(),
+                    item.media_id,
+                )
+            }));
+        result
+            .failed_videos
+            .extend(pending_videos.into_iter().filter(|item| {
+                !thumbnail_response_seen(
+                    &video_responses.responded,
+                    item.path.as_deref(),
+                    item.media_id,
+                )
+            }));
+        result
+            .failed_audio_albums
+            .extend(pending_audio.into_iter().filter(|item| {
+                !thumbnail_response_seen(
+                    &audio_responses.responded,
+                    item.path.as_deref(),
+                    item.album_id,
+                )
+            }));
+        ok(&result)
     })
 }
 
@@ -574,14 +766,108 @@ fn default_state_dir() -> Option<PathBuf> {
     }
 }
 
+fn thumbnail_identity(path: Option<&str>, id: Option<u64>) -> String {
+    match (id, path) {
+        (Some(id), _) => format!("id:{id}"),
+        (None, Some(path)) => format!("path:{path}"),
+        (None, None) => "missing".to_string(),
+    }
+}
+
+fn mark_thumbnail_response(seen: &mut HashSet<String>, path: Option<&str>, id: Option<u64>) {
+    if let Some(id) = id {
+        seen.insert(format!("id:{id}"));
+    }
+    if let Some(path) = path {
+        seen.insert(format!("path:{path}"));
+    }
+}
+
+fn thumbnail_response_seen(seen: &HashSet<String>, path: Option<&str>, id: Option<u64>) -> bool {
+    id.is_some_and(|id| seen.contains(&format!("id:{id}")))
+        || path.is_some_and(|path| seen.contains(&format!("path:{path}")))
+}
+
+fn image_cache_revision(item: &FfiThumbnailImageItem) -> String {
+    if item.media_id.is_none()
+        && item.size.is_none()
+        && item.modified_at.is_none()
+        && item.mini_thumb_magic.is_none()
+    {
+        String::new()
+    } else {
+        format!(
+            "media_id={:?};size={:?};modified_at={:?};mini_thumb_magic={:?}",
+            item.media_id, item.size, item.modified_at, item.mini_thumb_magic
+        )
+    }
+}
+
+fn video_cache_revision(item: &FfiThumbnailVideoItem) -> String {
+    if item.media_id.is_none() && item.size.is_none() && item.modified_at.is_none() {
+        String::new()
+    } else {
+        format!(
+            "media_id={:?};size={:?};modified_at={:?}",
+            item.media_id, item.size, item.modified_at
+        )
+    }
+}
+
+fn audio_cache_revision(item: &FfiThumbnailAudioItem) -> String {
+    if item.album_id.is_none()
+        && item.name.is_none()
+        && item.artist_id.is_none()
+        && item.artist.is_none()
+        && item.year.is_none()
+    {
+        String::new()
+    } else {
+        format!(
+            "album_id={:?};name={:?};artist_id={:?};artist={:?};year={:?}",
+            item.album_id, item.name, item.artist_id, item.artist, item.year
+        )
+    }
+}
+
+/// A valid cache entry is a non-empty regular file. Symlinks, directories,
+/// truncated zero-byte writes and unreadable entries are treated as misses.
+fn valid_cache_file_size(path: &Path) -> Option<u64> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() || metadata.len() == 0 {
+        return None;
+    }
+    std::fs::File::open(path).ok()?;
+    Some(metadata.len())
+}
+
+fn cache_path_string(path: &Path, operation: &str) -> Result<String, HsCallResult> {
+    path.to_str().map(str::to_owned).ok_or_else(|| {
+        err(&PublicError::new(
+            PublicErrorCode::InvalidArgument,
+            "thumbnail cache path is not valid UTF-8",
+        )
+        .operation(operation))
+    })
+}
+
 /// The on-disk cache path for one thumbnail (stable across calls). The
-/// digest covers the full (device key, remote path) pair — a truncated
-/// device prefix alone would let two devices' equal paths collide and
-/// serve the wrong thumbnail from the all-hit fast path (security review
-/// fix).
-fn cache_path_for(cache_dir: &Path, kind: &str, device_key: &str, remote_path: &str) -> PathBuf {
+/// digest covers the full device/path pair and, when supplied by a metadata
+/// library item, a revision fingerprint. The latter prevents a replaced
+/// media file at the same remote path from reusing stale image bytes.
+fn cache_path_for(
+    cache_dir: &Path,
+    kind: &str,
+    device_key: &str,
+    remote_path: &str,
+    revision: &str,
+) -> PathBuf {
     let device = sanitize_cache_component(device_key);
-    let digest = fnv1a64(&format!("{device_key}\0{remote_path}"));
+    let digest = if revision.is_empty() {
+        fnv1a64(&format!("{device_key}\0{remote_path}"))
+    } else {
+        fnv1a64(&format!("{device_key}\0{remote_path}\0{revision}"))
+    };
     cache_dir.join(format!("{device}-{kind}-{digest:016x}.thumb"))
 }
 
@@ -598,11 +884,22 @@ fn cache_thumbnail(
     kind: &str,
     device_key: &str,
     remote_path: &str,
+    revision: &str,
     bytes: &[u8],
     operation: &str,
 ) -> Result<String, HsCallResult> {
-    let path = cache_path_for(cache_dir, kind, device_key, remote_path);
-    if !path.exists() {
+    let path = cache_path_for(cache_dir, kind, device_key, remote_path, revision);
+    if valid_cache_file_size(&path).is_none() {
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|error| {
+                err(&PublicError::new(
+                    PublicErrorCode::Internal,
+                    "invalid thumbnail cache entry cannot be replaced",
+                )
+                .with_detail(format!("{}: {error}", path.display()))
+                .operation(operation))
+            })?;
+        }
         // Full-nanosecond timestamp: the subsec-nanos form wraps every
         // second and could collide for same-second concurrent writers
         // (security review fix); pid + wall-clock nanos makes the temp
@@ -635,7 +932,7 @@ fn cache_thumbnail(
             )
         })?;
     }
-    Ok(path.display().to_string())
+    cache_path_string(&path, operation)
 }
 
 /// Restrict a cache-file component to ASCII alphanumerics plus `-`/`_` so
@@ -924,6 +1221,16 @@ mod tests {
     }
 
     #[test]
+    fn thumbnail_entry_requires_path_or_id() {
+        let runtime = runtime_ptr();
+        let request = br#"{"images":[{}]}"#;
+        let result = unsafe { hs_media_thumbnail(runtime, 1, request.as_ptr(), request.len()) };
+        assert_eq!(result.status, 1);
+        assert_eq!(error_code_of(result), "invalid_argument");
+        unsafe { hs_runtime_destroy(runtime) };
+    }
+
+    #[test]
     fn thumbnail_missing_session_returns_session_not_found() {
         let runtime = runtime_ptr();
         let result = unsafe { hs_media_thumbnail(runtime, 999, b"{}".as_ptr(), 2) };
@@ -1076,9 +1383,9 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
 
-        let path1 = cache_thumbnail(&dir, "image", "phone:abc", "/a.jpg", b"bytes-1", "test")
+        let path1 = cache_thumbnail(&dir, "image", "phone:abc", "/a.jpg", "", b"bytes-1", "test")
             .expect("first write");
-        let path2 = cache_thumbnail(&dir, "image", "phone:abc", "/a.jpg", b"bytes-2", "test")
+        let path2 = cache_thumbnail(&dir, "image", "phone:abc", "/a.jpg", "", b"bytes-2", "test")
             .expect("reuse");
         // Same stable cache path; the second call must reuse the existing
         // file (its content stays the first write) — no duplicate, no
@@ -1088,10 +1395,35 @@ mod tests {
         assert_eq!(std::fs::read(&path2).unwrap(), b"bytes-1");
 
         // Distinct devices with the same remote path get distinct entries.
-        let other = cache_thumbnail(&dir, "image", "phone:xyz", "/a.jpg", b"other", "test")
+        let other = cache_thumbnail(&dir, "image", "phone:xyz", "/a.jpg", "", b"other", "test")
             .expect("other device");
         assert_ne!(path1, other);
         assert_eq!(std::fs::read(&other).unwrap(), b"other");
+
+        // A metadata revision change must not serve stale bytes for a file
+        // replaced at the same remote path.
+        let revised = cache_thumbnail(
+            &dir,
+            "image",
+            "phone:abc",
+            "/a.jpg",
+            "modified_at=2;size=99",
+            b"revised",
+            "test",
+        )
+        .expect("revised entry");
+        assert_ne!(path1, revised);
+        assert_eq!(std::fs::read(&revised).unwrap(), b"revised");
+
+        // A zero-byte/truncated cache entry is a miss and is atomically
+        // replaced instead of being returned forever as a successful hit.
+        let corrupt = cache_path_for(&dir, "video", "phone:abc", "/bad.mp4", "");
+        std::fs::write(&corrupt, []).unwrap();
+        assert_eq!(valid_cache_file_size(&corrupt), None);
+        let repaired =
+            cache_thumbnail(&dir, "video", "phone:abc", "/bad.mp4", "", b"fixed", "test")
+                .expect("repair corrupt entry");
+        assert_eq!(std::fs::read(repaired).unwrap(), b"fixed");
 
         // Sanitized device keys can never inject path separators: dots and
         // slashes are both stripped, so no ".." escape survives.
@@ -1099,6 +1431,57 @@ mod tests {
         assert_eq!(evil, "etcpasswd");
         assert!(!evil.contains('/'));
         assert!(!evil.contains('.'));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn thumbnail_responses_cache_success_and_surface_item_failures() {
+        let dir = std::env::temp_dir().join(format!(
+            "hs-thumb-response-test-{}-{nanos}",
+            std::process::id(),
+            nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let items = vec![
+            ImageFileDto {
+                path: Some("/ok.jpg".into()),
+                media_id: Some(1),
+                thumbnail: Some(vec![0xff, 0xd8, 0xff]),
+                ..ImageFileDto::default()
+            },
+            ImageFileDto {
+                path: Some("/phone-error.jpg".into()),
+                media_id: Some(2),
+                thumbnail_error: true,
+                ..ImageFileDto::default()
+            },
+            ImageFileDto {
+                path: Some("/missing.jpg".into()),
+                media_id: Some(3),
+                ..ImageFileDto::default()
+            },
+        ];
+        let revisions = HashMap::from([("/ok.jpg".to_string(), "revision=1".to_string())]);
+        let output =
+            cache_thumbnail_responses(&items, &dir, "image", "phone:abc", &revisions, "test")
+                .expect("cache thumbnail responses");
+
+        assert_eq!(output.cached.len(), 1);
+        assert!(std::path::Path::new(&output.cached[0].cache_path).is_file());
+        assert_eq!(
+            output
+                .failed
+                .iter()
+                .map(|failure| failure.reason)
+                .collect::<Vec<_>>(),
+            ["thumbnail_error", "missing_data"]
+        );
+        assert!(output.responded.contains("id:1"));
+        assert!(output.responded.contains("path:/ok.jpg"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
