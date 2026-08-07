@@ -1170,6 +1170,18 @@ cargo build --release
 git diff --check
 ```
 
+debug 构建与缓存管理：
+
+- debug 构建推荐使用 `scripts/build-debug.sh`：构建时复用上一版缓存（增量编译），
+  构建成功后自动清理旧版本缓存，每个 workspace crate 只保留最新版本
+  （覆盖 `target/debug/deps` 与 `target/debug/incremental`），防止 `target/debug`
+  无限膨胀；构建失败时不清理，保留上一版缓存以便下次增量；
+- `scripts/build-debug.sh --dry-run` 可预览将要删除的旧缓存，`--keep=N` 可调整
+  保留版本数；脚本只清理 workspace crate 的旧版本缓存，绝不删除第三方依赖缓存；
+- 不要用 `rm -rf target/debug` 或整目录删除来替代脚本清理——那会丢弃全部增量缓存
+  并丢失"编译时使用上一版缓存"的能力；如确需全量重置，使用 `cargo clean`；
+- `target/` 已被 `.gitignore` 忽略，缓存体积不影响仓库状态。
+
 ### 18.2 Core
 
 协议、Session、transport、传输或同步变更必须运行相关定向测试，并确保覆盖：

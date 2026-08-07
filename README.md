@@ -231,6 +231,16 @@ cargo build
 cargo test
 ```
 
+推荐使用 `scripts/build-debug.sh` 进行 debug 构建：构建时复用上一版缓存（增量编译），
+构建成功后自动清理旧版本缓存（`target/debug/deps` 与 `target/debug/incremental`），
+每个 workspace crate 只保留最新 1 版，避免缓存无限膨胀（不会删除第三方依赖缓存）：
+
+```sh
+scripts/build-debug.sh              # 增量构建 + 清理旧版缓存
+scripts/build-debug.sh --dry-run    # 仅预览将要删除的旧缓存
+scripts/build-debug.sh --keep=2     # 每个 crate 保留最新 2 版
+```
+
 构建优化版本：
 
 ```sh
