@@ -120,11 +120,7 @@ where
         let request01 = SspHandShakeRequest01 {
             r#type: Some(SspRequestType::HandshakeRequest01 as i32),
             host_uuid: Some(self.host_uuid.clone()),
-            host_name: Some(
-                self.host_name
-                    .clone()
-                    .unwrap_or_else(host_name),
-            ),
+            host_name: Some(self.host_name.clone().unwrap_or_else(host_name)),
             host_timestamp: Some(unix_seconds()),
             host_smart_sync_protocol_version: Some(HOST_PROTOCOL_VERSION.to_string()),
             host_app_version: Some(HOST_APP_VERSION.to_string()),
