@@ -172,6 +172,7 @@ struct FfiRuntimeConfig {
     adb_path_utf8: Option<String>,
     default_timeout_ms: Option<u64>,
     heartbeat_interval_ms: Option<u64>,
+    host_name_utf8: Option<String>,
     state_dir_utf8: Option<String>,
     wire_log_utf8: Option<String>,
     /// P2-4: header-only by default; `true` opts into payload hex dumps
@@ -196,6 +197,7 @@ fn config_from_json(json: &str) -> Result<RuntimeConfig, HsCallResult> {
             .unwrap_or_else(|| PathBuf::from("adb")),
         default_timeout: Duration::from_millis(ffi.default_timeout_ms.unwrap_or(30_000)),
         heartbeat_interval: Duration::from_millis(ffi.heartbeat_interval_ms.unwrap_or(10_000)),
+        host_name: ffi.host_name_utf8,
         state_dir: ffi.state_dir_utf8.map(PathBuf::from),
         wire_log: ffi.wire_log_utf8.map(PathBuf::from),
         wire_log_payload: ffi.wire_log_payload.unwrap_or(false),

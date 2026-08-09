@@ -160,13 +160,13 @@ mod tests {
         let bytes = crate::test_support::exif_jpeg_fixture();
         let data = exif_from_bytes(&bytes).expect("parse fixture");
         assert_eq!(data.orientation, Some(6));
-        assert_eq!(data.make.as_deref(), Some("Smartisan"));
-        assert_eq!(data.model.as_deref(), Some("U2 Pro"));
-        assert_eq!(data.date_taken, Some(1_685_757_200));
+        assert_eq!(data.make.as_deref(), Some("Fixture"));
+        assert_eq!(data.model.as_deref(), Some("TestCam"));
+        assert_eq!(data.date_taken, Some(1_577_934_245));
         assert_eq!(data.f_number, Some(1.8));
         assert_eq!(data.focal_length, Some(4.28));
         assert_eq!(data.iso, Some(100));
-        assert_eq!(data.latitude.as_deref(), Some("30.279339"));
-        assert_eq!(data.longitude.as_deref(), Some("-120.165481"));
+        assert_eq!(data.latitude.as_deref(), Some("1.034167"));
+        assert_eq!(data.longitude.as_deref(), Some("4.085000"));
     }
 }

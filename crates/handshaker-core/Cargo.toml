@@ -16,6 +16,7 @@ cbc.workspace = true
 directories.workspace = true
 flate2.workspace = true
 kamadak-exif.workspace = true
+libc.workspace = true
 futures-util.workspace = true
 md-5.workspace = true
 mdns-sd.workspace = true

@@ -1,8 +1,13 @@
 #!/bin/bash
 # mDNS 诊断：抓取 5353 端口流量 + 运行查询，一次定位问题
-# 用法: sudo ./mdns_diag.sh [phone_ip]
+# 用法: sudo ./mdns_diag.sh <phone_ip>
+set -e
 cd "$(dirname "$0")"
-PHONE="${1:-192.168.2.47}"
+if [ "$#" -ne 1 ]; then
+  echo "用法: sudo ./mdns_diag.sh <phone_ip>" >&2
+  exit 2
+fi
+PHONE="$1"
 PY="$(command -v python3)"
 
 echo "=== tcpdump 5353 (5s) + mDNS 查询 ==="

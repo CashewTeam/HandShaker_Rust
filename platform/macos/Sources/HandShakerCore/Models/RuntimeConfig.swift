@@ -12,6 +12,9 @@ public struct RuntimeConfig: Codable, Sendable, Equatable {
     public var defaultTimeoutMs: UInt64?
     /// Heartbeat interval in ms (default 10000).
     public var heartbeatIntervalMs: UInt64?
+    /// Computer name reported to the phone during the Wi-Fi handshake
+    /// (default: host OS name).
+    public var hostNameUTF8: String?
     /// State directory (thumbnails cache, trust records, sync ledger...).
     public var stateDirUTF8: String?
     /// Optional wire-log path (header-only unless wireLogPayload is set).
@@ -31,6 +34,7 @@ public struct RuntimeConfig: Codable, Sendable, Equatable {
         adbPathUTF8: String? = nil,
         defaultTimeoutMs: UInt64? = nil,
         heartbeatIntervalMs: UInt64? = nil,
+        hostNameUTF8: String? = nil,
         stateDirUTF8: String? = nil,
         wireLogUTF8: String? = nil,
         wireLogPayload: Bool? = nil,
@@ -41,6 +45,7 @@ public struct RuntimeConfig: Codable, Sendable, Equatable {
         self.adbPathUTF8 = adbPathUTF8
         self.defaultTimeoutMs = defaultTimeoutMs
         self.heartbeatIntervalMs = heartbeatIntervalMs
+        self.hostNameUTF8 = hostNameUTF8
         self.stateDirUTF8 = stateDirUTF8
         self.wireLogUTF8 = wireLogUTF8
         self.wireLogPayload = wireLogPayload
@@ -75,6 +80,7 @@ public struct RuntimeConfig: Codable, Sendable, Equatable {
         case adbPathUTF8 = "adb_path_utf8"
         case defaultTimeoutMs = "default_timeout_ms"
         case heartbeatIntervalMs = "heartbeat_interval_ms"
+        case hostNameUTF8 = "host_name_utf8"
         case stateDirUTF8 = "state_dir_utf8"
         case wireLogUTF8 = "wire_log_utf8"
         case wireLogPayload = "wire_log_payload"
@@ -88,6 +94,7 @@ public struct RuntimeConfig: Codable, Sendable, Equatable {
         try container.encodeIfPresent(adbPathUTF8, forKey: .adbPathUTF8)
         try container.encodeIfPresent(defaultTimeoutMs, forKey: .defaultTimeoutMs)
         try container.encodeIfPresent(heartbeatIntervalMs, forKey: .heartbeatIntervalMs)
+        try container.encodeIfPresent(hostNameUTF8, forKey: .hostNameUTF8)
         try container.encodeIfPresent(stateDirUTF8, forKey: .stateDirUTF8)
         try container.encodeIfPresent(wireLogUTF8, forKey: .wireLogUTF8)
         try container.encodeIfPresent(wireLogPayload, forKey: .wireLogPayload)

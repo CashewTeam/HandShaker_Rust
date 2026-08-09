@@ -97,12 +97,12 @@ handshaker [--wifi IP:PORT | --serial SN] media thumbnail <id|path>... --output-
 
 ### 6.1 真机验收（2026-08，Smartisan OD103，Android 7.1.1）
 
-> 环境：Mac 与手机（192.168.2.47）同一局域网；隔离 HOME；手机端首次连接信任确认后执行。
+> 环境：Mac 与手机（地址已脱敏）同一局域网；隔离 HOME；手机端首次连接信任确认后执行。
 > 验收后测试图片、临时目录与进程均已清理。
 
 | 验收项 | 结果 |
 |---|---|
-| photo 库查询 | ✅ 返回 3005 张图片 + 25 个相册；字段完整（media_id/album_id/宽高/orientation/date_taken/经纬度(Polarr 相册 30.279339/120.16548)/mini_thumb_magic/starred/mime） |
+| photo 库查询 | ✅ 返回 3005 张图片 + 25 个相册；字段完整（media_id/album_id/宽高/orientation/date_taken/已脱敏经纬度/mini_thumb_magic/starred/mime） |
 | **预览上限** | ✅ json `"total":3005,"truncated":true` 只输出前 50 条；human 51 行 + "共 3005 条，仅显示前 50 条"；`--limit 3` 生效 |
 | video 库查询 | ✅ 相册（Camera/weiboIntl_video/ScreenRecorder 等）与视频条目 |
 | audio 库查询 | ✅ 专辑（含 artist ミツキヨ、专辑名、year 等）与曲目 |

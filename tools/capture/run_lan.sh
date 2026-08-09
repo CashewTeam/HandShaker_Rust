@@ -1,10 +1,14 @@
 #!/bin/bash
 # 局域网验证一键脚本（需 sudo：绕过 macOS 本地网络权限门控）
-# 用法: sudo ./run_lan.sh [phone_ip]
+# 用法: sudo ./run_lan.sh <phone_ip>
 set -e
 cd "$(dirname "$0")"
 
-PHONE="${1:-192.168.2.47}"
+if [ "$#" -ne 1 ]; then
+  echo "用法: sudo ./run_lan.sh <phone_ip>" >&2
+  exit 2
+fi
+PHONE="$1"
 PY="$(command -v python3)"
 
 echo "=== [1/3] mDNS 发现 _handshaker_ssp._tcp (unicast=$PHONE) ==="

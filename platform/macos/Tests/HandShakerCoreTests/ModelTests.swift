@@ -31,7 +31,7 @@ final class ModelTests: XCTestCase {
     func testDeviceDescriptorFullJSONDecodes() throws {
         let json = """
         {"id":"adb:3f13d4b4","stable_id":"phone:9a3f-77ee","display_name":"test phone",
-        "model":"OD103","transport":"wifi","transport_address":"192.168.2.47:45656",
+        "model":"OD103","transport":"wifi","transport_address":"192.0.2.47:45656",
         "available":true,"adb":{"state":"device","product":null,"model":null,"device":null},
         "usb":{"bus_number":1,"serial":"usb-serial","vendor_id":6353,"product_id":11521,"mode":"Accessory"}}
         """

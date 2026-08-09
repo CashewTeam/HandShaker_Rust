@@ -187,6 +187,9 @@ pub struct RuntimeConfig {
     pub adb_path: PathBuf,
     pub default_timeout: Duration,
     pub heartbeat_interval: Duration,
+    /// Computer name reported to the phone during the Wi-Fi handshake.
+    /// `None` falls back to the host OS name.
+    pub host_name: Option<String>,
     pub state_dir: Option<PathBuf>,
     pub wire_log: Option<PathBuf>,
     /// P2-4: dump payload bytes into the wire log (default false). The
@@ -209,6 +212,7 @@ impl Default for RuntimeConfig {
             adb_path: PathBuf::from("adb"),
             default_timeout: Duration::from_secs(30),
             heartbeat_interval: Duration::from_secs(10),
+            host_name: None,
             state_dir: None,
             wire_log: None,
             wire_log_payload: false,

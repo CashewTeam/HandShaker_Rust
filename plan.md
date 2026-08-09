@@ -418,7 +418,7 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
   `total`/`truncated`，albums 同限截断）；`media thumbnail <id|path>... --output-dir <dir>` 写文件
   （按回显 media_id/path 匹配、数字 id 溢出报 Usage、失败条目不中断、文件名仅本地生成防穿越）。
 - ✅ 安全：session 64 MiB 响应上限 + 媒体解码二次上限（`decode_media_response`）。
-- ✅ 真机完整验收（2026-08，OD103）：照片 3005 张 + 25 相册（含 Polarr 经纬度 30.279339/120.16548）、
+- ✅ 真机完整验收（2026-08，OD103）：照片 3005 张 + 25 相册（含已脱敏经纬度 EXIF 样本）、
   预览截断 `"total":3005,"truncated":true`、视频/音频查询、缩略图 JPEG 可解码（magic `ffd8ff`）、
   watch 实时收到媒体变更；记录见 `docs/20 §6`。
 

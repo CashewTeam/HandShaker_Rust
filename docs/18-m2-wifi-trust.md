@@ -90,17 +90,17 @@ handshaker --yes --wifi IP:PORT trust reset DEVICE_UUID
 ### 4.2 真机验证（本机实测）
 
 - `handshaker device discover` 在本机局域网真实发现手机
-  （`handshaker_ssp_` / 192.168.2.47 / SRV 动态端口，与 docs/14 同一台 OD103），
+  （`handshaker_ssp_` / 已脱敏地址 / SRV 动态端口，与 docs/14 同一台 OD103），
   JSON 与 human 输出均正确。
 
 ### 4.3 完整真机验收（2026-08，Smartisan OD103 / Android 7.1.1）
 
-> 环境：Mac（本机）与手机（192.168.2.47）同一局域网；隔离 HOME（全新 host_uuid）用于
+> 环境：Mac（本机）与手机（地址已脱敏）同一局域网；隔离 HOME（全新 host_uuid）用于
 > 首次信任验收；验收后测试目录、剪贴板条目、临时环境与 adb forward 均已清理。
 
 | 验收项 | 结果 |
 |---|---|
-| mDNS 发现（动态 SRV 端口） | ✅ `device discover` 返回 `handshaker_ssp_` / 192.168.2.47 / 动态端口 |
+| mDNS 发现（动态 SRV 端口） | ✅ `device discover` 返回 `handshaker_ssp_` / 已脱敏地址 / 动态端口 |
 | 首次连接 + 手机端授权 | ✅ 全新 host_uuid 首次连接成功，`device info` 完整返回（apk 201/1.2.0、model odin、phone_id=`e976ce6596c81fc5`、root=`/storage/emulated/0`） |
 | 信任持久化 | ✅ `state.json`(0600) 按 device_uuid 存储 derived_key（base64/256B）；`trust list` 返回且不泄露密钥 |
 | 重连免弹窗 | ✅ 信任后重连 `ping` 15ms 快速返回，无信任等待（derived_key 复用） |

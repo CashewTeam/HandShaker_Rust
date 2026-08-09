@@ -7,7 +7,7 @@ Multiple discovery strategies (macOS multicast can be broken / blocked):
   B. IPv6 multicast to ff02::fb:5353      (scope = en0/iface)
   C. unicast mDNS query to --ip hosts on :5353 (Android mdnsd answers unicast)
 Use at least one; pass known phone IPs with --ip to be safe:
-    python3 ssp_mdns.py 6 --ip 192.168.2.47
+    python3 ssp_mdns.py 6 --ip <phone_ip>
 """
 import argparse
 import select

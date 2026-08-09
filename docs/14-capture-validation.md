@@ -130,7 +130,7 @@ python3 tools/capture/ssp_errors.py           # MD5 异常 + 取消行为
 
 # 10 局域网（WiFi / Bonjour）验证（2026-08-02 追加）
 
-> 环境：Mac（macOS 27）与手机（192.168.2.47）连接同一家庭 WiFi（同网段）。
+> 环境：Mac（macOS 27）与手机（地址已脱敏）连接同一局域网（同网段）。
 > **注意**：macOS 15+ 的「本地网络（Local Network）」隐私权限会拦截非系统进程的局域网流量
 > （`ping` 可用但 TCP/UDP 报 `No route to host`）。验证命令需以 **`sudo`** 运行绕过。
 
@@ -142,8 +142,8 @@ python3 tools/capture/ssp_errors.py           # MD5 异常 + 取消行为
 {
   "instance": "handshaker_ssp_._handshaker_ssp._tcp.local",
   "port": 45656,
-  "target": "Android-2.local",
-  "ips": ["192.168.2.47", "fe80::b60b:44ff:fea0:14b6",
+  "target": "fixture-phone.local",
+  "ips": ["192.0.2.47", "2001:db8::47",
           "<global_ipv6>", "<global_ipv6>"],
   "txt": {}
 }
@@ -151,7 +151,7 @@ python3 tools/capture/ssp_errors.py           # MD5 异常 + 取消行为
 
 确认要点：
 
-- 服务类型 `_handshaker_ssp._tcp.`、实例名 `handshaker_ssp_`、主机名 `Android-2.local`。
+- 服务类型 `_handshaker_ssp._tcp.`、实例名 `handshaker_ssp_`、已脱敏主机名 `fixture-phone.local`。
 - **SRV 端口与手机实际监听端口一致**（实测 45656；期间端口从 55954 变为 45656，mDNS 记录实时跟随）。
 - 手机 mdnsd（Android 7.1.1）对 **unicast 查询**（发往手机 IP:5353）会应答，也发 v4/v6 多播应答；
   本网络 WiFi 上**多播应答不可靠**（AP/IGMP），unicast 是稳定路径。

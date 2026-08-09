@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """mDNS receive debug: send unicast query, print EVERY received packet raw.
-Run with sudo: sudo python3 mdns_debug.py 192.168.2.47"""
+Run with sudo: sudo python3 mdns_debug.py <phone_ip>"""
 import socket
 import struct
 import sys
@@ -8,7 +8,9 @@ import time
 
 import ssp_mdns as M
 
-ip = sys.argv[1] if len(sys.argv) > 1 else "192.168.2.47"
+if len(sys.argv) != 2:
+    raise SystemExit("usage: sudo python3 mdns_debug.py <phone_ip>")
+ip = sys.argv[1]
 q = M.make_query(M.SERVICE, 12)
 
 print("== unicast socket ==")

@@ -142,8 +142,8 @@ mod tests {
     fn wifi_device(port: u16) -> handshaker_core::WifiDevice {
         handshaker_core::WifiDevice {
             instance: "handshaker_ssp_".to_string(),
-            host: "Android-2.local".to_string(),
-            addresses: vec!["192.168.2.47".to_string()],
+            host: "fixture-phone.local".to_string(),
+            addresses: vec!["192.0.2.47".to_string()],
             port,
             txt: Default::default(),
         }
@@ -184,10 +184,10 @@ mod tests {
         let descriptor = wifi_device_to_descriptor(wifi_device(45656));
         assert_eq!(
             descriptor.id,
-            DeviceId("wifi-endpoint:handshaker_ssp_:192.168.2.47:45656".to_string())
+            DeviceId("wifi-endpoint:handshaker_ssp_:192.0.2.47:45656".to_string())
         );
         assert_eq!(descriptor.transport, TransportKind::Wifi);
-        assert_eq!(descriptor.transport_address, "192.168.2.47:45656");
+        assert_eq!(descriptor.transport_address, "192.0.2.47:45656");
         // The endpoint id must change with the port: the port is dynamic and
         // must never be treated as a stable device identity.
         let other = wifi_device_to_descriptor(wifi_device(9999));

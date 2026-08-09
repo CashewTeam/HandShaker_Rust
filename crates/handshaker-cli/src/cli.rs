@@ -904,6 +904,7 @@ fn runtime_config(cli: &Cli) -> RuntimeConfig {
         adb_path: PathBuf::from("adb"),
         default_timeout: cli.timeout,
         heartbeat_interval: Duration::from_secs(10),
+        host_name: None,
         state_dir: cli.state_dir.clone(),
         wire_log: cli.wire_log.clone(),
         wire_log_payload: false,
