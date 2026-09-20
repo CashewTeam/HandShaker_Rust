@@ -394,7 +394,6 @@ mod tests {
     use std::collections::BTreeMap;
 
     use aes::Aes256;
-    use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as B64;
     use cbc::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
     use md5::{Digest as _, Md5};
