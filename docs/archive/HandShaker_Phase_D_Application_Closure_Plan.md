@@ -2,8 +2,10 @@
 
 > 基线提交：`555367dd1e0a14977a68f8b6c67658cad344e5ae`  
 > Workspace：`handshaker-core` / `handshaker-application` / `handshaker-cli` / `handshaker-ffi`  
-> Application API：`1.0.0-preview.1`  
+> Application API：`1.0.0-preview.1`
 > 目标：完成设备发现诊断、设备信息、稳定身份、TrustService、文件预检/执行计划，以及可选的 SyncService，为 Swift/GTK/.NET 提供完整且不依赖 CLI/Core 的业务入口。
+
+> 归档说明：本计划已完成并由后续 M8 迁移、API 冻结和审计记录收口；保留本文用于追溯原始执行范围。
 
 ---
 

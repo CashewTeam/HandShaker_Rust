@@ -1,6 +1,6 @@
 # M8 迁移记录(migration)
 
-> 分支:`refactor/m8-workspace-application-ffi`,基线 `docs/m8-baseline.md`(0.6.1,154 测试)
+> 分支:`refactor/m8-workspace-application-ffi`,基线 `m8-baseline.md`(0.6.1,154 测试)
 
 ## 1. 迁移步骤与提交
 
@@ -10,7 +10,7 @@
 | `2c3e85c` | workspace 根 + `handshaker-core`(library/build.rs/examples/localization 迁移,git rename 保历史) |
 | `ca240e0` | `handshaker-cli`(binary 名 handshaker 保持,154 测试恢复) |
 | `928e7fc` | application:Runtime + SessionRegistry + v1 DTO + PublicError |
-| `e112df8` | DTO/错误码 serde 冻结 + `docs/application-api-v1.md` |
+| `e112df8` | DTO/错误码 serde 冻结 + `../api/application-api-v1.md` |
 | `1f281d3` | TransferManager + EventHub |
 | `a809388` | 文件服务方法(§5.5) |
 | `956db3b` | CLI `device list` 走 Application(JSON 逐字节兼容) |
@@ -103,7 +103,7 @@
 > **历史快照**:本节记录 2965f64 时点的核对结果,表格中过期条目(如
 > Application API `"1.0.0"`、FFI 21 导出 ABI 1.1.0、`hs_create_directory`/
 > `hs_ping` 未导出、`generate-ffi-header.sh` 未建)反映当时状态;
-> 最新状态见 §12 与 `docs/ffi-v1.md`(ABI 1.5.0 / 52 导出 / Application preview)。
+> 最新状态见 §12 与 `../api/ffi-v1.md`(ABI 1.5.0 / 52 导出 / Application preview)。
 > 核对范围:CLI 命令迁移矩阵、Application 冻结条款、FFI 导出与未完成条目、
 > Phase 7 脚本/产物。核对方式:逐命令/逐导出 grep 代码,与 §4/§5 记录比对。
 
@@ -132,7 +132,7 @@
 | `APPLICATION_API_VERSION` | ✅ | `crates/handshaker-application/src/lib.rs` = `"1.0.0"`(2026-08-04 正式冻结;破坏性变更须升 major) |
 | DTO serde 契约 | ✅ | `dto.rs` 全部 `Serialize/Deserialize`,snake_case |
 | enum 判别值不复用 | ✅ | `TransportKind{1,2,3}`/`SessionState{1..5}` 固定 |
-| 错误码分区 | ✅ | `PublicErrorCode` 1001–9001(见 `docs/application-api-v1.md`) |
+| 错误码分区 | ✅ | `PublicErrorCode` 1001–9001(见 `../api/application-api-v1.md`) |
 | v1 JSON fixture | ✅ | `tests.rs:225`「v1 JSON contract fixtures (frozen)」 |
 | `#[non_exhaustive]` | ✅ | enum + 追加容忍变体 |
 | 批量用例上移 | ✅ | `batch_download/batch_upload` + `BatchTransferRequest/ItemDto/ResultDto/TreeTransferDto/TransferFailureDto` |
@@ -247,19 +247,19 @@ connect/disconnect/get session、list files、subscribe/next/destroy。
 
 ## 8. M8.1 Phase A 契约止血记录(审计 c71cf94 之后)
 
-> 依据 `docs/HandShaker_Rust_c71cf94_Swift_Delivery_Audit_and_Plan.md` Phase A;
+> 依据 `HandShaker_Rust_c71cf94_Swift_Delivery_Audit_and_Plan.md` Phase A;
 > 审计指出 FFI ABI 版本三处不一致(Header/docs 仍写 1.1.0,create directory
 > 标为未导出)与 Application v1「名义冻结、实际未冻结」问题。
 
 ### 8.1 FFI ABI 单一事实来源(ABI 1.2.0)
 
 - `handshaker_ffi.h` 顶部注释 1.1.0 → 1.2.0,与 `ABI_VERSION_*` 常量一致;
-- `docs/ffi-v1.md` 升为 v1.2:函数矩阵补 `hs_create_directory`/`hs_ping`,
+- `../api/ffi-v1.md` 升为 v1.2:函数矩阵补 `hs_create_directory`/`hs_ping`,
   已导出/未导出清单修正(create 已导出;未导出改为 stat/move/delete、
   batch、媒体、剪贴板、信任、同步);
 - 新增 `scripts/check-ffi-abi.py`:校验 Rust 导出与 Header 原型的符号、
   参数类别、返回类别一致,ABI 常量与 Header 注释一致,snapshot 同步;
-- 新增 `docs/ffi-abi-snapshot.md`(23 个导出,由脚本生成,`--update` 刷新);
+- 新增 `../api/ffi-abi-snapshot.md`(23 个导出,由脚本生成,`--update` 刷新);
 - `scripts/generate-ffi-header.sh` 接入上述检查(默认校验,`--update` 更新
   snapshot),保留 dist/apple/ staging;
 - Swift smoke 增加 `hs_abi_version_minor()==2`/`patch()==0` 断言
@@ -270,7 +270,7 @@ connect/disconnect/get session、list files、subscribe/next/destroy。
 ### 8.2 Application API 改为 preview
 
 - `APPLICATION_API_VERSION`: `"1.0.0"` → `"1.0.0-preview.1"`;
-- `docs/application-api-v1.md`:标题改为「preview 契约」,冻结规则标注为
+- `../api/application-api-v1.md`:标题改为「preview 契约」,冻结规则标注为
   preview 期间的目标契约,列出正式冻结条件(移除 `session_client()`、
   事件/传输语义确定、fixture 完整、文档同步);
 - 冻结前允许破坏性源码级修改并记录于此,不升 major。
@@ -486,7 +486,7 @@ connect/disconnect/get session、list files、subscribe/next/destroy。
 
 ## 12. M8.5 审计收尾记录(2026-08-04)
 
-对应 `docs/HandShaker_Rust_Code_Audit_ad96fb4.md` 全部 20 项(P0×5/P1×10/P2×5)
+对应 `HandShaker_Rust_Code_Audit_ad96fb4.md` 全部 20 项(P0×5/P1×10/P2×5)
 修复,提交链 `0405a53`→`71a050f`。本节只记录与既有文档/契约相关的兼容性结论:
 
 ### 12.1 媒体库分页(P1-9)——向后兼容扩展
@@ -518,7 +518,7 @@ connect/disconnect/get session、list files、subscribe/next/destroy。
 
 ### 12.4 watch 语义收紧(P1-2)
 
-见 `docs/application-api-v1.md` §4 同步条目:`SyncWatchApplied` 由
+见 `../api/application-api-v1.md` §4 同步条目:`SyncWatchApplied` 由
 `SyncRunResultDto` 直包改为结构化 `{profile_id, session_id, result}`
 (JSON kind token 不变);Lagged/应用失败后 watch 停止并置
 `reconciliation_required`,`start_sync_watch` 拒绝直至重新完整同步。

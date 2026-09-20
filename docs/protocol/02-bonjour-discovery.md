@@ -77,7 +77,7 @@ if (!mVar.h.get() && serverSocketA != null) {
 - 跨子网不可见（mDNS 限制）；大网段部署需走二维码直连或 ADB。
 
 > ✅ 已实现（2026-08，M2）：Rust 客户端用 `mdns-sd 0.20` 浏览并解析，见
-> `src/discovery.rs` 与 `docs/18-m2-wifi-trust.md`；`handshaker device discover` 本机实测
+> `src/discovery.rs` 与 `../archive/18-m2-wifi-trust.md`；`handshaker device discover` 本机实测
 > 成功发现真机。
 
 ## 2.5 抓包实测记录（2026-08，见 [14](14-capture-validation.md) §10）

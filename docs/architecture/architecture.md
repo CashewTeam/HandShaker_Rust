@@ -70,7 +70,7 @@ handshaker-core(协议、传输、会话)
 
 ## 4. FFI 契约(v1)
 
-见 `docs/ffi-v1.md`。要点:ABI 1.5.0 独立版本(Rust 常量/Header/文档/snapshot
+见 `../api/ffi-v1.md`。要点:ABI 1.5.0 独立版本(Rust 常量/Header/文档/snapshot
 由 `scripts/generate-ffi-header.sh` 校验一致);Rust 分配 Rust 释放;
 所有函数 catch panic;NULL 句柄稳定报错;短操作同步阻塞调用线程
 (调用方在后台线程);事件队列拉取,无跨语言回调。
@@ -83,8 +83,8 @@ handshaker-core(协议、传输、会话)
   info/ping、trust、pull/push 预检、watch、sync.* 均走
   `HandShakerRuntime`;`session_client()` 过渡入口已删除,`AppSession`
   不再持有 Core client)。仅剩 `device discover`(Wi-Fi mDNS)直连 core,
-  `fs rm/count` 输出适配保留在 CLI(见 `docs/m8-migration.md` §4/§7);
-- FFI 已导出 52 个符号(ABI 1.5.0,`docs/ffi-v1.md`/`docs/ffi-abi-snapshot.md`
+  `fs rm/count` 输出适配保留在 CLI(见 `../archive/m8-migration.md` §4/§7);
+- FFI 已导出 52 个符号(ABI 1.5.0,`../api/ffi-v1.md`/`../api/ffi-abi-snapshot.md`
   同步):设备/会话/文件/传输/事件/剪贴板/信任/监控/批量传输/媒体
   (library 分页 + 磁盘缓存缩略图 + EXIF)/sync/update_file_info/
   media_merge/diagnostics;`json_contract=1` 版本化 JSON 契约;

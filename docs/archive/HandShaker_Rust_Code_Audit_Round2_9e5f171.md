@@ -1083,7 +1083,7 @@ validation 应拆成针对 device UUID 和 scope 的纯函数，不要伪造 Pro
   session 的全部快照（重连可能是不同设备）；epoch 语义有回归测试。
 - **unmatched 软上限**：每 entry 上限收紧为 16MiB/64 = 256KiB，真实最坏情况与
   声明的 16MiB 总量一致。
-- **FFI wire break 记录**：`docs/ffi-v1.md` 明确 `deny_unknown_fields` 为线级
+- **FFI wire break 记录**：`../api/ffi-v1.md` 明确 `deny_unknown_fields` 为线级
   严格化（未知字段 → `invalid_argument`）、`json_contract == 1` 精确校验。
 
 **仍留待后续（超出本次范围，需架构决策）**：

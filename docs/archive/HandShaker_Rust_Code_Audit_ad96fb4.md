@@ -1088,7 +1088,7 @@ Application 仍处于 preview，可以现在完成契约收口，避免正式 v1
 
 **状态：✅ 已修复（2026-08-04，commit `044badf`）**——FFI 文档版本表更新为 ABI 1.5.0（与 Rust 常量/Header/Swift 检查一致）。
 
-`docs/ffi-v1.md:1-3` 已声明 1.5.0，但函数表 `:33` 仍写：
+`../api/ffi-v1.md:1-3` 已声明 1.5.0，但函数表 `:33` 仍写：
 
 ```text
 hs_abi_version_major/minor/patch | ABI 版本 1.2.0

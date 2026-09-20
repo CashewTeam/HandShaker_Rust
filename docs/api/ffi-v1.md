@@ -7,7 +7,7 @@
 > 与 `hs_ping`;1.1 追加传输任务面(`hs_transfer_*`),1.0 符号不变。
 > 单一事实来源:`crates/handshaker-ffi/src/lib.rs` 的 `ABI_VERSION_*` 常量与
 > `crates/handshaker-ffi/include/handshaker_ffi.h` 顶部注释;`scripts/generate-ffi-header.sh`
-> 校验两者与 ABI snapshot(`docs/ffi-abi-snapshot.md`)一致。
+> 校验两者与 ABI snapshot(`ffi-abi-snapshot.md`)一致。
 > crate:`crates/handshaker-ffi`,产物:`libhandshaker_ffi.{a,dylib,rlib}`(macOS)
 
 ## 1. 基础类型

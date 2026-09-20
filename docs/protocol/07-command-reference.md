@@ -179,4 +179,4 @@ Host                                    Phone
 - Android 文件操作：`d/c.java`；媒体：`d/e.java`；同步：`f/e.java`；缩略图：`d/h.java`
 - 传输/握手：`g/j.java`、`g/h.java`
 - Mac 侧对应 Operation 类：`SSPGetDirFilesRequestOperation`、`SSPUploadFileRequestOperation`、
-  `SSPDownloadFileRequestOperation`、`SSPThumbnailRequestOperation` 等（见 [12-macos-implementation](12-macos-implementation.md)）
+  `SSPDownloadFileRequestOperation`、`SSPThumbnailRequestOperation` 等（见 [12-macos-implementation](../architecture/12-macos-implementation.md)）

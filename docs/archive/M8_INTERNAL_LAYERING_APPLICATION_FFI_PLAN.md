@@ -4,7 +4,7 @@
 > 计划基线：`handshaker_rust 0.6.1`  
 > 里程碑代号：M8  
 > 文档用途：供 Codex、Claude Code、OpenAI Codex Agent 及人工维护者共同执行  
-> 状态：待实施  
+> 状态：已归档（M8 已完成；实际迁移以 `m8-migration.md` 为准）
 > 目标分支建议：`refactor/m8-workspace-application-ffi`
 
 ---
@@ -1232,7 +1232,7 @@ M8 的 C ABI 必须满足：
 ### 产物
 
 ```text
-docs/m8-baseline.md
+m8-baseline.md
 tests/fixtures/m8/
 ```
 
@@ -1428,11 +1428,11 @@ tests/fixtures/m8/
 ### 文档
 
 ```text
-docs/architecture.md
-docs/application-api-v1.md
-docs/ffi-v1.md
-docs/m8-migration.md
-docs/m8-test-report.md
+../architecture/architecture.md
+../api/application-api-v1.md
+../api/ffi-v1.md
+m8-migration.md
+m8-test-report.md
 ```
 
 ### 脚本

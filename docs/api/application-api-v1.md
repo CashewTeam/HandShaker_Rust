@@ -2,7 +2,7 @@
 
 > 版本:`APPLICATION_API_VERSION = "1.0.0"`(与 Rust crate 版本独立)
 > 里程碑:M8(M8.4 建立,M8.5/M8.6 草案冻结);M8.1 Phase A 改为 preview;
-> **2026-08-04 正式冻结为 1.0.0**(审计 DoD 16/16,`docs/HandShaker_Rust_Code_Audit_ad96fb4.md` §8)
+> **2026-08-04 正式冻结为 1.0.0**(审计 DoD 16/16,`../archive/HandShaker_Rust_Code_Audit_ad96fb4.md` §8)
 > crate:`crates/handshaker-application`,包名 `handshaker-application`
 >
 > **当前状态:正式 v1,稳定契约。** 破坏性变更(删除/重命名方法、改变
@@ -26,14 +26,14 @@ FFI、UniFFI 或任何 UI 框架。
 以下规则自 preview 阶段起即为硬性要求,2026-08-04 正式冻结后继续生效;
 冻结前的例外(移除临时过渡接口 `session_client()`、修正事件/传输语义
 与文档)已完成,此后破坏性变更必须升 major 并在本文件与
-`docs/m8-migration.md` 记录。
+`../archive/m8-migration.md` 记录。
 
 冻结条件(已全部满足):
 
 - 移除 `session_client()` 过渡入口并完成 CLI 必要迁移;
 - 事件桥接、传输进度/取消/终态语义确定;
 - 公开 DTO/error/event fixture 完整;
-- 文档与代码同步(本文件、`docs/architecture.md`、README)。
+- 文档与代码同步(本文件、`../architecture/architecture.md`、README)。
 
 冻结规则正文:
 - 字段名称不随意重命名;

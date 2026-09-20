@@ -193,4 +193,4 @@ WiFi 通道不拦截锁屏。
 
 > ✅ 已实现（2026-08，M2）：Rust WiFi 握手见 `src/protocol/wifi_handshake.rs`
 > （`WifiTrustHandshake`：REQUEST_01/02 多轮、derived_key 复用、TRUST_REMOVE、120s 信任等待），
-> 信任持久化见 `src/state.rs`，实现记录见 `docs/18-m2-wifi-trust.md`。
+> 信任持久化见 `src/state.rs`，实现记录见 `../archive/18-m2-wifi-trust.md`。

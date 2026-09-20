@@ -30,7 +30,7 @@ macOS 端是**协议客户端**。代码分布在两个二进制：
 | `SSPManager <SFGenericDeviceIODelegate>` | 会话队列/字典、心跳线程、watch 回调、各业务入口 |
 | `SSPRequestOperation` | 单帧请求封装（sessionId、data、lenData、timeout、cancel） |
 | `SSP*RequestOperation` | 每命令一个（GetDirFiles/Upload/Download/Thumbnail/CreateFolder/Rename/Delete/Monitor/HeartBeat…） |
-| `SSP*`（GPBMessage） | 66 个 protobuf 消息，模式见 [06](06-protobuf-schema.md) |
+| `SSP*`（GPBMessage） | 66 个 protobuf 消息，模式见 [06](../protocol/06-protobuf-schema.md) |
 | `SFDeviceTrustStore` / `SFDeviceTrustRecord` | 信任记录持久化 |
 
 ### 数据模型
@@ -67,7 +67,7 @@ macOS 端是**协议客户端**。代码分布在两个二进制：
 4. GCDAsyncSocket connect 127.0.0.1:<hostPort>
 ```
 
-- 手机侧 `AdbForwardService` 读取 `ADB_PORT` 后 `new ServerSocket(port)`（见 [03](03-connection-transport.md)）。
+- 手机侧 `AdbForwardService` 读取 `ADB_PORT` 后 `new ServerSocket(port)`（见 [03](../protocol/03-connection-transport.md)）。
 - `tcp:19999` 亦出现（与 `audioHttpServerSocketPort` 相关的第二条转发）。
 - 状态检测：`dumpsys activity services com.smartisanos.smartfolder`、
   `dumpsys package com.smartisanos.smartfolder`、`am force-stop`。
@@ -83,7 +83,7 @@ macOS 端是**协议客户端**。代码分布在两个二进制：
 
 `SFADBManager` 维护：`rootDir / sdcardRootDir / fromMacDir / downloadDir / audioDir / cameraDir /
 videoDir / screenshotsDir / quickcaptureDir`。`fromMacDir`/`downloadDir` 为 Mac 概念目录，
-手机端无对应常量（见 [08](08-file-operations.md) §8.12）。
+手机端无对应常量（见 [08](../protocol/08-file-operations.md) §8.12）。
 
 ## 12.6 文件传输流程（Mac 侧）
 

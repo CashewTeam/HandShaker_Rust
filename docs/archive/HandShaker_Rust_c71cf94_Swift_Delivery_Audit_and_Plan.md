@@ -5,7 +5,7 @@
 > Phase D 复核提交：`e01bc94`（本文件已按 Phase D 完成状态复核更新）
 > Phase E 复核提交：`4c79380`（FFI 功能扩展 + photo sync 完成，ABI 1.4.0、50 个导出符号）
 > Phase F 复核提交：`7aa655d`（Swift Package/XCFramework 交付、真机验收、update file info + media merge、macOS CI——ABI 1.5.0、52 个导出符号）
-> Phase G 复核提交：`71a050f`（2026-08-04 审计收尾——`docs/HandShaker_Rust_Code_Audit_ad96fb4.md` 全部 5 P0 / 10 P1 / 5 P2 修复并标记；
+> Phase G 复核提交：`71a050f`（2026-08-04 审计收尾——`HandShaker_Rust_Code_Audit_ad96fb4.md` 全部 5 P0 / 10 P1 / 5 P2 修复并标记；
 > Swift 公共 API 全 async（P1-6）、事件契约 fixture 双向锁死（P0-3）、媒体库分页（P1-9）、universal 双架构 + 静态 libusb（P1-10）；
 > Rust 9 套件 390+ 项 / Swift 47 测试（2 真机 skip）/ C/Swift smoke 全绿）
 > Cargo Workspace 版本：`0.7.3`
@@ -210,7 +210,7 @@ FFI 只依赖 Application，没有直接依赖 Core，这是正确的。
 
 > **Phase D 复核**：本节原列的三个问题已全部关闭——
 > `session_client()` 已删除、`AppSession` 不再持有 Core client、
-> `docs/application-api-v1.md` 已与代码同步。仅存 `device discover`
+> `../api/application-api-v1.md` 已与代码同步。仅存 `device discover`
 > 命令直连 core（见 §4.2）。
 
 ### ~~`session_client()` 仍公开 Core 类型~~（已删除，742f183）
@@ -237,7 +237,7 @@ CLI 的 `Cargo.toml` 仍直接依赖 `handshaker-core`（用于输出层类型�
 
 ### Application 文档
 
-`docs/application-api-v1.md` 已同步 Phase D 全部新 API（发现诊断、
+`../api/application-api-v1.md` 已同步 Phase D 全部新 API（发现诊断、
 信任、文件计划、SyncService、monitor_folder、SyncWatchApplied 事件），
 并记录 `session_client()` 移除与 `RemoteFileChangeDto` 扩展。
 
@@ -649,9 +649,9 @@ Application 层已全部完成（Phase D）；FFI 导出面已补齐（Phase E�
 ## 7.3 ~~P0：ABI 版本不一致~~（已修复）
 
 审计基线的矛盾（Rust 常量 1.2.0 vs Header 注释 1.1.0 vs
-`docs/ffi-v1.md` 1.1.0）已修复：
+`../api/ffi-v1.md` 1.1.0）已修复：
 
-- Header 注释、`docs/ffi-v1.md`、新增 `docs/ffi-abi-snapshot.md` 全部
+- Header 注释、`../api/ffi-v1.md`、新增 `../api/ffi-abi-snapshot.md` 全部
   对齐 ABI 1.2.0；
 - `scripts/generate-ffi-header.sh` 生成 Header 并校验 ABI 常量与
   snapshot；`scripts/check-ffi-abi.py` 校验符号/签名/ABI 版本注释；
@@ -863,12 +863,12 @@ A3 见 §3.2/§11；README 与迁移文档已同步 Phase D 状态）。
 ### A1. 修复 ABI 单一事实来源（已完成）
 
 - Header 改为 1.2.0 ✅；
-- `docs/ffi-v1.md` 改为 1.2.0 ✅；
+- `../api/ffi-v1.md` 改为 1.2.0 ✅；
 - 更新已导出函数矩阵 ✅；
 - Swift smoke 同时检查 major/minor ✅；
 - Header sync 检查签名，而不只检查名称 ✅（`check-ffi-abi.py`）；
 - CI 编译 C Header ✅（本地脚本，CI job 待接入）；
-- 增加 ABI snapshot ✅（`docs/ffi-abi-snapshot.md`）。
+- 增加 ABI snapshot ✅（`../api/ffi-abi-snapshot.md`）。
 
 ### A2. 重新定义 Application 冻结状态（已完成，方案一）
 
@@ -877,8 +877,8 @@ DTO/error/event fixture 补齐；冻结后任何破坏升 major。
 
 ### A3. 更新 README 和迁移文档（已完成）
 
-README 追加 Phase D 里程碑；`docs/m8-migration.md` §4/4.2 记录
-CLI 行为变化与 watch/sync 契约变化；`docs/application-api-v1.md`
+README 追加 Phase D 里程碑；`m8-migration.md` §4/4.2 记录
+CLI 行为变化与 watch/sync 契约变化；`../api/application-api-v1.md`
 同步全部新 API 与 `session_client()` 移除。
 
 ---
@@ -947,7 +947,7 @@ finished_at_ms + 立即终态事件 + 后台结果不覆盖 + User/Remote 取消
 ## Phase D：Application 业务闭环
 
 优先级：P1 —— **Phase D 复核：D1–D6 已全部完成**（本 Phase 名称即
-`docs/HandShaker_Phase_D_Application_Closure_Plan.md`）。
+`HandShaker_Phase_D_Application_Closure_Plan.md`）。
 
 ### ~~D1. 设备发现结果带 warnings~~（已完成）
 
