@@ -6,10 +6,10 @@
 
 <p align="center">
   <a href="https://github.com/CashewTeam/HandShaker_Rust/actions/workflows/macos-ci.yml">
-    <img src="https://github.com/CashewTeam/HandShaker_Rust/actions/workflows/macos-ci.yml/badge.svg" alt="macOS CI">
+    <img src="https://img.shields.io/github/actions/workflow/status/CashewTeam/HandShaker_Rust/macos-ci.yml?branch=main&label=macOS%20CI&logo=apple&logoColor=white" alt="macOS CI">
   </a>
   <a href="https://github.com/CashewTeam/HandShaker_Rust/actions/workflows/linux-ci.yml">
-    <img src="https://github.com/CashewTeam/HandShaker_Rust/actions/workflows/linux-ci.yml/badge.svg" alt="Linux CI">
+    <img src="https://img.shields.io/github/actions/workflow/status/CashewTeam/HandShaker_Rust/linux-ci.yml?branch=main&label=Linux%20CI&logo=linux&logoColor=white" alt="Linux CI">
   </a>
   <a href="https://github.com/CashewTeam/HandShaker_Rust/blob/main/Cargo.toml">
     <img src="https://img.shields.io/badge/version-0.7.5-blue" alt="Workspace version 0.7.5">
