@@ -1,4 +1,26 @@
-# HandShaker Rust
+<p align="center">
+  <img src="docs/handshaker_rust.png" alt="HandShaker Rust" width="180">
+</p>
+
+<h1 align="center">HandShaker Rust</h1>
+
+<p align="center">
+  <a href="https://github.com/CashewTeam/HandShaker_Rust/actions/workflows/macos-ci.yml">
+    <img src="https://github.com/CashewTeam/HandShaker_Rust/actions/workflows/macos-ci.yml/badge.svg" alt="macOS CI">
+  </a>
+  <a href="https://github.com/CashewTeam/HandShaker_Rust/blob/main/Cargo.toml">
+    <img src="https://img.shields.io/badge/version-0.7.5-blue" alt="Workspace version 0.7.5">
+  </a>
+  <a href="https://github.com/CashewTeam/HandShaker_Rust/blob/main/Cargo.toml">
+    <img src="https://img.shields.io/badge/rust-2024-orange?logo=rust" alt="Rust 2024 edition">
+  </a>
+  <a href="https://github.com/CashewTeam/HandShaker_Rust/blob/main/docs/api/application-api-v1.md">
+    <img src="https://img.shields.io/badge/Application%20API-1.0.0-4c1" alt="Application API 1.0.0">
+  </a>
+  <a href="https://github.com/CashewTeam/HandShaker_Rust/blob/main/docs/api/ffi-v1.md">
+    <img src="https://img.shields.io/badge/FFI%20ABI-1.5.0-4c1" alt="FFI ABI 1.5.0">
+  </a>
+</p>
 
 HandShaker Rust 是基于原版 HandShaker 的通信协议开发的跨平台 Rust 后端实现，目标是重写已经停止维护的 HandShaker，让 HandShaker 可以继续在 macOS Arm64 原生运行，并在后续支持 Linux 系统。
 
