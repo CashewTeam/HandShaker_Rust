@@ -1,6 +1,6 @@
-# 架构(M8)
+# 架构
 
-> 版本 0.7.0 · 分支 `refactor/m8-workspace-application-ffi`
+> 当前 Workspace 版本 0.7.5；本文描述已落地的 Workspace、Application 与 FFI 分层。
 
 ## 1. Workspace 分层
 
@@ -19,7 +19,6 @@ CLI    FFI        GTK Rust(未来)
 | `handshaker-application` | Runtime 生命周期、设备发现目录、Session/Transfer 注册表、事件 Hub、公共错误、稳定 DTO、路径解析 | core |
 | `handshaker-cli` | Clap 命令树、本地化、human/JSON/JSONL 输出、REPL/shell/batch、确认、调用 Application | application → core |
 | `handshaker-ffi` | 稳定 C ABI、不透明句柄、Buffer/Result、panic 隔离、事件拉取、ABI 版本、C/Swift smoke | application |
-| `handshaker-test-support` | (预留)假 ADB/SSP、fixture 共享 | 不参与生产 |
 
 禁止方向:core → application/cli/ffi;application → cli/ffi;ffi → cli。
 
@@ -38,7 +37,7 @@ handshaker-core(协议、传输、会话)
 - CLI 保留为自动化/调试/无 GUI 入口,输出模型(JSON envelope、退出码)留在 CLI;
 - GUI 只通过 Application/FFI 消费,不接触 Prost、sid、帧、forward 清理。
 
-## 3. 应用服务模型(preview v1)
+## 3. 应用服务模型（正式 v1）
 
 - `HandShakerRuntime`(非单例,可多实例):create/shutdown(幂等,单次执行,
   确定性关闭:取消传输 → 有界 join → 并行关闭 Session → 关闭 EventHub)、
@@ -78,8 +77,8 @@ handshaker-core(协议、传输、会话)
 ## 5. 平台与已知限制
 
 - 协议能力与 M7 一致(ADB/WiFi/USB、文件、剪贴板、媒体、同步、watch);
-- USB accessory 会话单次性、Linux udev、Windows 评估均未变(见 docs/23);
-- CLI 业务命令已全部迁移到 Application(M8.1 Phase D 收口:device
+- USB accessory 会话单次性、Linux udev、Windows 评估均未变(见 `../archive/23-m7-usb-aoa.md`);
+- CLI 业务命令已基本迁移到 Application(M8.1 Phase D 收口:device
   info/ping、trust、pull/push 预检、watch、sync.* 均走
   `HandShakerRuntime`;`session_client()` 过渡入口已删除,`AppSession`
   不再持有 Core client)。仅剩 `device discover`(Wi-Fi mDNS)直连 core,

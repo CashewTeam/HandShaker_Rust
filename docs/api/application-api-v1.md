@@ -1,8 +1,8 @@
 # handshaker-application API v1(正式冻结)
 
 > 版本:`APPLICATION_API_VERSION = "1.0.0"`(与 Rust crate 版本独立)
-> 里程碑:M8(M8.4 建立,M8.5/M8.6 草案冻结);M8.1 Phase A 改为 preview;
-> **2026-08-04 正式冻结为 1.0.0**(审计 DoD 16/16,`../archive/HandShaker_Rust_Code_Audit_ad96fb4.md` §8)
+> 里程碑:M8/M8.1 完成分层、事件、Runtime 和业务迁移；**2026-08-04 正式冻结为 1.0.0**
+> (审计 DoD 16/16,`../archive/HandShaker_Rust_Code_Audit_ad96fb4.md` §8)
 > crate:`crates/handshaker-application`,包名 `handshaker-application`
 >
 > **当前状态:正式 v1,稳定契约。** 破坏性变更(删除/重命名方法、改变
@@ -23,7 +23,7 @@ FFI、UniFFI 或任何 UI 框架。
 
 ## 2. 冻结规则(v1,正式)
 
-以下规则自 preview 阶段起即为硬性要求,2026-08-04 正式冻结后继续生效;
+以下规则在 preview 阶段制定,2026-08-04 正式冻结后继续生效;
 冻结前的例外(移除临时过渡接口 `session_client()`、修正事件/传输语义
 与文档)已完成,此后破坏性变更必须升 major 并在本文件与
 `../archive/m8-migration.md` 记录。
@@ -86,7 +86,7 @@ FFI、UniFFI 或任何 UI 框架。
 impl HandShakerRuntime {
     pub async fn create(config: RuntimeConfig) -> AppResult<Self>;
     pub async fn shutdown(&self) -> AppResult<()>;   // 幂等
-    // 发现（Phase D/D1）:带 per-transport 诊断;list_devices 为 preview 兼容包装
+    // 发现（Phase D/D1）:带 per-transport 诊断;list_devices 为兼容包装
     pub async fn discover_devices(&self, request: ListDevicesRequest) -> AppResult<DeviceDiscoveryResult>;
     pub async fn list_devices(&self, request: ListDevicesRequest) -> AppResult<Vec<DeviceDescriptor>>;
     pub async fn connect(&self, request: ConnectRequest) -> AppResult<SessionId>;
@@ -159,7 +159,7 @@ impl HandShakerRuntime {
 - `discover_devices`(Phase D/D1):单传输失败不整批失败——失败以
   `DeviceDiscoveryWarning { transport, error }` 呈现,其余传输的设备保留;
   整体错误(Runtime 已关闭、请求非法)仍返回 `Err`。`list_devices` 为
-  preview 兼容包装,仅返回 devices。
+  兼容包装,仅返回 devices；需要诊断信息时使用 `discover_devices`。
 - 稳定身份(Phase D/D2):Wi-Fi 发现的 `DeviceDescriptor.id` 是动态
   endpoint 标识;连接成功后 `stable_id`(`phone:<uuid>`)由
   `phone_id` reconcile,`DeviceUpdated` 事件携带 `stable_id`;

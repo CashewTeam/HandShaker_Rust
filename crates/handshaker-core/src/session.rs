@@ -310,7 +310,7 @@ impl Session {
         );
         let events = event_channel();
         // Business request sids start at 0x8000_1000, deliberately above the
-        // phone's push-sid generator (0x8000_0001 +, docs/14 §7.5). The two
+        // phone's push-sid generator (0x8000_0001 +, docs/protocol/14 §7.5). The two
         // generators previously collided (both starting at 0x8000_0001),
         // which routed phone pushes into pending requests — first observed
         // on-device 2026-08-03 during M6 photo-sync acceptance.

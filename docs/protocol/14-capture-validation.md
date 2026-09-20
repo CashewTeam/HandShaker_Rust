@@ -134,7 +134,7 @@ python3 tools/capture/ssp_errors.py           # MD5 异常 + 取消行为
 > **注意**：macOS 15+ 的「本地网络（Local Network）」隐私权限会拦截非系统进程的局域网流量
 > （`ping` 可用但 TCP/UDP 报 `No route to host`）。验证命令需以 **`sudo`** 运行绕过。
 
-## 10.1 mDNS 发现（docs/02 全部确认）
+## 10.1 mDNS 发现（`docs/protocol/02-discovery.md` 全部确认）
 
 `tools/capture/ssp_mdns.py`（纯 stdlib 实现，unicast 查询手机 5353 + v4/v6 多播）实测返回：
 
@@ -159,7 +159,7 @@ python3 tools/capture/ssp_errors.py           # MD5 异常 + 取消行为
 - 解析注意：DNS 名称压缩指针（`0xC0`）指向**整个报文**偏移，不能按 RDATA 独立解析；
   名字不带末尾点（匹配时勿加 `.`）。
 
-## 10.2 WiFi 握手与信任（docs/04 全部确认）
+## 10.2 WiFi 握手与信任（`docs/protocol/04-handshake-trust.md` 全部确认）
 
 ### RESPONSE_01 实测字段
 

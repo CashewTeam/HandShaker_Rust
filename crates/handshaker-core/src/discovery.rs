@@ -29,7 +29,7 @@ pub(crate) async fn discover_wifi_devices(browse_timeout: Duration) -> Result<Ve
     })?;
 
     // Key by host name: the app registers the fixed instance name
-    // `handshaker_ssp_` (docs/02 §2.1), so fullname alone would collapse
+    // `handshaker_ssp_` (docs/protocol/02-discovery.md §2.1), so fullname alone would collapse
     // every phone into one entry; the SRV port is dynamic, so the latest
     // resolution for each host wins.
     let mut devices: std::collections::BTreeMap<String, WifiDevice> =

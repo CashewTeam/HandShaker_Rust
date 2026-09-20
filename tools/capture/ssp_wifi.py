@@ -2,7 +2,8 @@
 """
 HandShaker SSP over WiFi/LAN validation client.
 
-Validates (docs/02, docs/04, docs/14):
+Validates (`docs/protocol/02-discovery.md`, `docs/protocol/04-handshake-trust.md`,
+`docs/protocol/14-capture-validation.md`):
   - mDNS discovery of `_handshaker_ssp._tcp` (or direct --ip/--port)
   - WiFi-type handshake: REQUEST_01 -> RESPONSE_01 -> REQUEST_02 -> RESPONSE_02
     (incl. phone trust dialog, auto-tapped via adb)

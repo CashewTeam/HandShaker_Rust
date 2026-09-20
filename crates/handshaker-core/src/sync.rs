@@ -39,7 +39,7 @@ pub struct SyncRunResult {
 
 /// Pure diff between the phone's current state and the ledger snapshot.
 ///
-/// Classification (docs/10 §10.4): a recorded file whose phone checksum
+/// Classification (`docs/protocol/10-photo-sync.md` §10.4): a recorded file whose phone checksum
 /// changed is content-modified (re-download); a file whose checksum is
 /// unchanged but whose ext_data/modified_at changed is metadata-only; a
 /// recorded file absent on the phone is deleted. Files new on the phone are

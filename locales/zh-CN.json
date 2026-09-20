@@ -287,7 +287,7 @@
     "watch.lagged": "事件流落后，已跳过 {0} 个事件。",
     "watch.disconnected": "与设备的连接已关闭。",
     "watch.nested": "watch 命令不支持在 shell 中嵌套。",
-    "exif.not_implemented": "EXIF 拉取尚未实现（规划走 ADB shell 通道，见 docs/20）。",
+    "exif.not_implemented": "EXIF 拉取尚未实现（规划走 ADB shell 通道，见 docs/archive/20-m4-media-library.md）。",
     "exif.parse_failed": "无法解析 EXIF 数据（文件不是受支持的 JPEG/EXIF 格式）。",
     "exif.file_too_large": "文件过大（{0} 字节），超过 EXIF 拉取上限 {1} 字节。",
     "media.change_kind_mismatch": "媒体库变更类型 {0} 与快照类型 {1} 不匹配，已拒绝合并。",

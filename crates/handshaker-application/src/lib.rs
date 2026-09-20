@@ -4,7 +4,8 @@
 //! - never exposes prost types, session frames, or transport internals;
 //! - never depends on CLI (no clap, no stdout, no JSON envelope);
 //! - `HandShakerRuntime` is the single entry point for GUI/bindings;
-//! - public DTOs and error codes are the v1 contract (see docs).
+//! - public DTOs and error codes are the frozen v1 contract (see
+//!   `docs/api/application-api-v1.md`).
 
 mod discovery;
 mod dto;
@@ -55,15 +56,8 @@ mod tests;
 /// Application API version; bumped only on breaking changes of the contract
 /// above (independent of the Rust crate version).
 ///
-/// Current status: `preview` — the v1 contract is still being finalized
-/// (Phase D: `session_client()` transition entry removed with the last CLI
-/// call site; event/transfer semantics, documentation and fixtures). Breaking
-/// source-level changes are allowed until the freeze; consumers must not
-/// treat preview versions as stable. The freeze will drop the
-/// `-preview.N` suffix (see `docs/application-api-v1.md`).
-///
 /// Frozen as `1.0.0` on 2026-08-04 (audit DoD 16/16, see
-/// `docs/HandShaker_Rust_Code_Audit_ad96fb4.md` §8): the v1 contract is
+/// `docs/archive/HandShaker_Rust_Code_Audit_ad96fb4.md` §8): the v1 contract is
 /// stable — breaking source-level/JSON changes now require a major bump.
 /// Note: `RuntimeStarted`/`DeviceAdded`/`DeviceRemoved` event variants are
 /// part of the contract (Swift handles them) but are not emitted by the

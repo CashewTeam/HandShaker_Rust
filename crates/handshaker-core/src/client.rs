@@ -708,7 +708,7 @@ impl HandShakerClient {
     /// feed the change into its sync manager.
     ///
     /// Wire semantics come from the Android `d/c.java:508-545` decompilation
-    /// (`docs/08-file-operations.md` §8.11); there is no capture yet.
+    /// (`docs/protocol/08-file-operations.md` §8.11); there is no capture yet.
     pub async fn update_files_info(&self, files: &[RemoteFile], is_sync: bool) -> Result<bool> {
         let request = SspUpdateFileRequest {
             r#type: Some(SspRequestType::UpdateFileInfo as i32),
@@ -732,7 +732,7 @@ impl HandShakerClient {
     /// state; the host then diffs that state against its ledger.
     ///
     /// Wire semantics come from the Android `f/e.java` decompilation
-    /// (`docs/10-photo-sync.md`); there is no capture yet — first real-device
+    /// (`docs/protocol/10-photo-sync.md`); there is no capture yet — first real-device
     /// evidence lands with the M6 acceptance run.
     pub async fn photo_sync(&self, pc_id: &str, files: &[RemoteFile]) -> Result<PhotoSyncResult> {
         let request = SspPhotoSyncRequest {

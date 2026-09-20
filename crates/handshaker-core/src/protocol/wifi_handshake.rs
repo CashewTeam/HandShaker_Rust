@@ -480,7 +480,8 @@ mod tests {
 
     const DEVICE_UUID: &str = "test-device";
 
-    /// Capture-verified REQUEST_01 wire facts (docs/14 §10.2 and docs/04 §4.3).
+    /// Capture-verified REQUEST_01 wire facts (`docs/protocol/14-capture-validation.md`
+    /// §10.2 and `docs/protocol/04-handshake-trust.md` §4.3).
     #[test]
     fn request01_carries_compatible_host_identity_and_split_enckey() {
         let request = SspHandShakeRequest01 {
@@ -513,7 +514,8 @@ mod tests {
         assert_eq!(decoded.enckey.as_deref(), Some(&[0xCD; 16][..]));
     }
 
-    /// Capture-verified RESPONSE_01 field values (docs/14 §10.2).
+    /// Capture-verified RESPONSE_01 field values (`docs/protocol/14-capture-validation.md`
+    /// §10.2).
     #[test]
     fn response01_decodes_capture_verified_phone_fields() {
         let encoded = SspHandShakeResponse01 {

@@ -2029,7 +2029,7 @@ async fn sync_command(
             // may have several. `sync status` lists them all (schema
             // change: data is now {"ledgers":[...]} instead of a single
             // {device_uuid,files,bytes} object — recorded in
-            // docs/m8-migration.md §13).
+            // docs/archive/m8-migration.md §13).
             let ledgers = app
                 .runtime
                 .list_sync_ledgers(Some(&device_uuid))

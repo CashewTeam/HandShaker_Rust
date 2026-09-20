@@ -1,6 +1,6 @@
 # tools/capture — SSP 抓包验证工具
 
-基于 [docs/14-capture-validation](../docs/14-capture-validation.md) 结论的可复现验证脚本。
+基于 [docs/protocol/14-capture-validation](../../docs/protocol/14-capture-validation.md) 结论的可复现验证脚本。
 覆盖 **ADB 通道**与 **WiFi/局域网通道**（Bonjour 发现 + 握手 + 传输），逐字节记录双向流量。
 
 ## 依赖

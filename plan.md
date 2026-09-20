@@ -1,6 +1,6 @@
 # HandShaker_Rust 后端现状与完整开发计划
 
-> 状态基线：2026-08-03，Cargo workspace `handshaker_rust 0.7.1`（M8 拆分为 core/application/cli/ffi；0.7.1 完成 CLI fs 迁移与 FFI 传输面）。
+> 状态基线：2026-09-20，Cargo workspace `handshaker_rust 0.7.5`。M0–M8.1 的主要后端闭环已经完成；本文保留里程碑历史，并在顶部和“下一步建议”维护当前状态。
 >
 > 本文只把已经存在于 Rust 代码中的能力标记为“已实现”。协议文档、proto schema 或抓包已经确认，
 > 但尚未形成正式 Rust API/CLI 的能力，仍标记为“未实现”。
@@ -16,7 +16,9 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 - 可供 CLI、未来 GUI 和自动化工具复用的稳定 Rust library；
 - 中文 human 输出以及稳定的 JSON/JSONL 自动化接口。
 
-当前优先级仍是先把无 daemon 的本地 library + CLI 做完整，再考虑 GUI。本文不包含 GUI 视觉设计。
+当前优先级不是继续无边界扩张协议功能，而是收口剩余跨层和跨平台交付：将 `device discover` 的
+Wi-Fi mDNS 发现迁入 Application，建立 Linux/Windows CI 与 FFI 产物验证，并补充 GTK/.NET
+契约 smoke/示例。GUI 应用本身不在本文和本仓库交付范围内。
 
 ## 2. 状态定义
 
@@ -27,20 +29,36 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 | ⬜ 未实现 | 协议可能已经逆向或抓包确认，但正式 Rust 后端尚未实现 |
 | 🔬 待验证 | 实现前还需要补充真机或字节级验证 |
 
+## 当前状态快照（2026-09-20）
+
+- ✅ Workspace 已拆分为 `handshaker-core`、`handshaker-application`、`handshaker-cli`、
+  `handshaker-ffi`；Application 只依赖 Core，FFI 只依赖 Application。
+- ✅ CLI 的设备、文件、传输、剪贴板、媒体、trust、watch、sync 业务已通过 Application；
+  仅 `device discover` 的 Wi-Fi mDNS 发现仍直接调用 Core，`fs rm/count` 只保留 CLI 输出适配。
+- ✅ Runtime/Session/Transfer 生命周期、取消、并发和事件桥接已完成；Core 事件经 Application
+  映射为稳定事件，再由 FFI 暴露。
+- ✅ Application API `1.0.0`、FFI ABI `1.5.0`、CLI JSON contract `1` 已冻结；Swift
+  Package、arm64+x86_64 XCFramework 和 macOS CI 已落地。
+- 🟡 Linux/Windows CI、FFI 产物和最小消费者验证尚未完成；GTK/.NET smoke/示例尚未交付。
+- 🟡 断点续传仍未实现；区间下载只是一次性定位，不能宣称自动恢复。
+- ✅ 当前验证：`cargo test` 全部通过；`platform/macos` 的 `swift test` 通过 52 项，2 项真机
+  acceptance 因未设置 `HS_ACCEPTANCE` 跳过。
+
 ## M0 基线固化状态
 
 - ✅ 假 ADB/假 SSP 服务已覆盖公开客户端成功路径和关键失败路径。
 - ✅ CLI 命令树、JSON/JSONL envelope、危险操作确认和 shell 裸 `ls` 有回归测试。
 - ✅ public library API 已补充 rustdoc 和可编译最小示例。
-- ✅ macOS ARM64 基础 CI 已加入。
-- ✅ Smartisan U2 Pro/OD103 真机验收已完成，报告见 `docs/15-adb-v0.1-baseline.md`。
-- 🟡 当前仍仅支持 ADB 单文件传输；WiFi、USB AOA、媒体、监控、同步继续属于后续里程碑。
+- ✅ macOS CI 已覆盖 Rust 检查、FFI Header/ABI、C/Swift smoke、XCFramework 和 Swift Package。
+- ✅ Smartisan U2 Pro/OD103 真机验收已完成，报告见 `docs/archive/15-adb-v0.1-baseline.md`。
+- ✅ 当前已支持 ADB、WiFi、USB AOA、媒体、监控、同步和批量/递归传输；跨平台 CI 与交付仍是后续工作。
 
 ## 3. 当前已经实现的后端能力
 
 ### 3.1 工程与公开 library
 
-- ✅ 单 Cargo package 同时提供 `handshaker_rust` library 和 `handshaker` binary。
+- ✅ Cargo Workspace 提供 `handshaker-core`、`handshaker-application`、`handshaker-cli` 和
+  `handshaker-ffi` 四个 crate，分别承担协议、应用服务、CLI 和 C ABI。
 - ✅ `src/lib.rs` 导出连接配置、客户端、稳定错误类型和领域模型。
 - ✅ CLI 和未来 GUI 不需要直接依赖 Prost 生成结构。
 - ✅ `proto/smartsync.proto` 使用 proto2，通过 `prost-build` 生成到 `OUT_DIR`。
@@ -230,9 +248,9 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 - ✅ **M4（0.3.0）**：媒体库查询（`get_photo/video/audio_library`）与缩略图（`get_thumbnails`，
   JPEG、失败条目不整批失败）；CLI `media photo|video|audio`（**默认预览上限 50 条**，
   `--limit`/`--all` 覆盖，json 带 `total`/`truncated`）与 `media thumbnail --output-dir`；
-  `fetch_exif` 预留接口（M5 实现，见 docs/20 §4）。
-- ✅ 事件 JSON `kind` tag 与 watch jsonl 信封为 0.2.0 兼容契约（docs/19 §4）。
-- ✅ **M6（0.5.0）**：照片同步 `sync plan/run/watch/status`（`photo_sync` 37 初始 diff + FILE_CHANGE 38 增量 + `sync_monitor` 39 实时，单向下载；真机验证，见 docs/22）。
+  `fetch_exif` 预留接口（M5 实现，见 `docs/archive/20-m4-media-library.md` §4）。
+- ✅ 事件 JSON `kind` tag 与 watch jsonl 信封为 0.2.0 兼容契约（`docs/archive/19-m3-directory-watch.md` §4）。
+- ✅ **M6（0.5.0）**：照片同步 `sync plan/run/watch/status`（`photo_sync` 37 初始 diff + FILE_CHANGE 38 增量 + `sync_monitor` 39 实时，单向下载；真机验证，见 `docs/archive/22-m6-photo-sync.md`）。
 - ⬜ 断线后的显式重新订阅策略由后续 watch/API 里程碑定义；当前不自动重连。
 
 ### 4.4 文件与传输扩展
@@ -257,9 +275,11 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 - ✅ CLI `media photo|video|audio`（默认预览上限 50、`--limit`/`--all`）与 `media thumbnail --output-dir`。
 - ✅ EXIF 方向/经纬度/date_taken 随查询返回；独立 EXIF 拉取为 `fetch_exif` 预留接口（M5）。
 - ✅ 媒体库变更增量合并（M5 0.4.1：`media_merge::apply_photo/video/audio`，key=media_id 优先、path 兜底）。
-- 🟡 媒体库分页（协议请求无分页参数，当前 CLI 层预览截断 `--limit`/`--all`；服务端分页需协议确认）。
+- ✅ Application 媒体分页（协议请求仍无分页参数，由 Application 对快照切页；默认 500、上限
+  1000，并配合缓存/缩略图磁盘缓存控制消费侧内存）。
 - ✅ EXIF 方向/经纬度/date_taken/收藏/媒体 ID 领域模型（M4）；独立 EXIF 拉取（M5 0.4.1，`kamadak-exif`）。
-- 🟡 大型媒体库内存上限：session 线级 + 媒体解码 64 MiB 双上限；流式/分页输出待后续。
+- 🟡 协议侧仍返回完整媒体快照；超大媒体库的端到端流式查询尚未实现，当前依赖线级和解码
+  64 MiB 上限以及 Application 分页。
 
 ### 4.6 照片同步
 
@@ -274,13 +294,13 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ### 4.7 产品化和跨平台
 
-- ⬜ Linux adb/网络/USB 的正式 CI 与安装包。
-- ⬜ Windows 支持评估与实现。
+- ⬜ Linux/Windows 的正式 CI、FFI 产物和安装包验证。
+- ⬜ GTK/.NET 的最小 Application/FFI 契约 smoke/示例；完整 GUI 应用不在本仓库交付范围内。
 - ⬜ shell 历史、补全和更完整的交互体验。
 - ⬜ 配置文件中的默认 serial、timeout、输出格式等用户偏好。
 - ⬜ 除中文外的语言资源与语言选择。
-- ⬜ 稳定 API 文档、示例工程和 GUI 集成指南。
-- ⬜ release CI、跨平台产物、校验和与安装说明。
+- ✅ 稳定 Application/FFI API 文档和 Swift Package 集成路径。
+- ⬜ Linux/Windows release CI、跨平台产物、校验和与安装说明。
 
 ## 5. 当前部分实现与已知限制
 
@@ -308,7 +328,7 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
   -> 批量和递归传输
   -> 照片同步状态机
   -> USB AOA
-  -> 内部分层整理、应用服务模型冻结与 handshaker-ffi（Swift UniFFI）
+  -> 内部分层整理、应用服务模型冻结与手写 handshaker-ffi C ABI
 ```
 
 核心原则：
@@ -324,7 +344,7 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ### M0：固化当前 ADB v0.1 基线
 
-> 状态：✅ 已完成（2026-08-02）；真机报告见 `docs/15-adb-v0.1-baseline.md`。
+> 状态：✅ 已完成（2026-08-02）；真机报告见 `docs/archive/15-adb-v0.1-baseline.md`。
 
 目标：把现有功能从“可运行首版”提升为可持续扩展的稳定基线。
 
@@ -346,7 +366,7 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ### M1：公共取消模型与强类型事件总线
 
-> 状态：✅ 已完成（2026-08-02）；API 和行为文档见 `docs/16-m1-events-cancellation.md`。
+> 状态：✅ 已完成（2026-08-02）；API 和行为文档见 `docs/archive/16-m1-events-cancellation.md`。
 
 目标：为监控、WiFi 信任状态和同步提供统一异步基础。
 
@@ -369,7 +389,7 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ### M2：WiFi 发现、连接与持久化信任（已完成，2026-08，0.1.5）
 
-目标：实现与抓包结果一致的局域网完整连接路径。实现记录见 `docs/18-m2-wifi-trust.md`。
+目标：实现与抓包结果一致的局域网完整连接路径。实现记录见 `docs/archive/18-m2-wifi-trust.md`。
 
 完成情况：
 
@@ -382,13 +402,13 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 - ✅ `device discover`、`trust list`、`trust remove`、`trust reset` CLI；`--wifi IP:PORT` 与 `--serial` 互斥。
 - ✅ 恢复策略：错误 derived_key → `failed` 明确报错；信任删除通过 `trust reset/remove` 显式重建；
   信任等待超时明确报错，不静默降级。
-- ✅ 本地假 WiFi 服务（`FakeWifiSsp`）、抓包向量（docs/14 §10.2）与真实局域网发现验证。
+- ✅ 本地假 WiFi 服务（`FakeWifiSsp`）、抓包向量（`docs/protocol/14-capture-validation.md` §10.2）与真实局域网发现验证。
 - ✅ 真机完整验收（2026-08，OD103）：首次连接授权、重连免弹窗、WiFi 业务（文件/传输 MD5 一致/剪贴板）、
-  trust reset、failed 自动清理与信任重建全部通过；记录见 `docs/18 §4.3`。
+  trust reset、failed 自动清理与信任重建全部通过；记录见 `docs/archive/18-m2-wifi-trust.md` §4.3。
 
 ### M3：目录监控与设备/剪贴板主动推送（已完成，2026-08，0.2.0）
 
-目标：完成首批依赖事件总线的实时功能。实现记录见 `docs/19-m3-directory-watch.md`。
+目标：完成首批依赖事件总线的实时功能。实现记录见 `docs/archive/19-m3-directory-watch.md`。
 
 完成情况：
 
@@ -401,11 +421,11 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 - ✅ 安全加固：session 线级 64 MiB 响应上限（声明 total 早拒）、watch/媒体 human 输出
   `sanitize_human`（C0/DEL/C1 剥离，防终端转义注入）。
 - ✅ 真机完整验收（2026-08，OD103）：目录事件（create→close_write→moved_from）、剪贴板事件、
-  媒体库变更推送（MediaScanner 广播后 `media_library_changed`）全部收到；记录见 `docs/19 §6`。
+  媒体库变更推送（MediaScanner 广播后 `media_library_changed`）全部收到；记录见 `docs/archive/19-m3-directory-watch.md` §6。
 
 ### M4：媒体库与缩略图（已完成，2026-08，0.3.0）
 
-目标：覆盖图片、视频、音频及其变更推送。实现记录见 `docs/20-m4-media-library.md`。
+目标：覆盖图片、视频、音频及其变更推送。实现记录见 `docs/archive/20-m4-media-library.md`。
 
 完成情况：
 
@@ -420,7 +440,7 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 - ✅ 安全：session 64 MiB 响应上限 + 媒体解码二次上限（`decode_media_response`）。
 - ✅ 真机完整验收（2026-08，OD103）：照片 3005 张 + 25 相册（含已脱敏经纬度 EXIF 样本）、
   预览截断 `"total":3005,"truncated":true`、视频/音频查询、缩略图 JPEG 可解码（magic `ffd8ff`）、
-  watch 实时收到媒体变更；记录见 `docs/20 §6`。
+  watch 实时收到媒体变更；记录见 `docs/archive/20-m4-media-library.md` §6。
 
 任务（原始规划，供对照）：
 
@@ -430,7 +450,7 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ### M5：批量、递归传输与文件元数据（已完成，2026-08，0.4.0）
 
-目标：在保持单文件原语可靠的前提下提供实用批量文件管理。实现记录见 `docs/21-m5-exif-batch.md`。
+目标：在保持单文件原语可靠的前提下提供实用批量文件管理。实现记录见 `docs/archive/21-m5-exif-batch.md`。
 
 完成情况：
 
@@ -442,7 +462,7 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 - ✅ 批量/递归传输：`upload_many/download_many`（串行、失败聚合）、`upload_tree/download_tree`
   （镜像目录结构）；CLI `fs push/pull` 多目标 + `--recursive`（`--` 分隔目标），批量覆盖预检+
   确认、批量进度与结果聚合输出。
-- ✅ 自动测试 120 个全部通过；真机验收见 `docs/21 §6.3`。
+- ✅ 自动测试 120 个全部通过；真机验收见 `docs/archive/21-m5-exif-batch.md` §6.3。
 
 任务（原始规划，供对照）：
 
@@ -453,7 +473,7 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ### M6：照片同步与实时同步（已完成，2026-08，0.5.0）
 
-目标：实现协议定义的增量照片同步，而不是简单复制目录。实现记录见 `docs/22-m6-photo-sync.md`。
+目标：实现协议定义的增量照片同步，而不是简单复制目录。实现记录见 `docs/archive/22-m6-photo-sync.md`。
 
 完成情况（含用户范围决策：单向下载、独立台账、不做上传/跨设备冲突合并）：
 
@@ -486,7 +506,7 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ### M7：USB AOA 连接（已完成，2026-08，0.6.0/0.6.1）
 
-目标：新增 USB 传输通道，并复用现有裸握手、Session 和业务 API。实现记录见 `docs/23-m7-usb-aoa.md`。
+目标：新增 USB 传输通道，并复用现有裸握手、Session 和业务 API。实现记录见 `docs/archive/23-m7-usb-aoa.md`。
 
 完成情况：
 
@@ -506,11 +526,11 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 - ✅ USB 下完成与 ADB 相同的设备、文件、传输和剪贴板验收。
 - ✅ 拔线能立即结束任务并给出明确错误，不残留资源。
 
-### M8：内部分层整理、应用服务模型冻结与 handshaker-ffi（Swift UniFFI 接入）（已完成，2026-08，0.7.0/0.7.1）
+### M8：内部分层整理、应用服务模型冻结与 handshaker-ffi（已完成，2026-08～09，0.7.0～0.7.5）
 
 目标：把 0.6.1 之后的后端整理成可被 GUI 长期依赖的分层结构，并建立 FFI 边界。
-实现记录见 `docs/architecture.md`、`docs/application-api-v1.md`、`docs/ffi-v1.md`、
-`docs/m8-migration.md`、`docs/m8-test-report.md`。
+实现记录见 `docs/architecture/architecture.md`、`docs/api/application-api-v1.md`、
+`docs/api/ffi-v1.md`、`docs/archive/m8-migration.md`、`docs/archive/m8-test-report.md`。
 
 任务：
 
@@ -518,11 +538,11 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
   收敛 `pub` 面（domain/公开 API 不泄露 Prost 与传输类型），消除跨层直接访问。
 - 冻结应用服务模型：定义稳定的应用服务接口（连接生命周期、设备/文件/媒体/同步/事件订阅、
   错误与取消语义），作为 CLI 与 FFI 的共同基座（`AppService` 或等价层）。
-- 建立 `handshaker-ffi` crate：提供 C ABI/UniFFI 绑定（UDL + 生成器），导出冻结后的领域类型；
-  明确 async 桥接（运行时线程、回调、取消传播）与错误映射（FFI 错误码 ↔ `Error`）。
-- 实现 Swift UniFFI 接入：生成 Swift 绑定，提供最小示例工程，验证连接、浏览、传输与事件订阅
-  四条 GUI 消费路径。
-- 版本与文档：版本 0.7.0；新增 FFI/应用服务模型文档与兼容性策略；回归 + security_review + 真机冒烟。
+- 建立 `handshaker-ffi` crate：提供手写 C ABI，导出稳定领域 DTO，明确异步任务、取消、错误
+  映射和 Rust buffer 所有权。
+- 通过 Swift 包装层与静态 XCFramework 验证连接、浏览、传输和事件订阅四条消费路径。
+- 版本与文档：Application API `1.0.0`、FFI ABI `1.5.0`；完成回归、ABI 校验、C/Swift
+  smoke、macOS CI 和真机冒烟。
 - **后续（0.7.1）**：CLI 连接统一走 runtime；`fs ls/stat/exists/mkdir/mv` + `fs pull/push` 批量用例迁移到 Application（`rm`/`count` 因输出契约暂留 core）；`handshaker-ffi` ABI 1.1.0 导出传输任务面（`hs_transfer_*`）；192 测试。
 
 验收：
@@ -580,9 +600,9 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ## 9. 版本建议
 
-- 当前 `0.7.1`（M8）：ADB/WiFi/USB 基线能力全保留；Workspace 拆分 core/application/cli/ffi；
-  应用服务模型冻结（Runtime/Session/Transfer/事件/PublicError v1）；FFI C ABI 1.0.0 最小闭环
-  （设备/连接/文件/事件订阅，C 与 Swift smoke 通过）。
+- 当前 `0.7.5`：ADB/WiFi/USB 基线能力全保留；Workspace 分层、Application API `1.0.0`、
+  Runtime/Session/Transfer、事件桥接和 FFI C ABI `1.5.0` 已完成，C/Swift smoke 与 macOS
+  CI 通过。
 - 媒体、同步或 USB 等较大里程碑：根据 public API 兼容性由维护者决定 Y 版本。
 - `1.0.0` 前提：至少 ADB + WiFi 稳定、公开 API 和 JSON schema 有兼容承诺、跨平台发布流程成熟。
 - 单次 Bug 修复和简单功能默认只递增 Z；纯文档不递增版本。
@@ -590,22 +610,25 @@ HandShaker_Rust 的目标是提供一个兼容原版 Smartisan HandShaker 的跨
 
 ## 10. 下一步建议
 
-M0–M7 均已完成（M5 = EXIF 拉取 + 媒体库增量合并 + 批量/递归传输，0.4.0；M5 收尾 = dry-run/区间下载/UPDATE_FILE_INFO/受控并发，0.4.1；M6 = 照片同步与实时同步，0.5.0；M7 = USB AOA 连接，0.6.0，含传输层抽象与 AOA identification，真机完整业务验收通过；0.6.1 = `batch` 长连接批量会话，规避 accessory 单次会话）。建议优先处理遗留项：
+M0–M8.1 的后端里程碑已完成，当前剩余工作集中在边界收口和跨平台交付：
 
-1. M6 遗留：`sync run` 串行下载可接入 `batch_transfer` 并发；37/38/39 发送侧真机验收（§6.2 待执行）；
-2. 安全遗留：剪贴板 gzip 解压输出上限（M3 记录）、`fs ls/device.info/clipboard.get` human 输出
-   控制字符净化（既有 LOW，与 watch/media 一致化）。
+1. 将 `device discover` 的 Wi-Fi mDNS 发现迁入 Application，保持 CLI 旧输出、warnings 和退出码兼容；
+2. 建立 Linux/Windows CI，验证 FFI Header/ABI、静态或动态产物以及最小 C/语言消费者；
+3. 为 GTK/.NET 补充同一 Application/FFI 契约的 smoke/示例，不在本仓库引入第二套业务 API；
+4. 继续回归 Runtime/Session/Transfer 的取消、关闭、事件终态和多 Runtime 行为；
+5. 若要实现断点续传，先补齐协议证据和真机验证，再设计新的兼容 API；
+6. 处理低优先级的 gzip 输出上限和 human 输出控制字符净化。
 
-依赖已就绪的强类型事件总线，同步阶段不需要再改 Session。
+协议、Application 和 FFI 的既有闭环不需要为了这些工作重新设计 Session。
 
 ## 11. 相关文档
 
 - `README.md`：项目简介和当前运行入口。
 - `AGENTS.md`：开发约束、协议不变量和交付要求。
 - `docs/README.md`：协议文档索引。
-- `docs/13-verification-status.md`：协议结论的验证等级。
-- `docs/14-capture-validation.md`：真实抓包验证结果。
+- `docs/protocol/13-verification-status.md`：协议结论的验证等级。
+- `docs/protocol/14-capture-validation.md`：真实抓包验证结果。
 - `proto/smartsync.proto`：完整 proto2 schema。
-- `docs/16-m1-events-cancellation.md`：M1 事件订阅与取消行为。
-- `docs/17-m1-device-validation.md`：M1 真机事件与清理验收。
-- `docs/18-m2-wifi-trust.md`：M2 WiFi 发现、连接与持久化信任。
+- `docs/archive/16-m1-events-cancellation.md`：M1 事件订阅与取消行为。
+- `docs/archive/17-m1-device-validation.md`：M1 真机事件与清理验收。
+- `docs/archive/18-m2-wifi-trust.md`：M2 WiFi 发现、连接与持久化信任。

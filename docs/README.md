@@ -19,6 +19,11 @@ HandShaker 的局域网设备发现使用 **Apple Bonjour（mDNS/DNS-SD）**，�
 
 ## 文档分类
 
+### 项目入口
+
+- [../CHANGELOG](../CHANGELOG.md) — 版本变更与当前开发状态
+- [GitHub Wiki / Command-Line](https://github.com/CashewTeam/HandShaker_Rust/wiki/Command-Line) — 命令行教程
+
 ### 协议
 
 协议事实、消息定义、兼容行为和真实设备验证记录：

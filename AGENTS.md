@@ -40,15 +40,16 @@ crates/handshaker-ffi
 - Application Runtime、Session、Transfer、事件和公共错误模型；
 - 手写 C ABI、C/Swift smoke 示例和 macOS/Linux 构建脚本。
 
-当前开发重点不是继续无边界扩张协议功能，而是：
+当前主要开发重点是收口已经建立的分层和跨语言契约，而不是继续无边界扩张协议功能：
 
-1. 收紧 Workspace 分层；
-2. 完成 CLI 到 Application 的业务边界迁移；
-3. 修复 Runtime、Session、Transfer 的生命周期和并发语义；
-4. 完成 Core 事件到 Application/FFI 的桥接；
-5. 补齐 Swift GUI 所需 FFI；
-6. 建立正式的 Swift Package、XCFramework 和跨平台 CI；
-7. 在不破坏 CLI 和协议兼容性的前提下，为 GTK、.NET 等平台保留同一 Application 契约。
+1. 将剩余 `device discover` Wi-Fi mDNS 发现迁入 Application，保留 CLI 输出兼容；
+2. 建立 Linux/Windows CI，并验证 FFI 产物、头文件和最小消费者；
+3. 为 GTK/.NET 补充同一 Application/FFI 契约的最小 smoke/示例，不在本仓库引入完整 GUI；
+4. 持续回归 Runtime/Session/Transfer 生命周期、取消、事件桥接以及 CLI/协议兼容性。
+
+以下工作已经完成并进入维护状态：Workspace 分层、主要 CLI 业务迁移、Runtime/Session/Transfer
+生命周期、Core→Application→FFI 事件桥接、Application API v1、Swift Package、XCFramework
+和 macOS CI。
 
 除非任务明确要求，不要同时引入新的绑定框架、GUI 框架或第二套业务 API。
 当前跨语言权威路径是：
@@ -69,9 +70,9 @@ Swift / .NET / 其他语言包装层
 
 修改协议、连接、设备行为或兼容性逻辑前，按以下优先级确认事实：
 
-1. `docs/14-capture-validation.md` 中的真实设备抓包和互通结果；
+1. `docs/protocol/14-capture-validation.md` 中的真实设备抓包和互通结果；
 2. `proto/smartsync.proto` 与 APK 中的权威 proto2 schema；
-3. `docs/13-verification-status.md` 中的验证等级和源码索引；
+3. `docs/protocol/13-verification-status.md` 中的验证等级和源码索引；
 4. `docs/` 中对应协议、传输、命令和平台文档；
 5. 本地反编译资料：
    - `Reference/Android_jadx/`
@@ -105,20 +106,20 @@ Swift / .NET / 其他语言包装层
 
 协议任务建议先阅读：
 
-1. `docs/01-overview.md`
-2. `docs/04-handshake-trust.md`
-3. `docs/05-message-framing.md`
-4. `docs/06-protobuf-schema.md`
-5. `docs/07-command-reference.md`
-6. `docs/13-verification-status.md`
-7. `docs/14-capture-validation.md`
+1. `docs/protocol/01-overview.md`
+2. `docs/protocol/04-handshake-trust.md`
+3. `docs/protocol/05-message-framing.md`
+4. `docs/protocol/06-protobuf-schema.md`
+5. `docs/protocol/07-command-reference.md`
+6. `docs/protocol/13-verification-status.md`
+7. `docs/protocol/14-capture-validation.md`
 
 架构或绑定任务建议先阅读：
 
-1. `docs/architecture.md`
-2. `docs/application-api-v1.md`
-3. `docs/ffi-v1.md`
-4. `docs/m8-migration.md`
+1. `docs/architecture/architecture.md`
+2. `docs/api/application-api-v1.md`
+3. `docs/api/ffi-v1.md`
+4. `docs/archive/m8-migration.md`
 5. 根 `Cargo.toml`
 6. 各 crate 的 `Cargo.toml` 与 `src/lib.rs`
 
@@ -705,7 +706,7 @@ FFI ABI 与 Cargo Workspace、Application API 和 CLI schema 独立。
 - Rust extern；
 - `handshaker_ffi.h`；
 - ABI 常量；
-- `docs/ffi-v1.md`；
+- `docs/api/ffi-v1.md`；
 - module map（若需要）；
 - C smoke；
 - Swift smoke；
@@ -1368,10 +1369,10 @@ C/Swift smoke 通过
 
 ```text
 README.md
-docs/architecture.md
-docs/application-api-v1.md
-docs/ffi-v1.md
-docs/m8-migration.md
+docs/architecture/architecture.md
+docs/api/application-api-v1.md
+docs/api/ffi-v1.md
+docs/archive/m8-migration.md
 ```
 
 修改协议时更新对应协议文档和验证状态。

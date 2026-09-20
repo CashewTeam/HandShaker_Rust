@@ -1,7 +1,7 @@
 //! USB AOA (Android Open Accessory) transport.
 //!
 //! The phone's Smartisan accessory presents a bulk byte stream that carries
-//! the exact same SSP framing as ADB/WiFi (docs/03 §3.1, verified against the
+//! the exact same SSP framing as ADB/WiFi (`docs/protocol/03-transports.md` §3.1, verified against the
 //! original 1.2.0 APK: `service/a.java` opens the accessory ParcelFileDescriptor
 //! and wraps it in FileInputStream/FileOutputStream). The host side mirrors the
 //! Mac client's `SFUSBDevice` (libusb handle + bulkIn/bulkOut endpoints).
@@ -11,7 +11,7 @@
 //! The Smartisan ROM keeps the phone in accessory mode by default
 //! (functions=accessory,ffs; PID 0x2d01 observed on OD103), so no
 //! ACCESSORY identification/START control transfer is needed for this
-//! milestone. See docs/23-m7-usb-aoa.md for the known limitations.
+//! milestone. See `docs/archive/23-m7-usb-aoa.md` for the known limitations.
 
 use std::io;
 use std::pin::Pin;
