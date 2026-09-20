@@ -1,0 +1,96 @@
+# Linux CI for HandShaker_Rust.
+#
+# Verifies the Linux backend, the stable C ABI, and a minimal native consumer.
+# Real-device acceptance remains opt-in and is not part of the hosted runner
+# job because GitHub-hosted runners do not provide ADB/AOA/Wi-Fi test devices.
+name: Linux CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            clang \
+            libusb-1.0-0-dev \
+            pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-cargo-${{ runner.arch }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            linux-cargo-${{ runner.arch }}-
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (all targets, all features, warnings as errors)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Workspace tests
+        # The fake ADB integration tests create executable scripts in separate
+        # temp directories. Keep the test process serial on Linux runners to
+        # avoid an intermittent ETXTBSY race while those scripts are created.
+        run: cargo test --workspace --all-features -- --test-threads=1
+
+      - name: Release build
+        run: cargo build --workspace --release
+
+      - name: FFI ABI check (Rust <-> header <-> snapshot)
+        run: bash scripts/generate-ffi-header.sh
+
+      - name: Build and stage Linux FFI artifacts
+        run: bash scripts/build-ffi-linux.sh
+
+      - name: C consumer smoke test
+        run: |
+          set -eu
+          clang -std=c11 -Wall -Wextra -Werror \
+            -I dist/linux \
+            scripts/ffi_smoke.c \
+            -L dist/linux -lhandshaker_ffi \
+            -Wl,-rpath,"$PWD/dist/linux" \
+            -o /tmp/handshaker-ffi-smoke
+          /tmp/handshaker-ffi-smoke
+
+      - name: Upload Linux FFI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: handshaker-linux-ffi-${{ github.sha }}
+          path: dist/linux/
+          if-no-files-found: error

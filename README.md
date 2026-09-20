@@ -8,6 +8,9 @@
   <a href="https://github.com/CashewTeam/HandShaker_Rust/actions/workflows/macos-ci.yml">
     <img src="https://github.com/CashewTeam/HandShaker_Rust/actions/workflows/macos-ci.yml/badge.svg" alt="macOS CI">
   </a>
+  <a href="https://github.com/CashewTeam/HandShaker_Rust/actions/workflows/linux-ci.yml">
+    <img src="https://github.com/CashewTeam/HandShaker_Rust/actions/workflows/linux-ci.yml/badge.svg" alt="Linux CI">
+  </a>
   <a href="https://github.com/CashewTeam/HandShaker_Rust/blob/main/Cargo.toml">
     <img src="https://img.shields.io/badge/version-0.7.5-blue" alt="Workspace version 0.7.5">
   </a>
@@ -22,7 +25,7 @@
   </a>
 </p>
 
-HandShaker Rust 是基于原版 HandShaker 的通信协议开发的跨平台 Rust 后端实现，目标是重写已经停止维护的 HandShaker，让 HandShaker 可以继续在 macOS Arm64 原生运行，并在后续支持 Linux 系统。
+HandShaker Rust 是基于原版 HandShaker 的通信协议开发的跨平台 Rust 后端实现，目标是重写已经停止维护的 HandShaker，让 HandShaker 可以继续在 macOS Arm64 原生运行，并使其原生支持 Linux 系统。
 
 ## 项目目标
 
