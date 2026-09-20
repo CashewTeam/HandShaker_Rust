@@ -60,74 +60,143 @@ trap 'rm -rf "$LOCAL_TMP"; [ "$KEEP" -eq 0 ] && adb -s "$SERIAL" shell rm -rf "$
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok() { echo "ok: $*"; }
 
-run() { # run <expect_exit> <args...>
-  local expect="$1"; shift
-  # set -u 下空数组展开会 unbound；带空串守卫展开。
-  "$BIN" --state-dir "$STATE_DIR" ${DEVICE_ARGS[@]+"${DEVICE_ARGS[@]}"} "$@"; local code=$?
-  [ "$code" -eq "$expect" ] || fail "exit=$code (期望 $expect): $*"
+run_batch_file() { # run_batch_file <input> <output> <stderr>
+  local input="$1" output="$2" error_output="$3"
+  "$BIN" --state-dir "$STATE_DIR" ${DEVICE_ARGS[@]+"${DEVICE_ARGS[@]}"} \
+    --output jsonl batch <"$input" >"$output" 2>"$error_output"
+  local code=$?
+  if [ "$code" -ne 0 ]; then
+    sed -n '1,80p' "$error_output" >&2
+    fail "batch exit=$code"
+  fi
+}
+
+validate_batch_output() { # validate_batch_output <output> <clipboard-marker> <commands...>
+  local output="$1" marker="$2"
+  shift 2
+  python3 - "$output" "$marker" "$@" <<'PY'
+import json
+import sys
+
+path, marker, *expected = sys.argv[1:]
+objects = []
+with open(path, encoding="utf-8") as handle:
+    for line in handle:
+        if line.strip():
+            objects.append(json.loads(line))
+
+actual = [item.get("command") for item in objects]
+if actual != expected:
+    raise SystemExit(f"batch command sequence mismatch: {actual!r} != {expected!r}")
+if any(not item.get("ok") for item in objects):
+    raise SystemExit(f"batch command reported failure: {objects!r}")
+
+def contains(value, needle):
+    if isinstance(value, str):
+        return value == needle
+    if isinstance(value, dict):
+        return any(contains(child, needle) for child in value.values())
+    if isinstance(value, list):
+        return any(contains(child, needle) for child in value)
+    return False
+
+push_pull_index = 0
+added = None
+for item in objects:
+    command = item["command"]
+    data = item.get("data")
+    if command in ("fs.push", "fs.pull"):
+        failures = data.get("failures") if isinstance(data, dict) else None
+        expected_failures = 1 if command == "fs.push" and push_pull_index == 0 else 0
+        if not isinstance(failures, list) or len(failures) != expected_failures:
+            raise SystemExit(
+                f"{command} failure count mismatch: {failures!r} != {expected_failures}"
+            )
+        push_pull_index += 1
+    elif command == "clipboard.get" and not contains(data, marker):
+        raise SystemExit("clipboard.get did not return the test marker")
+    elif command == "sync.plan":
+        if not isinstance(data, dict) or not isinstance(data.get("added"), list):
+            raise SystemExit(f"sync.plan has no added list: {data!r}")
+        added = len(data["added"])
+
+if "sync.plan" in expected and added is None:
+    raise SystemExit("batch output did not contain sync.plan")
+if added is not None:
+    print(f"added={added}")
+PY
 }
 
 echo "== 设备: $SERIAL =="
-echo "== 基础验收 =="
-
-run 0 device info
-run 0 device ping
-
-run 0 fs mkdir "$TEST_DIR"
-# 不存在的本地源必须失败（不能静默成功）。
-if "$BIN" --state-dir "$STATE_DIR" ${DEVICE_ARGS[@]+"${DEVICE_ARGS[@]}"} fs push \
-  "$LOCAL_TMP/nonexistent/never.txt" "$TEST_DIR/x.txt" > /dev/null 2>&1; then
-  fail "不存在的本地源不应成功"
-else
-  ok "不存在的本地源被拒绝"
-fi
-
+echo "== 基础验收（单连接 batch） =="
 echo "hello-phase-d-$$" > "$LOCAL_TMP/hello.txt"
-run 0 fs push "$LOCAL_TMP/hello.txt" -- "$TEST_DIR/hello.txt"
-run 0 fs pull "$TEST_DIR/hello.txt" -- "$LOCAL_TMP/pulled.txt"
-cmp -s "$LOCAL_TMP/hello.txt" "$LOCAL_TMP/pulled.txt" || fail "下载文件内容不一致"
-ok "push/pull 往返一致"
-
-run 0 fs mv "$TEST_DIR/hello.txt" "$TEST_DIR/renamed.txt"
-run 0 fs stat "$TEST_DIR/renamed.txt"
-
 dd if=/dev/urandom of="$LOCAL_TMP/rand.bin" bs=1024 count=64 2>/dev/null
-run 0 fs push "$LOCAL_TMP/rand.bin" -- "$TEST_DIR/rand.bin"
-run 0 fs pull --recursive "$TEST_DIR" -- "$LOCAL_TMP/tree/"
-cmp -s "$LOCAL_TMP/rand.bin" "$LOCAL_TMP/tree/rand.bin" || fail "递归下载内容不一致"
-ok "recursive pull 往返一致"
-
-run 0 clipboard set "phase-d-clipboard-$$"
-out="$("$BIN" --state-dir "$STATE_DIR" ${DEVICE_ARGS[@]+"${DEVICE_ARGS[@]}"} --output json clipboard get)"
-echo "$out" | grep -q "phase-d-clipboard-$$" || fail "剪贴板读回不一致"
-ok "clipboard 往返一致"
-
-run 0 media photo
-
-echo "== sync 验收（首次/增量/watch） =="
 SYNC_DIR="$LOCAL_TMP/sync"
 mkdir -p "$SYNC_DIR"
 SYNC_OUT="$TEST_DIR/sync-root"
-run 0 fs mkdir "$SYNC_OUT"
 
-# 首次 sync plan/run（参数与 CLI 一致；失败即退出）。
-# 注意：sync 只同步照片库（photo_sync），任意文件不会出现在计划里，
-# 所以这里用相机目录验证；若相机目录为空则跳过 sync 断言。
-plan_out="$("$BIN" --state-dir "$STATE_DIR" ${DEVICE_ARGS[@]+"${DEVICE_ARGS[@]}"} --output json sync plan --output-dir "$SYNC_DIR" --root /storage/emulated/0/DCIM/Camera)" \
-  || fail "sync plan 失败: $plan_out"
-added="$(echo "$plan_out" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['data']['added']))" 2>/dev/null || echo 0)"
+BATCH_INPUT="$LOCAL_TMP/base.batch"
+BATCH_OUTPUT="$LOCAL_TMP/base.jsonl"
+BATCH_ERROR="$LOCAL_TMP/base.err"
+MARKER="phase-d-clipboard-$$"
+printf '%s\n' \
+  "device info" \
+  "device ping" \
+  "fs mkdir $TEST_DIR" \
+  "fs push $LOCAL_TMP/nonexistent/never.txt -- $TEST_DIR/x.txt" \
+  "fs push $LOCAL_TMP/hello.txt -- $TEST_DIR/hello.txt" \
+  "fs pull $TEST_DIR/hello.txt -- $LOCAL_TMP/pulled.txt" \
+  "fs mv $TEST_DIR/hello.txt $TEST_DIR/renamed.txt" \
+  "fs stat $TEST_DIR/renamed.txt" \
+  "fs push $LOCAL_TMP/rand.bin -- $TEST_DIR/rand.bin" \
+  "fs pull --recursive $TEST_DIR -- $LOCAL_TMP/tree/" \
+  "clipboard set $MARKER" \
+  "clipboard get" \
+  "media photo" \
+  "fs mkdir $SYNC_OUT" \
+  "sync plan --output-dir $SYNC_DIR --root /storage/emulated/0/DCIM/Camera" \
+  "exit" > "$BATCH_INPUT"
+run_batch_file "$BATCH_INPUT" "$BATCH_OUTPUT" "$BATCH_ERROR"
+batch_summary="$(validate_batch_output "$BATCH_OUTPUT" "$MARKER" \
+  device.info device.ping fs.mkdir fs.push fs.push fs.pull fs.mv fs.stat \
+  fs.push fs.pull clipboard.set clipboard.get media.photo fs.mkdir sync.plan)" \
+  || fail "batch 验收失败"
+added="${batch_summary#added=}"
 echo "首次 plan added=$added"
+cmp -s "$LOCAL_TMP/hello.txt" "$LOCAL_TMP/pulled.txt" || fail "下载文件内容不一致"
+ok "push/pull 往返一致"
+cmp -s "$LOCAL_TMP/rand.bin" "$LOCAL_TMP/tree/rand.bin" || fail "递归下载内容不一致"
+ok "recursive pull 往返一致"
+ok "clipboard 往返一致"
+ok "media photo 正常"
+
+echo "== sync 验收（首次/增量/watch） =="
 if [ "$added" -gt 0 ]; then
-  run 0 sync run --yes --output-dir "$SYNC_DIR" --root /storage/emulated/0/DCIM/Camera
+  SYNC_RUN_INPUT="$LOCAL_TMP/sync-run.batch"
+  SYNC_RUN_OUTPUT="$LOCAL_TMP/sync-run.jsonl"
+  SYNC_RUN_ERROR="$LOCAL_TMP/sync-run.err"
+  printf '%s\n' \
+    "sync run --yes --output-dir $SYNC_DIR --root /storage/emulated/0/DCIM/Camera" \
+    "exit" > "$SYNC_RUN_INPUT"
+  run_batch_file "$SYNC_RUN_INPUT" "$SYNC_RUN_OUTPUT" "$SYNC_RUN_ERROR"
+  validate_batch_output "$SYNC_RUN_OUTPUT" "$MARKER" sync.run \
+    || fail "sync run batch 验收失败"
   # 手机端在 run 后仍处于 SYNCING 状态：新连接的 photo_sync 可能被拒或
   # 响应超时，等待其恢复后再做增量校验。
   sleep 3
-  plan2_out="$("$BIN" --state-dir "$STATE_DIR" ${DEVICE_ARGS[@]+"${DEVICE_ARGS[@]}"} --output json sync plan --output-dir "$SYNC_DIR" --root /storage/emulated/0/DCIM/Camera)" \
-    || fail "增量 sync plan 失败: $plan2_out"
-  echo "$plan2_out" | grep -q '"added":\[\]' || fail "增量 plan 应无新增: $plan2_out"
+  SYNC_VERIFY_INPUT="$LOCAL_TMP/sync-verify.batch"
+  SYNC_VERIFY_OUTPUT="$LOCAL_TMP/sync-verify.jsonl"
+  SYNC_VERIFY_ERROR="$LOCAL_TMP/sync-verify.err"
+  printf '%s\n' \
+    "sync plan --output-dir $SYNC_DIR --root /storage/emulated/0/DCIM/Camera" \
+    "sync status" \
+    "exit" > "$SYNC_VERIFY_INPUT"
+  run_batch_file "$SYNC_VERIFY_INPUT" "$SYNC_VERIFY_OUTPUT" "$SYNC_VERIFY_ERROR"
+  verify_summary="$(validate_batch_output "$SYNC_VERIFY_OUTPUT" "$MARKER" sync.plan sync.status)" \
+    || fail "增量 sync batch 验收失败"
+  verify_added="${verify_summary#added=}"
+  [ "$verify_added" -eq 0 ] || fail "增量 plan 应无新增，实际 $verify_added"
   ok "sync 首次+增量通过"
-  status_out="$("$BIN" --state-dir "$STATE_DIR" ${DEVICE_ARGS[@]+"${DEVICE_ARGS[@]}"} --output json sync status)"
-  echo "$status_out" | grep -q '"files":' || fail "sync status 输出异常: $status_out"
   ok "sync status 正常"
   # watch 生命周期:启动 + 订阅,等待其进入事件循环后 SIGINT 应干净退出。
   # 首次同步(含 SYNCING 重试)可能耗时数秒,给足时间再中断。
